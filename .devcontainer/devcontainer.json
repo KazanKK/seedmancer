@@ -1,0 +1,12 @@
+{
+  "name": "ReSeeder",
+  "dockerComposeFile": "docker-compose.yaml",
+  "workspaceFolder": "/workspace",
+  "service": "local-dev-env",
+  "customizations": {
+    "vscode": {
+      "extensions": []
+    }
+  },
+  "postCreateCommand": "bash .devcontainer/postCreateCommand.sh",
+}
