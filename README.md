@@ -1,6 +1,6 @@
 # DB-Reset CLI Tool
 
-A powerful CLI tool for managing database snapshots, schema extraction, and test data generation.
+A simple CLI tool for managing database seeding.
 
 ## Features
 

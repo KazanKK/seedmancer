@@ -464,3 +464,129 @@ func executeShellCommandWithOutput(command string) (string, error) {
 	return string(output), err
 }
 
+func (p *PostgresManager) ExportToCSV(outputDir string) error {
+	if p.DB == nil {
+		return errors.New("no database connection")
+	}
+
+	// Get list of tables
+	rows, err := p.DB.Query(`
+		SELECT table_name 
+		FROM information_schema.tables 
+		WHERE table_schema = 'public' 
+		AND table_type = 'BASE TABLE'
+	`)
+	if err != nil {
+		return fmt.Errorf("querying tables: %v", err)
+	}
+	defer rows.Close()
+
+	var tables []string
+	for rows.Next() {
+		var tableName string
+		if err := rows.Scan(&tableName); err != nil {
+			return fmt.Errorf("scanning table name: %v", err)
+		}
+		tables = append(tables, tableName)
+	}
+
+	// Export each table
+	for _, tableName := range tables {
+		if err := p.exportTableToCSV(tableName, outputDir); err != nil {
+			return fmt.Errorf("exporting table %s: %v", tableName, err)
+		}
+		p.log("Exported table: %s", tableName)
+	}
+
+	return nil
+}
+
+func (p *PostgresManager) exportTableToCSV(tableName, outputDir string) error {
+	// Create CSV file
+	csvPath := filepath.Join(outputDir, fmt.Sprintf("%s.csv", tableName))
+	file, err := os.Create(csvPath)
+	if err != nil {
+		return fmt.Errorf("creating CSV file: %v", err)
+	}
+	defer file.Close()
+
+	writer := csv.NewWriter(file)
+	defer writer.Flush()
+
+	// Get column names
+	rows, err := p.DB.Query(fmt.Sprintf(`
+		SELECT column_name 
+		FROM information_schema.columns 
+		WHERE table_schema = 'public' 
+		AND table_name = '%s' 
+		ORDER BY ordinal_position
+	`, tableName))
+	if err != nil {
+		return fmt.Errorf("querying columns: %v", err)
+	}
+	defer rows.Close()
+
+	var columns []string
+	for rows.Next() {
+		var colName string
+		if err := rows.Scan(&colName); err != nil {
+			return fmt.Errorf("scanning column name: %v", err)
+		}
+		columns = append(columns, colName)
+	}
+
+	// Write header
+	if err := writer.Write(columns); err != nil {
+		return fmt.Errorf("writing CSV header: %v", err)
+	}
+
+	// Query all data with quoted column names
+	quotedColumns := make([]string, len(columns))
+	for i, col := range columns {
+		quotedColumns[i] = pq.QuoteIdentifier(col)
+	}
+	
+	query := fmt.Sprintf("SELECT %s FROM %s", 
+		strings.Join(quotedColumns, ", "), 
+		pq.QuoteIdentifier(tableName))
+	
+	dataRows, err := p.DB.Query(query)
+	if err != nil {
+		return fmt.Errorf("querying data: %v", err)
+	}
+	defer dataRows.Close()
+
+	// Write data rows
+	values := make([]interface{}, len(columns))
+	valuePtrs := make([]interface{}, len(columns))
+	for i := range values {
+		valuePtrs[i] = &values[i]
+	}
+
+	for dataRows.Next() {
+		if err := dataRows.Scan(valuePtrs...); err != nil {
+			return fmt.Errorf("scanning row: %v", err)
+		}
+
+		row := make([]string, len(columns))
+		for i, val := range values {
+			if val == nil {
+				row[i] = "NULL"
+			} else {
+				switch v := val.(type) {
+				case []byte:
+					row[i] = string(v)
+				default:
+					row[i] = fmt.Sprintf("%v", v)
+				}
+			}
+		}
+
+		if err := writer.Write(row); err != nil {
+			return fmt.Errorf("writing CSV row: %v", err)
+		}
+	}
+
+	return nil
+}
+
