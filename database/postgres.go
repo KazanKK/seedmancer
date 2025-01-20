@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -426,7 +425,8 @@ func (p *PostgresManager) importCSV(tableName, csvPath string) error {
 	return nil
 }
 
-func (p *PostgresManager) readSchemaFromFile(filename string) (*Schema, error) {
+// ReadSchemaFromFile reads a schema from a JSON file
+func (p *PostgresManager) ReadSchemaFromFile(filename string) (*Schema, error) {
 	data, err := os.ReadFile(filename)
 	if err != nil {
 		return nil, err
@@ -440,29 +440,6 @@ func (p *PostgresManager) readSchemaFromFile(filename string) (*Schema, error) {
 	return &schema, nil
 }
 
-// Helper functions
-func getColumnNames(table Table) []string {
-	names := make([]string, len(table.Columns))
-	for i, col := range table.Columns {
-		names[i] = col.Name
-	}
-	return names
-}
-
-func isNullable(column Column) bool {
-	return column.Nullable
-}
-
-func executeShellCommand(command string) error {
-	cmd := exec.Command("sh", "-c", command)
-	return cmd.Run()
-}
-
-func executeShellCommandWithOutput(command string) (string, error) {
-	cmd := exec.Command("sh", "-c", command)
-	output, err := cmd.CombinedOutput()
-	return string(output), err
-}
 
 func (p *PostgresManager) ExportToCSV(outputDir string) error {
 	if p.DB == nil {
@@ -585,6 +562,65 @@ func (p *PostgresManager) exportTableToCSV(tableName, outputDir string) error {
 		if err := writer.Write(row); err != nil {
 			return fmt.Errorf("writing CSV row: %v", err)
 		}
+	}
+
+	return nil
+}
+
+func (p *PostgresManager) ExportSchema(outputFile string) error {
+	if p.DB == nil {
+		return errors.New("no database connection")
+	}
+
+	// Extract schema using existing method
+	schema, err := p.ExtractSchema()
+	if err != nil {
+		return fmt.Errorf("extracting schema: %v", err)
+	}
+
+	// Convert to JSON with pretty printing
+	jsonData, err := json.MarshalIndent(schema, "", "  ")
+	if err != nil {
+		return fmt.Errorf("converting schema to JSON: %v", err)
+	}
+
+	// Write to file
+	if err := os.WriteFile(outputFile, jsonData, 0644); err != nil {
+		return fmt.Errorf("writing schema to file: %v", err)
+	}
+
+	p.log("Schema exported to: %s", outputFile)
+	return nil
+}
+
+func (p *PostgresManager) GenerateFakeDataFromSchema(schema *Schema, outputDir string, rowCount int) error {
+	// Reset generated values for new run
+	generatedValues = make(map[string][]string)
+	idCounters = make(map[string]int)
+	uniqueValueSets = make(map[string]map[string]bool)
+
+	// First pass: Generate primary key data
+	for _, table := range schema.Tables {
+		for _, col := range table.Columns {
+			if col.IsPrimary {
+				key := fmt.Sprintf("%s.%s", table.Name, col.Name)
+				values := make([]string, rowCount)
+				for i := 0; i < rowCount; i++ {
+					values[i] = generatePrimaryKeyValue(col, table.Name)
+				}
+				valueMutex.Lock()
+				generatedValues[key] = values
+				valueMutex.Unlock()
+			}
+		}
+	}
+
+	// Second pass: Generate data for each table
+	for _, table := range schema.Tables {
+		if err := generateTableData(table, outputDir, rowCount); err != nil {
+			return fmt.Errorf("generating data for table %s: %v", table.Name, err)
+		}
+		p.log("Generated data for table: %s", table.Name)
 	}
 
 	return nil
