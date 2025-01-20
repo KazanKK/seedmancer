@@ -1,98 +1,136 @@
 # ReSeeder: Database Seed Tool
 
-A powerful CLI tool for managing database seeding and testing data. Perfect for development and testing environments.
+A high-performance CLI tool for database seeding and testing data management.
 
 ## ✨ Features
 
-- **Database Snapshots**: Create and restore database snapshots
-- **Schema Extraction**: Automatically extract database schema information
-- **Fake Data Generation**: Generate realistic test data based on schema
-- **CSV Import/Export**: Import and export data using CSV files
-- **Multiple Database Support**: Currently supports PostgreSQL (MySQL coming soon)
-- **Smart Type Detection**: Automatically detects and handles various data types
-- **Referential Integrity**: Maintains foreign key relationships in generated data
+- **Database Operations**
+  - Create and restore database snapshots
+  - Schema extraction and validation
+  - Transaction-safe operations
+  - Bulk data operations for performance
+- **Data Management**
+  - Smart type detection and handling
+  - Automated fake data generation
+  - CSV import/export with streaming
+  - Referential integrity maintenance
+- **Multiple Database Support**
+  - PostgreSQL (primary)
+  - MySQL (coming soon)
 
-## 🚀 Installation
+## 🚀 Quick Start
 
-### Download Binary
+### Installation Options
 
-Download the latest release for your platform from the [releases page](https://github.com/reseeder/reseeder/releases).
-
-### Build from Source
-
+1. Using `go install` (recommended)
 ```bash
-git clone https://github.com/reseeder/reseeder
-cd reseeder
-go build
+go install github.com/reseeder/reseeder@latest
 ```
 
-## 📖 Usage
-
-### Generate Fake Data
-
+2. Using Docker
 ```bash
-reseeder generate-fake-data \
-  --output-dir ./data \
-  --rows 100 \
+docker pull reseeder/reseeder:latest
+docker run reseeder/reseeder:latest --help
+```
+
+3. Using Binary Releases
+```bash
+# Linux (x64)
+curl -L https://github.com/reseeder/reseeder/releases/latest/download/reseeder-linux-amd64 -o reseeder
+chmod +x reseeder
+sudo mv reseeder /usr/local/bin/
+
+# macOS (x64)
+curl -L https://github.com/reseeder/reseeder/releases/latest/download/reseeder-darwin-amd64 -o reseeder
+chmod +x reseeder
+sudo mv reseeder /usr/local/bin/
+
+# Windows (x64)
+# Download from https://github.com/reseeder/reseeder/releases/latest
+# Add to PATH
+```
+
+4. Using Homebrew (macOS and Linux)
+```bash
+brew tap reseeder/reseeder
+brew install reseeder
+```
+
+### Basic Usage
+reseeder seed --config ./seed-config.yaml
+```
+
+## 📖 Usage Examples
+
+### Generate Test Data
+```bash
+reseeder generate \
+  --output ./data \
+  --rows 1000 \
+  --db postgres \
+  --dsn "postgres://user:pass@localhost:5432/dbname" \
+  --concurrent 4
+```
+
+### Backup & Restore
+```bash
+# Export database to CSV
+reseeder export \
+  --output ./backup \
   --db postgres \
   --dsn "postgres://user:pass@localhost:5432/dbname"
-```
 
-### Restore from CSV
-
-```bash
-reseeder restore-from-csv \
+# Restore from CSV
+reseeder restore \
+  --input ./backup \
   --db postgres \
   --dsn "postgres://user:pass@localhost:5432/dbname" \
-  --csv-dir ./data \
-  --debug
-```
-
-### Export to CSV
-
-```bash
-reseeder export-to-csv \
-  --output-dir ./backup \
-  --db postgres \
-  --dsn "postgres://user:pass@localhost:5432/dbname" \
-  --debug
+  --batch-size 5000
 ```
 
 ## 🔧 Development
 
-### Prerequisites
+### Requirements
+- Go 1.20+
+- Docker
+- Make
 
-- Go 1.16 or higher
-- Docker (for running tests)
-- PostgreSQL (for local development)
-
-### Running Tests
-
+### Local Setup
 ```bash
-# Run integration tests
-go test ./tests -v
-
-# Run unit tests
-go test ./... -v
+make setup    # Install dependencies
+make test     # Run tests
+make lint     # Run linters
+make security # Run security checks
 ```
 
-## 🤝 Contributing
+### CI/CD
+We use GitHub Actions for:
+- Automated testing
+- Code quality checks
+- Security scanning
+- Release automation
+- Container builds
 
-We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) for details.
+## 📚 Documentation
+
+- [Full Documentation](https://docs.reseeder.dev)
+- [API Reference](https://docs.reseeder.dev/api)
+- [Configuration Guide](https://docs.reseeder.dev/config)
+- [Contributing Guide](CONTRIBUTING.md)
+
+## 🔐 Security
+
+Security reports should be sent to security@reseeder.dev or via our [Security Policy](SECURITY.md).
 
 ## 📄 License
 
-MIT License - see the [LICENSE](LICENSE) file for details.
+MIT License - see [LICENSE](LICENSE)
 
 ## 🆘 Support
 
 - Documentation: [docs.reseeder.dev](https://docs.reseeder.dev)
 - Issues: [GitHub Issues](https://github.com/reseeder/reseeder/issues)
 - Community: [Discord](https://discord.gg/reseeder)
-
-## 🔐 Security
-
-Found a security issue? Please report it privately via our [Security Policy](SECURITY.md).
 
 ## ✨ Features in Detail
 

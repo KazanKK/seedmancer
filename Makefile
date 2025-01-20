@@ -1,23 +1,34 @@
-VERSION := 1.0.0
-BINARY_NAME := reseeder
-PLATFORMS := linux darwin windows
+# Build variables
+BINARY_NAME=reseeder
+VERSION=$(shell git describe --tags --always --dirty)
+BUILD_TIME=$(shell date -u '+%Y-%m-%d_%H:%M:%S')
+LDFLAGS=-ldflags "-X main.Version=${VERSION} -X main.BuildTime=${BUILD_TIME}"
 
-.PHONY: all clean build-all docs
+# Supported platforms
+PLATFORMS=linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64
 
-all: clean build-all
+.PHONY: all build clean test lint security build-all
 
-clean:
-	rm -rf dist/
+all: clean build test lint security
+
+build:
+	go build ${LDFLAGS} -o bin/${BINARY_NAME}
 
 build-all:
-	mkdir -p dist
-	$(foreach PLATFORM,$(PLATFORMS),\
-		GOOS=$(PLATFORM) GOARCH=amd64 go build -ldflags="-X 'main.Version=$(VERSION)'" -o dist/$(BINARY_NAME)_$(VERSION)_$(PLATFORM)_amd64 ;\
-		if [ "$(PLATFORM)" = "windows" ]; then \
-			mv dist/$(BINARY_NAME)_$(VERSION)_$(PLATFORM)_amd64 dist/$(BINARY_NAME)_$(VERSION)_$(PLATFORM)_amd64.exe; \
-		fi; \
+	$(foreach platform,$(PLATFORMS),\
+		GOOS=$(word 1,$(subst /, ,$(platform))) \
+		GOARCH=$(word 2,$(subst /, ,$(platform))) \
+		go build ${LDFLAGS} -o bin/${BINARY_NAME}-$(word 1,$(subst /, ,$(platform)))-$(word 2,$(subst /, ,$(platform)))$(if $(findstring windows,$(platform)),.exe,) ;\
 	)
-	cd dist && \
-	$(foreach PLATFORM,$(PLATFORMS),\
-		tar -czf $(BINARY_NAME)_$(VERSION)_$(PLATFORM)_amd64.tar.gz $(BINARY_NAME)_$(VERSION)_$(PLATFORM)_amd64* ;\
-	) 
+
+clean:
+	rm -rf bin/
+
+test:
+	go test -v -race ./...
+
+lint:
+	golangci-lint run
+
+security:
+	gosec ./... 
