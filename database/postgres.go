@@ -10,7 +10,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/lib/pq"
 	_ "github.com/lib/pq"
@@ -21,79 +23,22 @@ type PostgresManager struct {
 	Debug bool
 }
 
+func (p *PostgresManager) SetDebug(debug bool) {
+	p.Debug = debug
+}
+
+func (p *PostgresManager) log(format string, args ...interface{}) {
+	if p.Debug {
+		fmt.Printf(format+"\n", args...)
+	}
+}
+
 func (p *PostgresManager) ConnectWithDSN(dsn string) error {
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		return err
 	}
 	p.DB = db
-	return nil
-}
-
-func (p *PostgresManager) CreateSnapshot(snapshotName string) error {
-	if p.DB == nil {
-		return errors.New("no database connection")
-	}
-
-	// Get schema
-	schema, err := p.ExtractSchema()
-	if err != nil {
-		return err
-	}
-
-	// Save schema
-	if err := p.SaveSchemaToFile(schema, "schema.json"); err != nil {
-		return err
-	}
-
-	// Export each table to CSV
-	for _, table := range schema.Tables {
-		query := fmt.Sprintf(`COPY "%s" TO '%s.csv' WITH CSV HEADER`, table.Name, snapshotName)
-		if _, err := p.DB.Exec(query); err != nil {
-			return fmt.Errorf("exporting table %s: %v", table.Name, err)
-		}
-	}
-
-	return nil
-}
-
-func (p *PostgresManager) RestoreSnapshot(snapshotName string) error {
-	if p.DB == nil {
-		return errors.New("no database connection")
-	}
-
-	// Drop and recreate schema
-	if _, err := p.DB.Exec(`DROP SCHEMA public CASCADE; CREATE SCHEMA public;`); err != nil {
-		return fmt.Errorf("failed to reset schema: %v", err)
-	}
-
-	// Read schema.json
-	schema, err := p.readSchemaFromFile("schema.json")
-	if err != nil {
-		return err
-	}
-
-	// Create tables
-	for _, table := range schema.Tables {
-		createSQL := generateCreateTableSQL(table)
-		statements := strings.Split(createSQL, ";")
-		for _, stmt := range statements {
-			if stmt = strings.TrimSpace(stmt); stmt != "" {
-				if _, err := p.DB.Exec(stmt + ";"); err != nil {
-					return fmt.Errorf("creating table %s: %v", table.Name, err)
-				}
-			}
-		}
-	}
-
-	// Import data
-	for _, table := range schema.Tables {
-		query := fmt.Sprintf(`COPY "%s" FROM '%s.csv' WITH CSV HEADER`, table.Name, snapshotName)
-		if _, err := p.DB.Exec(query); err != nil {
-			return fmt.Errorf("importing table %s: %v", table.Name, err)
-		}
-	}
-
 	return nil
 }
 
@@ -147,16 +92,33 @@ func (p *PostgresManager) ExtractSchema() (*Schema, error) {
 		SELECT 
 			t.table_name,
 			c.column_name,
+			c.data_type,
 			CASE 
+				WHEN c.data_type LIKE '%char%' OR c.data_type = 'text' THEN 'string'
+				WHEN c.data_type LIKE '%int%' OR c.data_type = 'numeric' THEN 'number'
+				WHEN c.data_type LIKE '%timestamp%' OR c.data_type = 'date' THEN 'datetime'
+				WHEN c.data_type = 'boolean' THEN 'boolean'
+				WHEN c.data_type = 'jsonb' OR c.data_type = 'json' THEN 'json'
 				WHEN EXISTS (
 					SELECT 1 FROM pg_type pt
 					JOIN pg_enum e ON pt.oid = e.enumtypid
 					WHERE pt.typname = c.udt_name
-				) THEN 'USER-DEFINED'
-				ELSE c.data_type
-			END as data_type,
+				) THEN 'enum'
+				ELSE 'string'
+			END as system_type,
 			c.is_nullable,
-			c.column_default,
+			CASE 
+				WHEN c.column_default LIKE 'nextval%' THEN c.column_default
+				WHEN c.column_default = 'CURRENT_TIMESTAMP' THEN 'CURRENT_TIMESTAMP'
+				WHEN c.column_default LIKE '''%''::timestamp%' THEN 
+					regexp_replace(c.column_default, '''(.+)''.*', '\1')
+				WHEN c.column_default LIKE 'true' OR c.column_default LIKE 'false' THEN 
+					c.column_default
+				WHEN c.column_default ~ '^\d+$' THEN 
+					c.column_default
+				ELSE 
+					regexp_replace(c.column_default, '''(.+)''.*', '\1')
+			END as column_default,
 			EXISTS (
 				SELECT 1 FROM pk_info pk 
 				WHERE pk.table_name = t.table_name 
@@ -193,14 +155,26 @@ func (p *PostgresManager) ExtractSchema() (*Schema, error) {
 	var currentColumns []Column
 
 	for rows.Next() {
-		var tableName, columnName, dataType, isNullable string
+		var tableName, columnName, dataType, systemType, isNullable string
 		var columnDefault sql.NullString
 		var isPrimary, isUnique bool
 		var foreignTable, foreignColumn sql.NullString
 		var enumValuesStr string
 
-		if err := rows.Scan(&tableName, &columnName, &dataType, &isNullable, &columnDefault, 
-			&isPrimary, &isUnique, &foreignTable, &foreignColumn, &enumValuesStr); err != nil {
+		err := rows.Scan(
+			&tableName,
+			&columnName,
+			&dataType,
+			&systemType,
+			&isNullable,
+			&columnDefault,
+			&isPrimary,
+			&isUnique,
+			&foreignTable,
+			&foreignColumn,
+			&enumValuesStr,
+		)
+		if err != nil {
 			return nil, err
 		}
 
@@ -208,6 +182,28 @@ func (p *PostgresManager) ExtractSchema() (*Schema, error) {
 		var enumValues []string
 		if enumValuesStr != "" {
 			enumValues = strings.Split(enumValuesStr, ",")
+		}
+
+		column := Column{
+			Name:       columnName,
+			Type:       dataType,
+			SystemType: systemType,
+			Nullable:   isNullable == "YES",
+			IsPrimary:  isPrimary,
+			IsUnique:   isUnique,
+			Values:     enumValues,
+		}
+
+		// Only set Default if it has a value
+		if columnDefault.Valid {
+			column.Default = columnDefault.String
+		}
+
+		if foreignTable.Valid && foreignColumn.Valid {
+			column.ForeignKey = &ForeignKey{
+				Table:  foreignTable.String,
+				Column: foreignColumn.String,
+			}
 		}
 
 		if currentTable != tableName {
@@ -221,32 +217,10 @@ func (p *PostgresManager) ExtractSchema() (*Schema, error) {
 			currentColumns = []Column{}
 		}
 
-		var foreignKey *ForeignKey
-		if foreignTable.Valid && foreignColumn.Valid {
-			foreignKey = &ForeignKey{
-				Table:  foreignTable.String,
-				Column: foreignColumn.String,
-			}
-		}
-
-		column := Column{
-			Name:       columnName,
-			Type:       dataType,
-			Nullable:   isNullable == "YES",
-			IsPrimary:  isPrimary,
-			IsUnique:   isUnique,
-			ForeignKey: foreignKey,
-			Values:     enumValues,
-		}
-
-		// Only set Default if it has a value
-		if columnDefault.Valid {
-			column.Default = columnDefault.String
-		}
-
 		currentColumns = append(currentColumns, column)
 	}
 
+	// Add the last table
 	if currentTable != "" {
 		schema.Tables = append(schema.Tables, Table{
 			Name:    currentTable,
@@ -255,14 +229,6 @@ func (p *PostgresManager) ExtractSchema() (*Schema, error) {
 	}
 
 	return schema, nil
-}
-
-func (p *PostgresManager) SaveSchemaToFile(schema *Schema, filename string) error {
-	data, err := json.MarshalIndent(schema, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(filename, data, 0644)
 }
 
 func (p *PostgresManager) RestoreFromCSV(directory string) error {
@@ -276,197 +242,114 @@ func (p *PostgresManager) RestoreFromCSV(directory string) error {
 	}
 	fmt.Println("Dropped and recreated public schema")
 
-	// Read schema.json
-	schema, err := p.readSchemaFromFile("schema.json")
+	// Get list of CSV files in directory
+	files, err := os.ReadDir(directory)
 	if err != nil {
-		return fmt.Errorf("reading schema.json: %v", err)
+		return fmt.Errorf("reading directory: %v", err)
 	}
 
-	// Sort tables based on dependencies
-	sortedTables := sortTablesByDependencies(schema.Tables)
+	// First pass: Create tables based on CSV headers
+	for _, file := range files {
+		if !strings.HasSuffix(file.Name(), ".csv") {
+			continue
+		}
 
-	// Create sequences first
-	for _, table := range sortedTables {
-		for _, col := range table.Columns {
-			if col.Default != nil && strings.Contains(fmt.Sprintf("%v", col.Default), "nextval") {
-				seqName := strings.Trim(strings.Split(fmt.Sprintf("%v", col.Default), "'")[1], "()")
-				if _, err := p.DB.Exec(fmt.Sprintf("CREATE SEQUENCE IF NOT EXISTS %s;", seqName)); err != nil {
-					return fmt.Errorf("failed to create sequence %s: %v", seqName, err)
-				}
+		tableName := strings.TrimSuffix(file.Name(), ".csv")
+		csvPath := filepath.Join(directory, file.Name())
+
+		// Open and read CSV header
+		csvFile, err := os.Open(csvPath)
+		if err != nil {
+			return fmt.Errorf("opening CSV file %s: %v", file.Name(), err)
+		}
+
+		reader := csv.NewReader(csvFile)
+		header, err := reader.Read()
+		if err != nil {
+			csvFile.Close()
+			return fmt.Errorf("reading CSV header from %s: %v", file.Name(), err)
+		}
+
+		// Read first data row to infer types
+		firstRow, err := reader.Read()
+		if err != nil && err != io.EOF {
+			csvFile.Close()
+			return fmt.Errorf("reading first data row from %s: %v", file.Name(), err)
+		}
+		csvFile.Close()
+
+		// Generate CREATE TABLE statement
+		columns := make([]string, len(header))
+		for i, colName := range header {
+			colType := "text" // default type
+			if firstRow != nil && i < len(firstRow) {
+				// Infer column type from data
+				colType = inferColumnType(firstRow[i])
 			}
+			columns[i] = fmt.Sprintf(`"%s" %s`, colName, colType)
 		}
+
+		createSQL := fmt.Sprintf(`CREATE TABLE "%s" (%s)`,
+			tableName,
+			strings.Join(columns, ", "))
+
+		if _, err := p.DB.Exec(createSQL); err != nil {
+			return fmt.Errorf("creating table %s: %v", tableName, err)
+		}
+		p.log("Created table %s", tableName)
 	}
 
-	// Create tables in sorted order
-	for _, table := range sortedTables {
-		createSQL := generateCreateTableSQL(table)
-		p.log("Creating table %s with SQL:\n%s", table.Name, createSQL)
-		
-		statements := strings.Split(createSQL, ";")
-		for _, stmt := range statements {
-			if stmt = strings.TrimSpace(stmt); stmt != "" {
-				if _, err := p.DB.Exec(stmt + ";"); err != nil {
-					return fmt.Errorf("executing SQL for table %s: %v\nSQL: %s", table.Name, err, stmt)
-				}
-			}
+	// Second pass: Import data
+	for _, file := range files {
+		if !strings.HasSuffix(file.Name(), ".csv") {
+			continue
 		}
 
-		if !p.Debug {
-			fmt.Printf("Created table: %s\n", table.Name)
-		}
-	}
+		tableName := strings.TrimSuffix(file.Name(), ".csv")
+		csvPath := filepath.Join(directory, file.Name())
 
-	// Import data in sorted order
-	for _, table := range sortedTables {
-		csvPath := filepath.Join(directory, fmt.Sprintf("%s.csv", strings.ToLower(table.Name)))
-		if err := p.importCSV(table.Name, csvPath); err != nil {
-			return fmt.Errorf("importing data for table %s: %v", table.Name, err)
+		if err := p.importCSV(tableName, csvPath); err != nil {
+			return fmt.Errorf("importing data for table %s: %v", tableName, err)
 		}
-		if !p.Debug {
-			fmt.Printf("Imported data for table: %s\n", table.Name)
-		}
+		p.log("Imported data for table %s", tableName)
 	}
 
 	return nil
 }
 
-// sortTablesByDependencies sorts tables so that referenced tables come before tables that reference them
-func sortTablesByDependencies(tables []Table) []Table {
-	// Create dependency graph
-	graph := make(map[string][]string)
-	inDegree := make(map[string]int)
-	tableMap := make(map[string]Table)
-
-	// Initialize
-	for _, table := range tables {
-		graph[table.Name] = []string{}
-		inDegree[table.Name] = 0
-		tableMap[table.Name] = table
+// inferColumnType attempts to determine the PostgreSQL type from a string value
+func inferColumnType(value string) string {
+	if value == "" {
+		return "text"
 	}
 
-	// Build dependency graph
-	for _, table := range tables {
-		for _, col := range table.Columns {
-			if col.ForeignKey != nil {
-				graph[table.Name] = append(graph[table.Name], col.ForeignKey.Table)
-				inDegree[col.ForeignKey.Table]++
-			}
-		}
+	// Try to parse as integer
+	if _, err := strconv.ParseInt(value, 10, 64); err == nil {
+		return "bigint"
 	}
 
-	// Topological sort using Kahn's algorithm
-	var sorted []Table
-	var queue []string
-
-	// Add all nodes with no dependencies to queue
-	for tableName := range graph {
-		if inDegree[tableName] == 0 {
-			queue = append(queue, tableName)
-		}
+	// Try to parse as float
+	if _, err := strconv.ParseFloat(value, 64); err == nil {
+		return "double precision"
 	}
 
-	// Process queue
-	for len(queue) > 0 {
-		tableName := queue[0]
-		queue = queue[1:]
-		sorted = append(sorted, tableMap[tableName])
-
-		// Update dependencies
-		for _, dep := range graph[tableName] {
-			inDegree[dep]--
-			if inDegree[dep] == 0 {
-				queue = append(queue, dep)
-			}
-		}
+	// Try to parse as boolean
+	if value == "true" || value == "false" {
+		return "boolean"
 	}
 
-	// Reverse the order since we want referenced tables first
-	for i := 0; i < len(sorted)/2; i++ {
-		j := len(sorted) - 1 - i
-		sorted[i], sorted[j] = sorted[j], sorted[i]
+	// Try to parse as timestamp
+	if _, err := time.Parse(time.RFC3339, value); err == nil {
+		return "timestamp with time zone"
 	}
 
-	return sorted
-}
-
-
-func generateCreateTableSQL(table Table) string {
-	var columns []string
-	var primaryKeys []string
-
-	// Quote the table name to handle reserved keywords
-	quotedTableName := fmt.Sprintf(`"%s"`, table.Name)
-
-	for _, col := range table.Columns {
-		colDef := fmt.Sprintf(`"%s"`, col.Name)  // Quote column names
-		
-		// Handle enum types
-		if strings.Contains(strings.ToLower(col.Type), "user-defined") {
-			colDef += " text" // Convert enum to text for simplicity
-		} else {
-			colDef += " " + col.Type
-		}
-
-		if !col.Nullable {
-			colDef += " NOT NULL"
-		}
-		if col.Default != nil {
-			defaultVal := fmt.Sprintf("%v", col.Default)
-			if defaultVal == "CURRENT_TIMESTAMP" {
-				colDef += " DEFAULT CURRENT_TIMESTAMP"
-			} else if defaultVal == "" && col.Nullable {
-				// Skip empty default for nullable columns
-				continue
-			} else if strings.Contains(defaultVal, "nextval") {
-				colDef += fmt.Sprintf(" DEFAULT %s", defaultVal)
-			} else if !strings.Contains(strings.ToLower(col.Type), "int") &&
-					  !strings.Contains(strings.ToLower(col.Type), "bool") {
-				colDef += fmt.Sprintf(" DEFAULT '%s'", defaultVal)
-			} else {
-				colDef += fmt.Sprintf(" DEFAULT %v", defaultVal)
-			}
-		}
-
-		columns = append(columns, colDef)
-
-		if col.IsPrimary {
-			primaryKeys = append(primaryKeys, fmt.Sprintf(`"%s"`, col.Name))
-		}
+	// Try to parse as date
+	if _, err := time.Parse("2006-01-02", value); err == nil {
+		return "date"
 	}
 
-	// Add PRIMARY KEY constraint as a separate ALTER TABLE statement
-	createSQL := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (\n  %s\n);",
-		quotedTableName,
-		strings.Join(columns, ",\n  "))
-
-	if len(primaryKeys) > 0 {
-		createSQL += fmt.Sprintf("\nALTER TABLE %s ADD PRIMARY KEY (%s);",
-			quotedTableName,
-			strings.Join(primaryKeys, ", "))
-	}
-
-	return createSQL
-}
-
-func executeShellCommand(command string) error {
-	cmd := exec.Command("sh", "-c", command)
-	return cmd.Run()
-}
-
-func executeShellCommandWithOutput(command string) (string, error) {
-	cmd := exec.Command("sh", "-c", command)
-	output, err := cmd.CombinedOutput()
-	return string(output), err
-}
-
-func (p *PostgresManager) log(format string, args ...interface{}) {
-	if p.Debug {
-		fmt.Printf(format+"\n", args...)
-	}
-}
-
-func (p *PostgresManager) SetDebug(debug bool) {
-	p.Debug = debug
+	// Default to text
+	return "text"
 }
 
 func (p *PostgresManager) importCSV(tableName, csvPath string) error {
@@ -486,45 +369,61 @@ func (p *PostgresManager) importCSV(tableName, csvPath string) error {
 	reader := csv.NewReader(file)
 	header, err := reader.Read()
 	if err != nil {
-		return err
+		return fmt.Errorf("reading CSV header: %v", err)
 	}
 
-	// Create the copy statement
+	// Use header for column names in COPY statement
 	stmt, err := tx.Prepare(pq.CopyIn(tableName, header...))
 	if err != nil {
-		return err
+		return fmt.Errorf("preparing COPY statement: %v", err)
 	}
 	defer stmt.Close()
 
-	// Copy data
+	// Read and process CSV data
 	for {
 		record, err := reader.Read()
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
-			return err
+			return fmt.Errorf("reading CSV record: %v", err)
 		}
 
+		// Convert empty strings and "NULL" strings to nil
 		values := make([]interface{}, len(record))
 		for i, v := range record {
-			if v == "NULL" {
+			switch v {
+			case "", "NULL", "null":
 				values[i] = nil
-			} else {
-				values[i] = v
+			default:
+				// Try to convert numeric strings to appropriate types
+				if v, err := strconv.ParseInt(v, 10, 64); err == nil {
+					values[i] = v
+					continue
+				}
+				if v, err := strconv.ParseFloat(v, 64); err == nil {
+					values[i] = v
+					continue
+				}
+				// If not numeric, keep as string
+				values[i] = record[i]
 			}
 		}
 
 		if _, err := stmt.Exec(values...); err != nil {
-			return err
+			return fmt.Errorf("executing COPY for table %s: %v", tableName, err)
 		}
 	}
 
 	if err := stmt.Close(); err != nil {
-		return err
+		return fmt.Errorf("closing COPY statement: %v", err)
 	}
 
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("committing transaction: %v", err)
+	}
+
+	return nil
 }
 
 func (p *PostgresManager) readSchemaFromFile(filename string) (*Schema, error) {
@@ -539,5 +438,29 @@ func (p *PostgresManager) readSchemaFromFile(filename string) (*Schema, error) {
 	}
 	
 	return &schema, nil
+}
+
+// Helper functions
+func getColumnNames(table Table) []string {
+	names := make([]string, len(table.Columns))
+	for i, col := range table.Columns {
+		names[i] = col.Name
+	}
+	return names
+}
+
+func isNullable(column Column) bool {
+	return column.Nullable
+}
+
+func executeShellCommand(command string) error {
+	cmd := exec.Command("sh", "-c", command)
+	return cmd.Run()
+}
+
+func executeShellCommandWithOutput(command string) (string, error) {
+	cmd := exec.Command("sh", "-c", command)
+	output, err := cmd.CombinedOutput()
+	return string(output), err
 }
 

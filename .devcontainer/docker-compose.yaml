@@ -13,6 +13,21 @@ services:
       - .env
     command: tail -F anything
     network_mode: "host"
+    depends_on:
+      - postgres
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    ports:
+      - "54322:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
 volumes:
   vscode_extension: null
   bashhistory: null
+  postgres_data: null

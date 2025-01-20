@@ -39,21 +39,18 @@ func randomFloat(min, max float64, precision int) float64 {
 	return math.Round(val*factor) / factor
 }
 
-func GenerateFakeData(schemaPath string, outputDir string, rowCount int) error {
-	// Read schema file
-	schemaFile, err := os.ReadFile(schemaPath)
+func (p *PostgresManager) GenerateFakeData(outputDir string, rowCount int) error {
+	// Extract schema first
+	schema, err := p.ExtractSchema()
 	if err != nil {
-		return err
-	}
-
-	var schema Schema
-	if err := json.Unmarshal(schemaFile, &schema); err != nil {
-		return err
+		return fmt.Errorf("failed to extract schema: %v", err)
 	}
 
 	// Reset generated values for new run
 	generatedValues = make(map[string][]string)
-	
+	idCounters = make(map[string]int)
+	uniqueValueSets = make(map[string]map[string]bool)
+
 	// First pass: Generate primary key data
 	for _, table := range schema.Tables {
 		for _, col := range table.Columns {
@@ -70,10 +67,10 @@ func GenerateFakeData(schemaPath string, outputDir string, rowCount int) error {
 		}
 	}
 
-	// Second pass: Generate all data with proper references
+	// Second pass: Generate data for each table
 	for _, table := range schema.Tables {
 		if err := generateTableData(table, outputDir, rowCount); err != nil {
-			return err
+			return fmt.Errorf("generating data for table %s: %v", table.Name, err)
 		}
 	}
 
@@ -84,7 +81,7 @@ func generateTableData(table Table, outputDir string, rowCount int) error {
 	filename := filepath.Join(outputDir, fmt.Sprintf("%s.csv", table.Name))
 	file, err := os.Create(filename)
 	if err != nil {
-		return err
+		return fmt.Errorf("creating CSV file: %v", err)
 	}
 	defer file.Close()
 
@@ -97,18 +94,34 @@ func generateTableData(table Table, outputDir string, rowCount int) error {
 		headers[i] = col.Name
 	}
 	if err := writer.Write(headers); err != nil {
-		return err
+		return fmt.Errorf("writing CSV header: %v", err)
 	}
 
 	// Generate rows
 	for i := 0; i < rowCount; i++ {
 		row := make([]string, len(table.Columns))
 		for j, col := range table.Columns {
+			// Handle foreign keys first
+			if col.ForeignKey != nil {
+				key := fmt.Sprintf("%s.%s", col.ForeignKey.Table, col.ForeignKey.Column)
+				valueMutex.RLock()
+				values := generatedValues[key]
+				valueMutex.RUnlock()
+				if len(values) > 0 {
+					row[j] = values[i%len(values)]
+					continue
+				}
+			}
+
+			// Generate value based on column type
 			value := generateFakeValue(col, i)
+			if col.IsPrimary || col.IsUnique {
+				value = generateUniqueValue(col, i)
+			}
 			row[j] = value
 		}
 		if err := writer.Write(row); err != nil {
-			return err
+			return fmt.Errorf("writing CSV row: %v", err)
 		}
 	}
 
@@ -116,64 +129,65 @@ func generateTableData(table Table, outputDir string, rowCount int) error {
 }
 
 func generateFakeValue(col Column, rowIndex int) string {
-	// Handle foreign keys first
-	if col.ForeignKey != nil {
-		key := fmt.Sprintf("%s.%s", col.ForeignKey.Table, col.ForeignKey.Column)
-		valueMutex.RLock()
-		values := generatedValues[key]
-		valueMutex.RUnlock()
-		if len(values) > 0 {
-			return values[rowIndex%len(values)]
-		}
-	}
-
-	// Handle sequence types (like serial/bigserial)
-	if strings.Contains(strings.ToLower(col.Type), "serial") ||
-	   (col.Default != nil && strings.Contains(strings.ToLower(fmt.Sprintf("%v", col.Default)), "nextval")) {
-		return fmt.Sprintf("%d", rowIndex+1)
-	}
-
-	// Handle primary keys and unique constraints
-	if col.IsPrimary || col.IsUnique {
-		return generateUniqueValue(col, rowIndex)
-	}
-
-	// Handle data types
-	switch {
-	case col.Type == "USER-DEFINED" && len(col.Values) > 0:
-		return col.Values[rowIndex%len(col.Values)]
-
-	case strings.Contains(col.Type, "timestamp"):
-		return time.Now().Add(-time.Duration(rowIndex) * time.Hour).Format("2006-01-02 15:04:05")
-
-	case col.Type == "boolean" || col.Type == "bool":
-		return fmt.Sprintf("%v", rowIndex%2 == 0)
-
-	case col.Type == "jsonb" || col.Type == "json":
-		return fmt.Sprintf(`{"id": %d, "value": "data_%d"}`, rowIndex+1, rowIndex+1)
-
-	case strings.Contains(col.Type, "int"):
-		if col.Default != nil {
-			return fmt.Sprintf("%v", col.Default)
-		}
-		return fmt.Sprintf("%d", rowIndex+1)
-
-	case strings.Contains(col.Type, "text") || strings.Contains(col.Type, "char"):
-		return fmt.Sprintf("text_%d_%d", rowIndex+1, rand.Intn(1000))
-
-	case strings.Contains(col.Type, "uuid"):
-		return faker.UUIDHyphenated()
-	}
-
 	// Handle nullable fields
-	if col.Nullable {
-		if rand.Float32() < 0.2 { // 20% chance of NULL
-			return "NULL"
-		}
+	if col.Nullable && rand.Float32() < 0.1 { // 10% chance of NULL
+		return "NULL"
 	}
 
-	// Default fallback
-	return fmt.Sprintf("value_%d_%d", rowIndex+1, rand.Intn(1000))
+	switch strings.ToLower(col.Type) {
+	case "uuid":
+		return faker.UUIDHyphenated()
+	
+	case "text", "varchar", "char":
+		if strings.Contains(strings.ToLower(col.Name), "email") {
+			return fmt.Sprintf("user%d@example.com", rowIndex)
+		}
+		if strings.Contains(strings.ToLower(col.Name), "name") {
+			return faker.Name()
+		}
+		if strings.Contains(strings.ToLower(col.Name), "phone") {
+			return faker.Phonenumber()
+		}
+		return faker.Word()
+	
+	case "int", "integer", "bigint", "smallint":
+		return fmt.Sprintf("%d", randomInt(1, 1000000))
+	
+	case "decimal", "numeric", "real", "double precision":
+		return fmt.Sprintf("%.2f", randomFloat(0, 1000, 2))
+	
+	case "boolean", "bool":
+		return fmt.Sprintf("%v", rand.Intn(2) == 1)
+	
+	case "date":
+		days := rand.Intn(365*5) // Random date within 5 years
+		return time.Now().AddDate(0, 0, -days).Format("2006-01-02")
+	
+	case "timestamp", "timestamptz":
+		days := rand.Intn(365*5) // Random timestamp within 5 years
+		hours := rand.Intn(24)
+		minutes := rand.Intn(60)
+		return time.Now().
+			AddDate(0, 0, -days).
+			Add(time.Duration(hours)*time.Hour).
+			Add(time.Duration(minutes)*time.Minute).
+			Format("2006-01-02 15:04:05")
+	
+	case "json", "jsonb":
+		data := map[string]interface{}{
+			"id": rowIndex + 1,
+			"value": faker.Word(),
+			"timestamp": time.Now().Unix(),
+		}
+		jsonBytes, _ := json.Marshal(data)
+		return string(jsonBytes)
+	
+	default:
+		if len(col.Values) > 0 { // Handle enum types
+			return col.Values[rowIndex%len(col.Values)]
+		}
+		return fmt.Sprintf("value_%d", rowIndex)
+	}
 }
 
 // Helper function to generate a simple JSON object
