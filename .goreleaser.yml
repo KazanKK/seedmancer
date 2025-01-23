@@ -1,3 +1,5 @@
+version: 2
+
 before:
   hooks:
     - go mod tidy
@@ -26,6 +28,7 @@ archives:
       {{ .ProjectName }}_
       {{- title .Os }}_
       {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "386" }}i386
       {{- else }}{{ .Arch }}{{ end }}
     format_overrides:
       - goos: windows
@@ -41,7 +44,8 @@ changelog:
       - '^docs:'
       - '^test:'
       - '^ci:'
-      - '^chore:'
+      - Merge pull request
+      - Merge branch
 
 dockers:
   - image_templates:
