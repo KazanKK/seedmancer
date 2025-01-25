@@ -19,17 +19,31 @@ go install github.com/KazanKK/reseeder@latest
 ```
 
 2. Using Binary Releases
+#### Linux (x64)
 ```bash
-# Linux (x64)
-curl -L https://github.com/KazanKK/reseeder/releases/latest/download/reseeder-linux-amd64 -o reseeder
-chmod +x reseeder
-sudo mv reseeder /usr/local/bin/
-
-# macOS (x64)
-curl -L https://github.com/KazanKK/reseeder/releases/latest/download/reseeder-darwin-amd64 -o reseeder
+VERSION="v0.1.0"  # Change this to match your latest release
+curl -L https://github.com/KazanKK/reseeder/releases/download/${VERSION}/reseeder_Linux_x86_64.tar.gz -o reseeder
 chmod +x reseeder
 sudo mv reseeder /usr/local/bin/
 ```
+
+#### macOS (x64)
+```bash
+VERSION="v0.1.0"  # Change this to match your latest release
+curl -L https://github.com/KazanKK/reseeder/releases/download/${VERSION}/reseeder_Darwin_x86_64.tar.gz -o reseeder.tar.gz
+tar xzf reseeder.tar.gz
+chmod +x reseeder
+sudo mv reseeder /usr/local/bin/
+```
+
+#### Windows (x64)
+```bash
+VERSION="v0.1.0"  # Change this to match your latest release
+curl -L https://github.com/KazanKK/reseeder/releases/download/${VERSION}/reseeder_Windows_x86_64.zip -o reseeder.zip
+unzip reseeder.zip
+mv reseeder.exe C:\Windows\System32\
+```
+
 
 ## 📖 Command Reference
 
