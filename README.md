@@ -15,18 +15,18 @@ A CLI tool for PostgreSQL database seeding, testing data management. (Currently 
 
 1. Using `go install`
 ```bash
-go install github.com/reseeder/reseeder@latest
+go install github.com/AruhaMaeda/reseeder@latest
 ```
 
 2. Using Binary Releases
 ```bash
 # Linux (x64)
-curl -L https://github.com/reseeder/reseeder/releases/latest/download/reseeder-linux-amd64 -o reseeder
+curl -L https://github.com/AruhaMaeda/reseeder/releases/latest/download/reseeder-linux-amd64 -o reseeder
 chmod +x reseeder
 sudo mv reseeder /usr/local/bin/
 
 # macOS (x64)
-curl -L https://github.com/reseeder/reseeder/releases/latest/download/reseeder-darwin-amd64 -o reseeder
+curl -L https://github.com/AruhaMaeda/reseeder/releases/latest/download/reseeder-darwin-amd64 -o reseeder
 chmod +x reseeder
 sudo mv reseeder /usr/local/bin/
 ```

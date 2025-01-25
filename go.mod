@@ -1,4 +1,4 @@
-module github.com/reseeder/reseeder
+module github.com/AruhaMaeda/reseeder
 
 go 1.21
 
