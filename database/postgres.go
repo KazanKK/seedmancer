@@ -736,36 +736,4 @@ func (p *PostgresManager) ExportSchema(outputFile string) error {
 	return nil
 }
 
-func (p *PostgresManager) GenerateFakeDataFromSchema(schema *Schema, outputDir string, rowCount int) error {
-	// Reset generated values for new run
-	generatedValues = make(map[string][]string)
-	idCounters = make(map[string]int)
-	uniqueValueSets = make(map[string]map[string]bool)
-
-	// First pass: Generate primary key data
-	for _, table := range schema.Tables {
-		for _, col := range table.Columns {
-			if col.IsPrimary {
-				key := fmt.Sprintf("%s.%s", table.Name, col.Name)
-				values := make([]string, rowCount)
-				for i := 0; i < rowCount; i++ {
-					values[i] = generatePrimaryKeyValue(col, table.Name)
-				}
-				valueMutex.Lock()
-				generatedValues[key] = values
-				valueMutex.Unlock()
-			}
-		}
-	}
-
-	// Second pass: Generate data for each table
-	for _, table := range schema.Tables {
-		if err := generateTableData(table, outputDir, rowCount); err != nil {
-			return fmt.Errorf("generating data for table %s: %v", table.Name, err)
-		}
-		p.log("Generated data for table: %s", table.Name)
-	}
-
-	return nil
-}
 
