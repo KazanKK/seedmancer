@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os"
-	db "reseeder/database"
+	db "github.com/KazanKK/reseeder/database"
 
 	"github.com/urfave/cli/v2"
 )
