@@ -26,7 +26,6 @@ func main() {
 					&cli.StringFlag{Name: "db", Usage: "Database type (mysql or postgres)"},
 					&cli.StringFlag{Name: "dsn", Usage: "Database connection string (DSN)"},
 					&cli.StringFlag{Name: "schema-file", Usage: "Path to schema JSON file (alternative to database connection)"},
-					&cli.BoolFlag{Name: "debug", Value: false, Usage: "Enable debug logging"},
 				},
 				Action: func(c *cli.Context) error {
 					outputDir := c.String("output-dir")
@@ -43,7 +42,6 @@ func main() {
 					if schemaFile != "" {
 						// Use schema from file
 						pg := &db.PostgresManager{}
-						pg.SetDebug(c.Bool("debug"))
 						schema, err = pg.ReadSchemaFromFile(schemaFile)
 						if err != nil {
 							return fmt.Errorf("reading schema file: %v", err)
@@ -63,7 +61,6 @@ func main() {
 						switch dbType {
 						case "postgres":
 							pg := &db.PostgresManager{}
-							pg.SetDebug(c.Bool("debug"))
 							if err := pg.ConnectWithDSN(dsn); err != nil {
 								return fmt.Errorf("connecting to database: %v", err)
 							}
@@ -78,7 +75,6 @@ func main() {
 
 					// Generate fake data using the schema
 					pg := &db.PostgresManager{}
-					pg.SetDebug(c.Bool("debug"))
 					if err := pg.GenerateFakeDataFromSchema(schema, outputDir, rowCount); err != nil {
 						return fmt.Errorf("generating fake data: %v", err)
 					}
@@ -94,7 +90,6 @@ func main() {
 					&cli.StringFlag{Name: "db", Required: true, Usage: "Database type (mysql or postgres)"},
 					&cli.StringFlag{Name: "dsn", Required: true, Usage: "Database connection string (DSN)"},
 					&cli.StringFlag{Name: "csv-dir", Required: true, Usage: "Directory containing CSV files"},
-					&cli.BoolFlag{Name: "debug", Value: false, Usage: "Enable debug logging"},
 				},
 				Action: func(c *cli.Context) error {
 					dbType := c.String("db")
@@ -104,7 +99,6 @@ func main() {
 					switch dbType {
 					case "postgres":
 						pg := &db.PostgresManager{}
-						pg.SetDebug(c.Bool("debug"))
 						if err := pg.ConnectWithDSN(dsn); err != nil {
 							return err
 						}
@@ -126,7 +120,6 @@ func main() {
 					&cli.StringFlag{Name: "output-dir", Required: true, Usage: "Output directory for CSV files"},
 					&cli.StringFlag{Name: "db", Required: true, Usage: "Database type (mysql or postgres)"},
 					&cli.StringFlag{Name: "dsn", Required: true, Usage: "Database connection string (DSN)"},
-					&cli.BoolFlag{Name: "debug", Value: false, Usage: "Enable debug logging"},
 				},
 				Action: func(c *cli.Context) error {
 					outputDir := c.String("output-dir")
@@ -140,7 +133,6 @@ func main() {
 					switch dbType {
 					case "postgres":
 						pg := &db.PostgresManager{}
-						pg.SetDebug(c.Bool("debug"))
 						if err := pg.ConnectWithDSN(dsn); err != nil {
 							return fmt.Errorf("connecting to database: %v", err)
 						}
@@ -162,7 +154,6 @@ func main() {
 					&cli.StringFlag{Name: "output", Aliases: []string{"o"}, Required: true, Usage: "Output file path (e.g., schema.sql)"},
 					&cli.StringFlag{Name: "db", Required: true, Usage: "Database type (mysql or postgres)"},
 					&cli.StringFlag{Name: "dsn", Required: true, Usage: "Database connection string (DSN)"},
-					&cli.BoolFlag{Name: "debug", Value: false, Usage: "Enable debug logging"},
 				},
 				Action: func(c *cli.Context) error {
 					outputFile := c.String("output")
@@ -172,7 +163,6 @@ func main() {
 					switch dbType {
 					case "postgres":
 						pg := &db.PostgresManager{}
-						pg.SetDebug(c.Bool("debug"))
 						if err := pg.ConnectWithDSN(dsn); err != nil {
 							return fmt.Errorf("connecting to database: %v", err)
 						}

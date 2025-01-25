@@ -19,17 +19,14 @@ import (
 
 type PostgresManager struct {
 	DB *sql.DB
-	Debug bool
-}
-
-func (p *PostgresManager) SetDebug(debug bool) {
-	p.Debug = debug
 }
 
 func (p *PostgresManager) log(format string, args ...interface{}) {
-	if p.Debug {
-		fmt.Printf(format+"\n", args...)
-	}
+	fmt.Printf("[postgres] "+format+"\n", args...)
+}
+
+func (p *PostgresManager) logSQL(operation, sql string) {
+	fmt.Printf("[postgres] %s:\n%s\n", operation, sql)
 }
 
 func (p *PostgresManager) ConnectWithDSN(dsn string) error {
@@ -230,75 +227,193 @@ func (p *PostgresManager) ExtractSchema() (*Schema, error) {
 	return schema, nil
 }
 
+// Helper function to sort tables based on dependencies
+func sortTablesByDependencies(tables []Table) []Table {
+	// Create dependency graph
+	deps := make(map[string]map[string]bool)
+	for _, table := range tables {
+		deps[table.Name] = make(map[string]bool)
+		for _, col := range table.Columns {
+			if col.ForeignKey != nil {
+				deps[table.Name][col.ForeignKey.Table] = true
+			}
+		}
+	}
+
+	// Topological sort
+	var sorted []Table
+	visited := make(map[string]bool)
+	visiting := make(map[string]bool)
+
+	var visit func(table Table)
+	visit = func(table Table) {
+		if visiting[table.Name] {
+			return // Handle circular dependencies
+		}
+		if visited[table.Name] {
+			return
+		}
+		visiting[table.Name] = true
+
+		for dep := range deps[table.Name] {
+			for _, t := range tables {
+				if t.Name == dep {
+					visit(t)
+				}
+			}
+		}
+
+		visiting[table.Name] = false
+		visited[table.Name] = true
+		sorted = append(sorted, table)
+	}
+
+	for _, table := range tables {
+		if !visited[table.Name] {
+			visit(table)
+		}
+	}
+
+	return sorted
+}
+
 func (p *PostgresManager) RestoreFromCSV(directory string) error {
 	if p.DB == nil {
 		return errors.New("no database connection")
 	}
 
-	// Drop and recreate schema
-	if _, err := p.DB.Exec(`DROP SCHEMA public CASCADE; CREATE SCHEMA public;`); err != nil {
+	// Read schema from schema.json
+	schemaPath := filepath.Join(directory, "schema.json")
+	schema, err := p.ReadSchemaFromFile(schemaPath)
+	if err != nil {
+		return fmt.Errorf("reading schema file: %v", err)
+	}
+
+	dropSQL := `DROP SCHEMA public CASCADE; CREATE SCHEMA public;`
+	p.logSQL("Reset Schema", dropSQL)
+	if _, err := p.DB.Exec(dropSQL); err != nil {
 		return fmt.Errorf("failed to reset schema: %v", err)
 	}
-	fmt.Println("Dropped and recreated public schema")
 
-	// Get list of CSV files in directory
+	// Sort tables based on dependencies
+	sortedTables := sortTablesByDependencies(schema.Tables)
+
+	// First: Create sequences for serial/identity columns
+	for _, table := range schema.Tables {
+		for _, col := range table.Columns {
+			if col.Default != nil {
+				defaultStr, ok := col.Default.(string)
+				if ok && strings.Contains(defaultStr, "nextval") {
+					// Extract sequence name from nextval('sequence_name'::regclass)
+					seqName := strings.Split(strings.Split(defaultStr, "'")[1], "::")[0]
+					createSeqSQL := fmt.Sprintf("CREATE SEQUENCE IF NOT EXISTS %s", seqName)
+					p.logSQL(fmt.Sprintf("Create Sequence %s", seqName), createSeqSQL)
+					if _, err := p.DB.Exec(createSeqSQL); err != nil {
+						return fmt.Errorf("creating sequence %s: %v", seqName, err)
+					}
+				}
+			}
+		}
+	}
+
+	// Second: Process and create all enum types
+	enumTypes := make(map[string]string)
+	for _, table := range sortedTables {
+		for _, col := range table.Columns {
+			if strings.Contains(strings.ToUpper(col.Type), "USER-DEFINED") {
+				enumType := col.Name + "_type"
+				enumTypes[col.Name] = enumType
+
+				createTypeSQL := fmt.Sprintf(`DO $$ 
+					BEGIN 
+						IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = '%s') THEN
+							CREATE TYPE %s AS ENUM ('UNKNOWN');
+						END IF;
+					END $$;`, enumType, enumType)
+				
+				p.logSQL("Create Custom Type", createTypeSQL)
+				if _, err := p.DB.Exec(createTypeSQL); err != nil {
+					return fmt.Errorf("creating custom type: %v", err)
+				}
+			}
+		}
+	}
+
+	// Third: Create tables with proper enum types in sorted order
+	for _, table := range sortedTables {
+		columns := make([]string, len(table.Columns))
+		for i, col := range table.Columns {
+			colType := col.Type
+			if strings.Contains(strings.ToUpper(colType), "USER-DEFINED") {
+				if enumType, ok := enumTypes[col.Name]; ok {
+					colType = enumType
+				}
+			}
+
+			colDef := fmt.Sprintf(`%s %s`, 
+				pq.QuoteIdentifier(col.Name),
+				colType)
+			
+			if !col.Nullable {
+				colDef += " NOT NULL"
+			}
+			if col.Default != nil {
+				defaultVal := ""
+				switch v := col.Default.(type) {
+				case string:
+					if strings.HasPrefix(v, "nextval") || 
+					   v == "CURRENT_TIMESTAMP" ||
+					   strings.HasPrefix(v, "gen_random_uuid") {
+						defaultVal = v
+					} else {
+						defaultVal = fmt.Sprintf("'%s'", strings.ReplaceAll(v, "'", "''"))
+					}
+				default:
+					defaultVal = fmt.Sprintf("%v", v)
+				}
+				colDef += " DEFAULT " + defaultVal
+			}
+			if col.IsPrimary {
+				colDef += " PRIMARY KEY"
+			}
+			if col.IsUnique {
+				colDef += " UNIQUE"
+			}
+			columns[i] = colDef
+		}
+
+		createSQL := fmt.Sprintf(`CREATE TABLE %s (%s)`,
+			pq.QuoteIdentifier(table.Name),
+			strings.Join(columns, ", "))
+		
+		p.logSQL(fmt.Sprintf("Create Table %s", table.Name), createSQL)
+		if _, err := p.DB.Exec(createSQL); err != nil {
+			return fmt.Errorf("creating table %s: %v", table.Name, err)
+		}
+
+		// Add foreign key constraints immediately after creating each table
+		for _, col := range table.Columns {
+			if col.ForeignKey != nil {
+				fkSQL := fmt.Sprintf(`ALTER TABLE %s ADD FOREIGN KEY (%s) REFERENCES %s (%s)`,
+					pq.QuoteIdentifier(table.Name),
+					pq.QuoteIdentifier(col.Name),
+					pq.QuoteIdentifier(col.ForeignKey.Table),
+					pq.QuoteIdentifier(col.ForeignKey.Column))
+				
+				p.logSQL(fmt.Sprintf("Add Foreign Key %s.%s", table.Name, col.Name), fkSQL)
+				if _, err := p.DB.Exec(fkSQL); err != nil {
+					return fmt.Errorf("adding foreign key to %s.%s: %v", table.Name, col.Name, err)
+				}
+			}
+		}
+	}
+
+	// Second pass: Import data from CSV files
 	files, err := os.ReadDir(directory)
 	if err != nil {
 		return fmt.Errorf("reading directory: %v", err)
 	}
 
-	// First pass: Create tables based on CSV headers
-	for _, file := range files {
-		if !strings.HasSuffix(file.Name(), ".csv") {
-			continue
-		}
-
-		tableName := strings.TrimSuffix(file.Name(), ".csv")
-		csvPath := filepath.Join(directory, file.Name())
-
-		// Open and read CSV header
-		csvFile, err := os.Open(csvPath)
-		if err != nil {
-			return fmt.Errorf("opening CSV file %s: %v", file.Name(), err)
-		}
-
-		reader := csv.NewReader(csvFile)
-		header, err := reader.Read()
-		if err != nil {
-			csvFile.Close()
-			return fmt.Errorf("reading CSV header from %s: %v", file.Name(), err)
-		}
-
-		// Read first data row to infer types
-		firstRow, err := reader.Read()
-		if err != nil && err != io.EOF {
-			csvFile.Close()
-			return fmt.Errorf("reading first data row from %s: %v", file.Name(), err)
-		}
-		csvFile.Close()
-
-		// Generate CREATE TABLE statement
-		columns := make([]string, len(header))
-		for i, colName := range header {
-			colType := "text" // default type
-			if firstRow != nil && i < len(firstRow) {
-				// Infer column type from data
-				colType = inferColumnType(firstRow[i])
-			}
-			columns[i] = fmt.Sprintf(`"%s" %s`, colName, colType)
-		}
-
-		createSQL := fmt.Sprintf(`CREATE TABLE "%s" (%s)`,
-			tableName,
-			strings.Join(columns, ", "))
-
-		if _, err := p.DB.Exec(createSQL); err != nil {
-			return fmt.Errorf("creating table %s: %v", tableName, err)
-		}
-		p.log("Created table %s", tableName)
-	}
-
-	// Second pass: Import data
 	for _, file := range files {
 		if !strings.HasSuffix(file.Name(), ".csv") {
 			continue
@@ -372,6 +487,11 @@ func (p *PostgresManager) importCSV(tableName, csvPath string) error {
 	}
 
 	// Use header for column names in COPY statement
+	quotedColumns := make([]string, len(header))
+	for i, h := range header {
+		quotedColumns[i] = pq.QuoteIdentifier(h)
+	}
+
 	stmt, err := tx.Prepare(pq.CopyIn(tableName, header...))
 	if err != nil {
 		return fmt.Errorf("preparing COPY statement: %v", err)
@@ -395,6 +515,19 @@ func (p *PostgresManager) importCSV(tableName, csvPath string) error {
 			case "", "NULL", "null":
 				values[i] = nil
 			default:
+				// Try to parse timestamp formats
+				if strings.Contains(v, "UTC") {
+					// Parse UTC timestamp format
+					if t, err := time.Parse("2006-01-02 15:04:05.999999 -0700 MST", v); err == nil {
+						values[i] = t.Format("2006-01-02 15:04:05.999999-07")
+						continue
+					}
+				}
+				// Try to parse other timestamp formats
+				if t, err := time.Parse(time.RFC3339Nano, v); err == nil {
+					values[i] = t.Format("2006-01-02 15:04:05.999999-07")
+					continue
+				}
 				// Try to convert numeric strings to appropriate types
 				if v, err := strconv.ParseInt(v, 10, 64); err == nil {
 					values[i] = v
@@ -404,7 +537,7 @@ func (p *PostgresManager) importCSV(tableName, csvPath string) error {
 					values[i] = v
 					continue
 				}
-				// If not numeric, keep as string
+				// If not numeric or timestamp, keep as string
 				values[i] = record[i]
 			}
 		}
@@ -445,6 +578,12 @@ func (p *PostgresManager) ExportToCSV(outputDir string) error {
 	if p.DB == nil {
 		return errors.New("no database connection")
 	}
+	// First export schema to the same directory
+	schemaPath := filepath.Join(outputDir, "schema.json")
+		if err := p.ExportSchema(schemaPath); err != nil {
+			return fmt.Errorf("exporting schema: %v", err)
+		}
+		p.log("Exported schema to: %s", schemaPath)
 
 	// Get list of tables
 	rows, err := p.DB.Query(`
@@ -526,6 +665,7 @@ func (p *PostgresManager) exportTableToCSV(tableName, outputDir string) error {
 	query := fmt.Sprintf("SELECT %s FROM %s", 
 		strings.Join(quotedColumns, ", "), 
 		pq.QuoteIdentifier(tableName))
+	p.logSQL(fmt.Sprintf("Export Table %s", tableName), query)
 	
 	dataRows, err := p.DB.Query(query)
 	if err != nil {
@@ -553,6 +693,9 @@ func (p *PostgresManager) exportTableToCSV(tableName, outputDir string) error {
 				switch v := val.(type) {
 				case []byte:
 					row[i] = string(v)
+				case time.Time:
+					// Format timestamp with correct timezone format
+					row[i] = v.Format("2006-01-02 15:04:05.999999 -0700 UTC")
 				default:
 					row[i] = fmt.Sprintf("%v", v)
 				}
