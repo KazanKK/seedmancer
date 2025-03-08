@@ -25,9 +25,9 @@ func SeedCommand() *cli.Command {
 				Usage:    "Database name",
 			},
 			&cli.StringFlag{
-				Name:     "test-data-version-name",
+				Name:     "version-name",
 				Required: true,
-				Usage:    "Test data version name",
+				Usage:    "version name",
 			},
 			&cli.StringFlag{
 				Name:     "db-url",
@@ -56,14 +56,14 @@ func SeedCommand() *cli.Command {
 			}
 
 			databaseName := c.String("database-name")
-			testDataVersionName := c.String("test-data-version-name")
+			versionName := c.String("version-name")
 			dbURL := c.String("db-url")
 
 			// Check local test data directory
-			versionPath := filepath.Join(projectRoot, config.StoragePath, "databases", databaseName, testDataVersionName)
+			versionPath := filepath.Join(projectRoot, config.StoragePath, "databases", databaseName, versionName)
 			if _, err := os.Stat(versionPath); err != nil {
 				if os.IsNotExist(err) {
-					return fmt.Errorf("local test data not found for version '%s'", testDataVersionName)
+					return fmt.Errorf("local test data not found for version '%s'", versionName)
 				} else {
 					return fmt.Errorf("checking version directory: %v", err)
 				}
@@ -106,7 +106,7 @@ func SeedCommand() *cli.Command {
 				return fmt.Errorf("importing test data: %v", err)
 			}
 
-			fmt.Printf("\n✅ Successfully imported test data version '%s'\n", testDataVersionName)
+			fmt.Printf("\n✅ Successfully imported version '%s'\n", versionName)
 			return nil
 		},
 	}
