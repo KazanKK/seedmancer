@@ -1,0 +1,44 @@
+version: "3.8"
+
+services:
+  local-dev-env:
+    build:
+      context: .
+    volumes:
+      - ..:/workspace:delegated
+      - /var/run/docker.sock:/var/run/docker.sock:delegated
+      - vscode_extension:/root/.vscode-server/extensions
+      - bashhistory:/commandhistory
+    env_file:
+      - .env
+    command: tail -F anything
+    network_mode: "host"
+    depends_on:
+      - postgres
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: seedmancer
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+
+volumes:
+  vscode_extension: null
+  bashhistory: null
+  postgres_data: null
+  mysql_data: null

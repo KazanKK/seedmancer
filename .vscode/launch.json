@@ -1,0 +1,79 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "init",
+            "type": "go",
+            "request": "launch",
+            "mode": "auto",
+            "program": "main.go",
+            "args": [
+                "init"
+            ]
+        },
+        {
+            "name": "seed mysql",
+            "type": "go",
+            "request": "launch",
+            "mode": "auto",
+            "program": "main.go",
+            "args": [
+                "seed",
+                "--db-url",
+                "mysql://root:root@tcp(localhost)/seedmancer?parseTime=true&multiStatements=true&charset=utf8mb4",
+                "--database-name",
+                "test-data-1",
+                "--test-data-version-name",
+                "mysql"
+            ]
+        },
+        {
+            "name": "seed postgres",
+            "type": "go",
+            "request": "launch",
+            "mode": "auto",
+            "program": "main.go",
+            "args": [
+                "seed",
+                "--db-url",
+                "postgres://postgres:postgres@localhost:5432/postgres",
+                "--database-name",
+                "test-data-1",
+                "--test-data-version-name",
+                "postgres"
+            ]
+        },
+        {
+            "name": "export mysql schema",
+            "type": "go",
+            "request": "launch",
+            "mode": "auto",
+            "program": "main.go",
+            "args": [
+                "export",
+                "--db-url",
+                "mysql://root:root@tcp(localhost)/seedmancer?parseTime=true&multiStatements=true&charset=utf8mb4",
+                "--database-name",
+                "test-data-1",
+                "--version",
+                "mysql"
+            ]
+        },
+        {
+            "name": "export postgres schema",
+            "type": "go",
+            "request": "launch",
+            "mode": "auto",
+            "program": "main.go",
+            "args": [
+                "export",
+                "--db-url",
+                "postgres://postgres:postgres@localhost:5432/postgres",
+                "--database-name",
+                "test-data-1",
+                "--version",
+                "postgres"
+            ]
+        }
+    ],
+}

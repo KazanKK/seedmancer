@@ -1,0 +1,14 @@
+{
+  "name": "Seedmancer-CLI",
+  "dockerComposeFile": "docker-compose.yaml",
+  "workspaceFolder": "/workspace",
+  "service": "local-dev-env",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "dbcode.dbcode"
+      ]
+    }
+  },
+  "postCreateCommand": "bash .devcontainer/postCreateCommand.sh"
+}
