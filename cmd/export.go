@@ -25,7 +25,7 @@ func ExportCommand() *cli.Command {
 				Usage:    "Database name",
 			},
 			&cli.StringFlag{
-				Name:     "version",
+				Name:     "version-name",
 				Required: false,
 				Usage:    "Version name (optional, defaults to unversioned)",
 			},
@@ -57,7 +57,7 @@ func ExportCommand() *cli.Command {
 
 			dbURL := c.String("db-url")
 			databaseName := c.String("database-name")
-			version := c.String("version")
+			versionName := c.String("version-name")
 			
 			// Add sslmode=disable to PostgreSQL connection if not present
 			u, err := url.Parse(dbURL)
@@ -74,7 +74,7 @@ func ExportCommand() *cli.Command {
 			}
 			
 			// Create output directory based on version
-			outputDir := utils.GetVersionPath(projectRoot, config.StoragePath, databaseName, version)
+			outputDir := utils.GetVersionPath(projectRoot, config.StoragePath, databaseName, versionName)
 			if err := os.MkdirAll(outputDir, 0755); err != nil {
 				return fmt.Errorf("creating output directory: %v", err)
 			}
@@ -119,9 +119,9 @@ func ExportCommand() *cli.Command {
 
 			fmt.Printf("\n✅ Export successful! Data stored in %s\n", outputDir)
 			
-			if version == "" {
+			if versionName == "" {
 				fmt.Println("\nTo save this as a version:")
-				fmt.Printf("  seedmancer save --database-name %s --version <version-name>\n", databaseName)
+				fmt.Printf("  seedmancer save --database-name %s --version-name <version-name>\n", databaseName)
 			}
 			
 			return nil
