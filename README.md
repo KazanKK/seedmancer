@@ -12,19 +12,27 @@ Seedmancer is a simple CLI tool to manage and reset database test data for testi
 ## Installation
 
 ### Manual Download
-#### Linux
 download the latest binary from [GitHub Releases](https://github.com/KazanKK/Seedmancer/releases)
+#### Linux(arm64)
 ```sh
-curl -L https://github.com/KazanKK/Seedmancer/releases/download/v0.1.0/Seedmancer_Linux_arm64.tar.gz -o seedmancer_Linux_arm64.tar.gz
-```
-
-make it executable:
-```sh
-tar -xvf seedmancer_Linux_arm64.tar.gz
+curl -L https://github.com/KazanKK/seedmancer/releases/download/v0.1.0/seedmancer_Linux_arm64 -o seedmancer_Linux_arm64
+chmod +x seedmancer_Linux_arm64
 mv seedmancer_Linux_arm64 /usr/local/bin/seedmancer
 ```
 
----
+#### Linux(x86_64)
+```sh
+curl -L https://github.com/KazanKK/seedmancer/releases/download/v0.1.0/seedmancer_Linux_x86_64 -o seedmancer_Linux_x86_64
+chmod +x seedmancer_Linux_x86_64
+mv seedmancer_Linux_x86_64 /usr/local/bin/seedmancer
+```
+
+#### MacOS(arm64)
+```sh
+curl -L https://github.com/KazanKK/seedmancer/releases/download/v0.1.0/seedmancer_Darwin_arm64 -o seedmancer_Darwin_arm64
+chmod +x seedmancer_Darwin_arm64
+sudo mv seedmancer_Darwin_arm64  /usr/local/bin/seedmancer
+```
 
 ## Getting Started
 ### Initialize a New Project
@@ -69,7 +77,7 @@ Restores the database to a specific test data version.
 | Argument | Description | Required | Default |
 |----------|------------|----------|---------|
 | `--database-name` | Name of the database you want to use | ✅ Yes | - |
-| `--test-data-version-name` | Test data version to apply | ✅ Yes | - |
+| `--version-name` | Test data version to apply | ✅ Yes | - |
 | `--db-url` | Database connection URL | ✅ Yes | - |
 
 ### `seedmancer list` 
