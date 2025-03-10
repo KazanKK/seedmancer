@@ -467,10 +467,12 @@ func (p *PostgresManager) importCSV(tableName, csvPath string, schema *Schema) e
 
 	// Get columns from schema
 	var columns []string
+	var columnTypes []string
 	for _, table := range schema.Tables {
 		if table.Name == tableName {
 			for _, col := range table.Columns {
 				columns = append(columns, col.Name)
+				columnTypes = append(columnTypes, col.Type)
 			}
 			break
 		}
@@ -518,17 +520,102 @@ func (p *PostgresManager) importCSV(tableName, csvPath string, schema *Schema) e
 			case "", "NULL", "null":
 				values[i] = nil
 			default:
-				if strings.Contains(v, "UTC") {
-					if t, err := time.Parse("2006-01-02 15:04:05.999999 -0700 MST", v); err == nil {
+				// Handle different data types based on column type
+				if i < len(columnTypes) {
+					colType := strings.ToLower(columnTypes[i])
+					
+					// Handle JSON and JSONB types
+					if colType == "json" || colType == "jsonb" {
+						// Try to fix common JSON formatting issues
+						fixedJSON := v
+						
+						// Replace single quotes with double quotes if they appear to be used for JSON
+						if strings.Contains(v, "'") && !strings.Contains(v, "\"") {
+							// Replace single quotes with double quotes, but be careful with escaped quotes
+							fixedJSON = strings.ReplaceAll(v, "'", "\"")
+						}
+						
+						// Validate the JSON
+						var js interface{}
+						if err := json.Unmarshal([]byte(fixedJSON), &js); err != nil {
+							// If it's still not valid JSON, try more aggressive fixing
+							p.log("Warning: Invalid JSON in table %s, column %s: %v", tableName, columns[i], err)
+							
+							// Try to manually fix the JSON by ensuring property names are quoted
+							if strings.Contains(fixedJSON, "{") && strings.Contains(fixedJSON, "}") {
+								// This is a very basic attempt to fix malformed JSON objects
+								// For more complex cases, a proper JSON parser would be needed
+								fixedJSON = fixSimpleJSON(fixedJSON)
+							}
+							
+							// Final validation attempt
+							if err := json.Unmarshal([]byte(fixedJSON), &js); err != nil {
+								p.log("Error: Could not fix JSON in table %s, column %s: %v", tableName, columns[i], err)
+								// Use the original value and let PostgreSQL handle it
+								values[i] = v
+							} else {
+								// Use the fixed JSON
+								values[i] = fixedJSON
+							}
+						} else {
+							// Use the fixed JSON
+							values[i] = fixedJSON
+						}
+					} else if strings.HasPrefix(colType, "array") || strings.HasSuffix(colType, "[]") {
+						// Handle array data types
+						if (strings.HasPrefix(v, "[") && strings.HasSuffix(v, "]")) || 
+						   (strings.HasPrefix(v, "{") && strings.HasSuffix(v, "}")) {
+							// If it starts with { and ends with }, it's already in PostgreSQL array format
+							if strings.HasPrefix(v, "{") {
+								values[i] = v
+							} else {
+								// Convert JSON-like array format to PostgreSQL array format
+								// First try to fix single quotes if needed
+								fixedArray := v
+								if strings.Contains(v, "'") && !strings.Contains(v, "\"") {
+									fixedArray = strings.ReplaceAll(v, "'", "\"")
+								}
+								
+								var jsonArray []interface{}
+								if err := json.Unmarshal([]byte(fixedArray), &jsonArray); err != nil {
+									// If JSON parsing fails, try a simpler approach for string arrays
+									arrayStr := v[1 : len(v)-1]
+									elements := parseArrayString(arrayStr)
+									// Convert to PostgreSQL array format
+									values[i] = "{" + strings.Join(elements, ",") + "}"
+								} else {
+									// Convert JSON array to PostgreSQL array format
+									pgArray := make([]string, len(jsonArray))
+									for j, elem := range jsonArray {
+										switch e := elem.(type) {
+										case string:
+											pgArray[j] = fmt.Sprintf("\"%s\"", strings.ReplaceAll(e, "\"", "\\\""))
+										default:
+											pgArray[j] = fmt.Sprintf("%v", e)
+										}
+									}
+									values[i] = "{" + strings.Join(pgArray, ",") + "}"
+								}
+							}
+						} else {
+							// Not in array format, use as is
+							values[i] = v
+						}
+					} else if strings.Contains(v, "UTC") {
+						if t, err := time.Parse("2006-01-02 15:04:05.999999 -0700 MST", v); err == nil {
+							values[i] = t.Format("2006-01-02 15:04:05.999999-07")
+							continue
+						}
+						values[i] = v
+					} else if t, err := time.Parse(time.RFC3339Nano, v); err == nil {
 						values[i] = t.Format("2006-01-02 15:04:05.999999-07")
 						continue
+					} else {
+						values[i] = v
 					}
+				} else {
+					values[i] = v
 				}
-				if t, err := time.Parse(time.RFC3339Nano, v); err == nil {
-					values[i] = t.Format("2006-01-02 15:04:05.999999-07")
-					continue
-				}
-				values[i] = v
 			}
 		}
 
@@ -548,6 +635,77 @@ func (p *PostgresManager) importCSV(tableName, csvPath string, schema *Schema) e
 
 	p.log("Imported %d rows into table %s", rowCount, tableName)
 	return nil
+}
+
+// Helper function to attempt fixing simple JSON formatting issues
+func fixSimpleJSON(input string) string {
+	// Replace single quotes with double quotes
+	result := strings.ReplaceAll(input, "'", "\"")
+	
+	// Find unquoted property names and quote them
+	// This is a very basic implementation and won't handle all cases
+	var buffer strings.Builder
+	inQuotes := false
+	
+	for i := 0; i < len(result); i++ {
+		char := result[i]
+		
+		if char == '"' {
+			// Toggle quote state
+			inQuotes = !inQuotes
+			buffer.WriteByte(char)
+		} else if char == ':' && !inQuotes {
+			// Check if the property name before this colon is quoted
+			// If we're not in quotes and found a colon, check if we need to add quotes
+			// This is a simplified approach and might not work for all cases
+			j := i - 1
+			for j >= 0 && (result[j] == ' ' || result[j] == '\t') {
+				j--
+			}
+			
+			if j >= 0 && result[j] != '"' && result[j] != '}' && result[j] != ']' {
+				// We found an unquoted property name, need to go back and add quotes
+				// This is a very simplified approach and won't handle all cases
+				buffer.WriteString("\":")
+			} else {
+				buffer.WriteByte(char)
+			}
+		} else {
+			buffer.WriteByte(char)
+		}
+	}
+	
+	return buffer.String()
+}
+
+// Helper function to parse array strings with quoted elements
+func parseArrayString(s string) []string {
+	var result []string
+	var current string
+	inQuotes := false
+	
+	for i := 0; i < len(s); i++ {
+		char := s[i]
+		
+		if char == '"' {
+			// Toggle quote state
+			inQuotes = !inQuotes
+			current += string(char)
+		} else if char == ',' && !inQuotes {
+			// End of element
+			result = append(result, strings.TrimSpace(current))
+			current = ""
+		} else {
+			current += string(char)
+		}
+	}
+	
+	// Add the last element if there is one
+	if current != "" {
+		result = append(result, strings.TrimSpace(current))
+	}
+	
+	return result
 }
 
 // ReadSchemaFromFile reads a schema from a JSON file

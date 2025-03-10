@@ -12,6 +12,22 @@
             ]
         },
         {
+            "name": "seed test",
+            "type": "go",
+            "request": "launch",
+            "mode": "auto",
+            "program": "main.go",
+            "args": [
+                "seed",
+                "--db-url",
+                "postgres://postgres:postgres@localhost:5432/postgres",
+                "--database-name",
+                "test-data-1",
+                "--version-name",
+                "test"
+            ]
+        },
+        {
             "name": "seed mysql",
             "type": "go",
             "request": "launch",
