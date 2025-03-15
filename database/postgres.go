@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -468,9 +469,11 @@ func (p *PostgresManager) importCSV(tableName, csvPath string, schema *Schema) e
 	// Get columns from schema
 	var columns []string
 	var columnTypes []string
-	for _, table := range schema.Tables {
-		if table.Name == tableName {
-			for _, col := range table.Columns {
+	var table *Table
+	for _, t := range schema.Tables {
+		if t.Name == tableName {
+			table = &t
+			for _, col := range t.Columns {
 				columns = append(columns, col.Name)
 				columnTypes = append(columnTypes, col.Type)
 			}
@@ -482,21 +485,27 @@ func (p *PostgresManager) importCSV(tableName, csvPath string, schema *Schema) e
 		return fmt.Errorf("no columns found in schema for table %s", tableName)
 	}
 
+	// Set a higher isolation level for the transaction
 	tx, err := p.DB.Begin()
 	if err != nil {
 		return fmt.Errorf("beginning transaction: %v", err)
 	}
-	defer tx.Rollback()
+	defer func() {
+		if err != nil {
+			tx.Rollback()
+		}
+	}()
 
+	// Use COPY FROM with CSV format for better performance
 	stmt, err := tx.Prepare(pq.CopyIn(tableName, columns...))
 	if err != nil {
 		return fmt.Errorf("preparing COPY statement: %v", err)
 	}
-	defer stmt.Close()
 
 	reader := csv.NewReader(file)
 	// Skip header row
 	if _, err := reader.Read(); err != nil {
+		stmt.Close()
 		return fmt.Errorf("reading CSV header: %v", err)
 	}
 
@@ -507,134 +516,210 @@ func (p *PostgresManager) importCSV(tableName, csvPath string, schema *Schema) e
 			break
 		}
 		if err != nil {
+			stmt.Close()
 			return fmt.Errorf("reading CSV record: %v", err)
 		}
 
 		if len(record) != len(columns) {
+			stmt.Close()
 			return fmt.Errorf("column count mismatch: expected %d, got %d in row %d", len(columns), len(record), rowCount+1)
 		}
 
 		values := make([]interface{}, len(record))
 		for i, v := range record {
-			switch v {
-			case "", "NULL", "null":
-				values[i] = nil
-			default:
-				// Handle different data types based on column type
-				if i < len(columnTypes) {
-					colType := strings.ToLower(columnTypes[i])
-					
-					// Handle JSON and JSONB types
-					if colType == "json" || colType == "jsonb" {
-						// Try to fix common JSON formatting issues
-						fixedJSON := v
-						
-						// Replace single quotes with double quotes if they appear to be used for JSON
-						if strings.Contains(v, "'") && !strings.Contains(v, "\"") {
-							// Replace single quotes with double quotes, but be careful with escaped quotes
-							fixedJSON = strings.ReplaceAll(v, "'", "\"")
-						}
-						
-						// Validate the JSON
-						var js interface{}
-						if err := json.Unmarshal([]byte(fixedJSON), &js); err != nil {
-							// If it's still not valid JSON, try more aggressive fixing
-							p.log("Warning: Invalid JSON in table %s, column %s: %v", tableName, columns[i], err)
-							
-							// Try to manually fix the JSON by ensuring property names are quoted
-							if strings.Contains(fixedJSON, "{") && strings.Contains(fixedJSON, "}") {
-								// This is a very basic attempt to fix malformed JSON objects
-								// For more complex cases, a proper JSON parser would be needed
-								fixedJSON = fixSimpleJSON(fixedJSON)
-							}
-							
-							// Final validation attempt
-							if err := json.Unmarshal([]byte(fixedJSON), &js); err != nil {
-								p.log("Error: Could not fix JSON in table %s, column %s: %v", tableName, columns[i], err)
-								// Use the original value and let PostgreSQL handle it
-								values[i] = v
-							} else {
-								// Use the fixed JSON
-								values[i] = fixedJSON
-							}
-						} else {
-							// Use the fixed JSON
-							values[i] = fixedJSON
-						}
-					} else if strings.HasPrefix(colType, "array") || strings.HasSuffix(colType, "[]") {
-						// Handle array data types
-						if (strings.HasPrefix(v, "[") && strings.HasSuffix(v, "]")) || 
-						   (strings.HasPrefix(v, "{") && strings.HasSuffix(v, "}")) {
-							// If it starts with { and ends with }, it's already in PostgreSQL array format
-							if strings.HasPrefix(v, "{") {
-								values[i] = v
-							} else {
-								// Convert JSON-like array format to PostgreSQL array format
-								// First try to fix single quotes if needed
-								fixedArray := v
-								if strings.Contains(v, "'") && !strings.Contains(v, "\"") {
-									fixedArray = strings.ReplaceAll(v, "'", "\"")
-								}
-								
-								var jsonArray []interface{}
-								if err := json.Unmarshal([]byte(fixedArray), &jsonArray); err != nil {
-									// If JSON parsing fails, try a simpler approach for string arrays
-									arrayStr := v[1 : len(v)-1]
-									elements := parseArrayString(arrayStr)
-									// Convert to PostgreSQL array format
-									values[i] = "{" + strings.Join(elements, ",") + "}"
-								} else {
-									// Convert JSON array to PostgreSQL array format
-									pgArray := make([]string, len(jsonArray))
-									for j, elem := range jsonArray {
-										switch e := elem.(type) {
-										case string:
-											pgArray[j] = fmt.Sprintf("\"%s\"", strings.ReplaceAll(e, "\"", "\\\""))
-										default:
-											pgArray[j] = fmt.Sprintf("%v", e)
-										}
-									}
-									values[i] = "{" + strings.Join(pgArray, ",") + "}"
-								}
-							}
-						} else {
-							// Not in array format, use as is
-							values[i] = v
-						}
-					} else if strings.Contains(v, "UTC") {
-						if t, err := time.Parse("2006-01-02 15:04:05.999999 -0700 MST", v); err == nil {
-							values[i] = t.Format("2006-01-02 15:04:05.999999-07")
-							continue
-						}
-						values[i] = v
-					} else if t, err := time.Parse(time.RFC3339Nano, v); err == nil {
-						values[i] = t.Format("2006-01-02 15:04:05.999999-07")
-						continue
-					} else {
-						values[i] = v
-					}
-				} else {
-					values[i] = v
-				}
+			// Process values based on their type
+			var columnType string
+			if i < len(columnTypes) {
+				columnType = columnTypes[i]
 			}
+			values[i] = p.processCSVValue(v, columnType)
 		}
 
 		if _, err := stmt.Exec(values...); err != nil {
+			stmt.Close()
 			return fmt.Errorf("executing COPY for table %s row %d: %v\nValues: %v", tableName, rowCount+1, err, values)
 		}
 		rowCount++
 	}
 
+	// Close the prepared statement to complete the COPY operation
 	if err := stmt.Close(); err != nil {
 		return fmt.Errorf("closing COPY statement: %v", err)
 	}
 
+	// Reset sequences for tables with serial/identity columns
+	if table != nil {
+		for _, col := range table.Columns {
+			// Check for serial/identity columns by looking at default value
+			if strings.Contains(fmt.Sprintf("%v", col.Default), "nextval") || 
+			   strings.Contains(col.Type, "serial") {
+				seqName := fmt.Sprintf("%s_%s_seq", tableName, col.Name)
+				
+				// Try standard sequence name first
+				resetSQL := fmt.Sprintf("SELECT setval(pg_get_serial_sequence('%s', '%s'), COALESCE((SELECT MAX(%s) FROM %s), 0) + 1, false)",
+					tableName, col.Name, pq.QuoteIdentifier(col.Name), pq.QuoteIdentifier(tableName))
+				
+				p.logSQL("Reset Sequence", resetSQL)
+				
+				if _, err := tx.Exec(resetSQL); err != nil {
+					// If that fails, try with the simple sequence name format
+					altResetSQL := fmt.Sprintf("SELECT setval('%s', COALESCE((SELECT MAX(%s) FROM %s), 0) + 1, false)",
+						seqName, pq.QuoteIdentifier(col.Name), pq.QuoteIdentifier(tableName))
+					
+					p.logSQL("Alternative Reset Sequence", altResetSQL)
+					
+					if _, err := tx.Exec(altResetSQL); err != nil {
+						// Log but don't fail if we can't reset the sequence
+						p.log("Warning: Failed to reset sequence for %s.%s: %v", tableName, col.Name, err)
+					}
+				}
+			}
+		}
+	}
+
+	// Commit the transaction
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("committing transaction: %v", err)
 	}
 
-	p.log("Imported %d rows into table %s", rowCount, tableName)
+	p.log("Successfully imported %d rows into table %s", rowCount, tableName)
 	return nil
+}
+
+// Helper function to process CSV values based on column type
+func (p *PostgresManager) processCSVValue(value string, columnType string) interface{} {
+	// Handle NULL values
+	if value == "" || value == "NULL" || value == "null" {
+		return nil
+	}
+
+	// Convert value based on column type
+	colType := strings.ToLower(columnType)
+	
+	// Handle JSON and JSONB types
+	if colType == "json" || colType == "jsonb" {
+		// Try to parse as JSON
+		var js interface{}
+		if err := json.Unmarshal([]byte(value), &js); err == nil {
+			// Valid JSON, return as is
+			return value
+		}
+		
+		// Try to fix common JSON issues
+		fixedJSON := value
+		
+		// Replace single quotes with double quotes if they appear to be used for JSON
+		if strings.Contains(value, "'") && !strings.Contains(value, "\"") {
+			fixedJSON = strings.ReplaceAll(value, "'", "\"")
+		}
+		
+		// Try again with fixed JSON
+		if err := json.Unmarshal([]byte(fixedJSON), &js); err == nil {
+			return fixedJSON
+		}
+		
+		// If still invalid, try more aggressive fixing
+		fixedJSON = fixSimpleJSON(fixedJSON)
+		
+		// Final validation attempt
+		if err := json.Unmarshal([]byte(fixedJSON), &js); err == nil {
+			return fixedJSON
+		}
+		
+		// Use original value if all fixes fail
+		return value
+	}
+	
+	// Handle array types
+	if strings.HasPrefix(colType, "array") || strings.HasSuffix(colType, "[]") {
+		if (strings.HasPrefix(value, "[") && strings.HasSuffix(value, "]")) || 
+		   (strings.HasPrefix(value, "{") && strings.HasSuffix(value, "}")) {
+			// Already in PostgreSQL array format
+			if strings.HasPrefix(value, "{") {
+				return value
+			}
+			
+			// Convert JSON array to PostgreSQL array
+			var jsonArray []interface{}
+			fixedArray := value
+			if strings.Contains(value, "'") && !strings.Contains(value, "\"") {
+				fixedArray = strings.ReplaceAll(value, "'", "\"")
+			}
+			
+			if err := json.Unmarshal([]byte(fixedArray), &jsonArray); err == nil {
+				// Convert to PostgreSQL array format
+				pgArray := make([]string, len(jsonArray))
+				for i, elem := range jsonArray {
+					switch e := elem.(type) {
+					case string:
+						pgArray[i] = fmt.Sprintf("\"%s\"", strings.ReplaceAll(e, "\"", "\\\""))
+					default:
+						pgArray[i] = fmt.Sprintf("%v", e)
+					}
+				}
+				return "{" + strings.Join(pgArray, ",") + "}"
+			}
+			
+			// Fallback to simpler parsing
+			arrayStr := value[1 : len(value)-1]
+			elements := parseArrayString(arrayStr)
+			return "{" + strings.Join(elements, ",") + "}"
+		}
+		
+		// Not in array format, use as is
+		return value
+	}
+	
+	// Handle timestamp/date types
+	if strings.Contains(colType, "time") || strings.Contains(colType, "date") {
+		// Try various time formats
+		if strings.Contains(value, "UTC") {
+			if t, err := time.Parse("2006-01-02 15:04:05.999999 -0700 MST", value); err == nil {
+				return t
+			}
+		}
+		
+		if t, err := time.Parse(time.RFC3339Nano, value); err == nil {
+			return t
+		}
+		
+		if t, err := time.Parse("2006-01-02 15:04:05", value); err == nil {
+			return t
+		}
+		
+		if t, err := time.Parse("2006-01-02", value); err == nil {
+			return t
+		}
+	}
+	
+	// Handle boolean types
+	if colType == "boolean" || colType == "bool" {
+		lower := strings.ToLower(value)
+		if lower == "true" || lower == "t" || lower == "yes" || lower == "y" || lower == "1" {
+			return true
+		}
+		if lower == "false" || lower == "f" || lower == "no" || lower == "n" || lower == "0" {
+			return false
+		}
+	}
+	
+	// Handle numeric types
+	if strings.Contains(colType, "int") || colType == "serial" || colType == "bigserial" {
+		// Try to parse as integer
+		if i, err := strconv.ParseInt(value, 10, 64); err == nil {
+			return i
+		}
+	}
+	
+	if strings.Contains(colType, "float") || strings.Contains(colType, "numeric") || strings.Contains(colType, "decimal") {
+		// Try to parse as float
+		if f, err := strconv.ParseFloat(value, 64); err == nil {
+			return f
+		}
+	}
+	
+	// Default: return as string
+	return value
 }
 
 // Helper function to attempt fixing simple JSON formatting issues
