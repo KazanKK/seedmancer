@@ -3,6 +3,7 @@ package db
 type Column struct {
     Name       string      `json:"name"`
     Type       string      `json:"type"`        // Database type (e.g. text, integer, timestamp)
+    Varchar    *string      `json:"varchar,omitempty"`
     Nullable   bool        `json:"nullable"`
     Default    interface{} `json:"default,omitempty"`
     IsPrimary  bool        `json:"isPrimary"`

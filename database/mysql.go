@@ -1,14 +1,12 @@
 package db
 
 import (
-	"archive/zip"
 	"database/sql"
 	"encoding/csv"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -651,40 +649,50 @@ func (m *MySQLManager) importCSV(tableName, csvPath string, schema *Schema) erro
 	}
 	defer file.Close()
 
-	// Get columns from schema
-	var columns []string
-	var columnTypes []string
-	
-	for _, table := range schema.Tables {
-		if table.Name == tableName {
-			for _, col := range table.Columns {
-				columns = append(columns, col.Name)
-				columnTypes = append(columnTypes, strings.ToLower(col.Type))
-			}
+	// Find table in schema
+	var table *Table
+	for _, t := range schema.Tables {
+		if t.Name == tableName {
+			table = &t
 			break
 		}
 	}
 
-	if len(columns) == 0 {
-		return fmt.Errorf("no columns found in schema for table %s", tableName)
+	if table == nil {
+		return fmt.Errorf("table %s not found in schema", tableName)
 	}
 
+	// Create a map of column names to their types for quick lookup
+	columnTypeMap := make(map[string]string)
+	for _, col := range table.Columns {
+		columnTypeMap[col.Name] = strings.ToLower(col.Type)
+	}
+
+	// Read CSV header to determine column order
 	reader := csv.NewReader(file)
-	// Skip header row
-	if _, err := reader.Read(); err != nil {
+	header, err := reader.Read()
+	if err != nil {
 		return fmt.Errorf("reading CSV header: %v", err)
 	}
 
-	// Prepare placeholders for the INSERT statement
-	placeholders := make([]string, len(columns))
-	for i := range placeholders {
+	// Validate header columns exist in the schema
+	for _, colName := range header {
+		if _, exists := columnTypeMap[colName]; !exists {
+			m.log("Warning: Column %s in CSV not found in schema for table %s", colName, tableName)
+		}
+	}
+
+	// Create INSERT statement with the columns from the CSV header
+	quotedColumns := make([]string, len(header))
+	placeholders := make([]string, len(header))
+	for i, col := range header {
+		quotedColumns[i] = "`" + col + "`"
 		placeholders[i] = "?"
 	}
 
-	// Create INSERT statement
-	insertSQL := fmt.Sprintf("INSERT INTO `%s` (`%s`) VALUES (%s)",
+	insertSQL := fmt.Sprintf("INSERT INTO `%s` (%s) VALUES (%s)",
 		tableName,
-		strings.Join(columns, "`, `"),
+		strings.Join(quotedColumns, ", "),
 		strings.Join(placeholders, ", "))
 
 	m.logSQL("Insert", insertSQL)
@@ -706,12 +714,15 @@ func (m *MySQLManager) importCSV(tableName, csvPath string, schema *Schema) erro
 			return fmt.Errorf("reading CSV record: %v", err)
 		}
 
-		if len(record) != len(columns) {
-			return fmt.Errorf("column count mismatch: expected %d, got %d in row %d", len(columns), len(record), rowCount+1)
+		if len(record) != len(header) {
+			return fmt.Errorf("column count mismatch: expected %d, got %d in row %d", len(header), len(record), rowCount+1)
 		}
 
 		values := make([]interface{}, len(record))
 		for i, v := range record {
+			// Get column type from map using the header name
+			columnType := columnTypeMap[header[i]]
+			
 			// Handle NULL values
 			if v == "" || v == "NULL" || v == "null" {
 				values[i] = nil
@@ -719,7 +730,7 @@ func (m *MySQLManager) importCSV(tableName, csvPath string, schema *Schema) erro
 			}
 
 			// Handle boolean values
-			if i < len(columnTypes) && (columnTypes[i] == "boolean" || columnTypes[i] == "bool") {
+			if columnType == "boolean" || columnType == "bool" {
 				switch strings.ToLower(v) {
 				case "true", "t", "yes", "y", "1":
 					values[i] = 1
@@ -732,7 +743,7 @@ func (m *MySQLManager) importCSV(tableName, csvPath string, schema *Schema) erro
 			}
 
 			// Handle JSON and array values
-			if i < len(columnTypes) && (columnTypes[i] == "json" || columnTypes[i] == "jsonb" || strings.HasPrefix(columnTypes[i], "array")) {
+			if columnType == "json" || columnType == "jsonb" || strings.HasPrefix(columnType, "array") {
 				// Check if the value is already in JSON format
 				if strings.HasPrefix(v, "{") && strings.HasSuffix(v, "}") && !strings.HasPrefix(v, "{\"") {
 					// Convert PostgreSQL array format {a,b,c} to JSON array ["a","b","c"]
@@ -768,8 +779,6 @@ func (m *MySQLManager) importCSV(tableName, csvPath string, schema *Schema) erro
 			values[i] = v
 		}
 
-		m.log("Executing insert for table %s row %d: %v", tableName, rowCount+1, values)
-		
 		if _, err := stmt.Exec(values...); err != nil {
 			// If the error is related to enum values, log a warning and continue
 			if strings.Contains(err.Error(), "Data truncated for column") {
@@ -800,88 +809,3 @@ func (m *MySQLManager) ReadSchemaFromFile(filename string) (*Schema, error) {
 	return &schema, nil
 }
 
-// Fetch implements the DatabaseManager interface
-func (m *MySQLManager) Fetch(baseURL, databaseName, versionName, outputDir, token string) error {
-	// Create the output directory if it doesn't exist
-	if err := os.MkdirAll(outputDir, 0755); err != nil {
-		return fmt.Errorf("creating output directory: %v", err)
-	}
-
-	// Construct the API URL
-	apiURL := fmt.Sprintf("%s/api/v1.0/databases/testdata/download?database_name=%s&version_name=%s", 
-		baseURL, databaseName, versionName)
-
-	// Create HTTP request
-	req, err := http.NewRequest("GET", apiURL, nil)
-	if err != nil {
-		return fmt.Errorf("creating request: %v", err)
-	}
-
-	// Add authorization header
-	req.Header.Set("Authorization", fmt.Sprintf("cli_%s", token))
-
-	// Make the request
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("making request: %v", err)
-	}
-	defer resp.Body.Close()
-
-	// Check response status
-	if resp.StatusCode == http.StatusUnauthorized {
-		return fmt.Errorf("unauthorized: please check your API token")
-	}
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("API request failed: %s - %s", resp.Status, string(body))
-	}
-
-	// Create a temporary file to store the zip
-	tempFile, err := os.CreateTemp("", "seedmancer-*.zip")
-	if err != nil {
-		return fmt.Errorf("creating temp file: %v", err)
-	}
-	defer os.Remove(tempFile.Name())
-	defer tempFile.Close()
-
-	// Copy the response body to the temp file
-	if _, err := io.Copy(tempFile, resp.Body); err != nil {
-		return fmt.Errorf("downloading zip file: %v", err)
-	}
-
-	// Open the zip file
-	zipReader, err := zip.OpenReader(tempFile.Name())
-	if err != nil {
-		return fmt.Errorf("opening zip file: %v", err)
-	}
-	defer zipReader.Close()
-
-	// Extract the zip contents
-	for _, file := range zipReader.File {
-		// Open the file in the zip
-		rc, err := file.Open()
-		if err != nil {
-			return fmt.Errorf("opening file in zip: %v", err)
-		}
-
-		// Create the output file
-		outPath := filepath.Join(outputDir, file.Name)
-		outFile, err := os.Create(outPath)
-		if err != nil {
-			rc.Close()
-			return fmt.Errorf("creating output file: %v", err)
-		}
-
-		// Copy the contents
-		if _, err := io.Copy(outFile, rc); err != nil {
-			outFile.Close()
-			rc.Close()
-			return fmt.Errorf("extracting file: %v", err)
-		}
-
-		outFile.Close()
-		rc.Close()
-	}
-
-	return nil
-}

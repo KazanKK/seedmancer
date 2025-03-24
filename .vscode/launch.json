@@ -39,7 +39,7 @@
                 "mysql://root:root@tcp(localhost)/seedmancer?parseTime=true&multiStatements=true&charset=utf8mb4",
                 "--database-name",
                 "test-data-1",
-                "--test-data-version-name",
+                "--version-name",
                 "mysql"
             ]
         },
@@ -55,7 +55,7 @@
                 "postgres://postgres:postgres@localhost:5432/postgres",
                 "--database-name",
                 "test-data-1",
-                "--test-data-version-name",
+                "--version-name",
                 "postgres"
             ]
         },
@@ -87,9 +87,25 @@
                 "postgres://postgres:postgres@localhost:5432/postgres",
                 "--database-name",
                 "test-data-1",
-                "--version",
+                "--version-name",
                 "postgres"
             ]
+        },
+        {
+            "name": "fetch",
+            "type": "go",
+            "request": "launch",
+            "mode": "auto",
+            "program": "main.go",
+            "args": [
+                "fetch",
+                "--database-name",
+                "seedmancer",
+                "--version",
+                "test",
+                "--token",
+                "a4c428e1-64f7-4970-aa73-10b984cda96f" // test token
+            ]
         }
-    ],
+    ]
 }

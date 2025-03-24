@@ -6,5 +6,4 @@ type DatabaseManager interface {
 	ExportSchema(outputPath string) error
 	ExportToCSV(outputDir string) error
 	RestoreFromCSV(inputDir string) error
-	Fetch(baseURL, databaseName, versionName, outputDir, token string) error
 }

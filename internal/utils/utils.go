@@ -50,7 +50,8 @@ func GetVersionPath(projectRoot, storagePath, databaseName, version string) stri
 
 // GetBaseURL returns the appropriate API base URL based on the version
 func GetBaseURL() string {
-	return "https://seedmancer.com" // Replace with your production domain
+	// return "https://seedmancer.com" // Replace with your production domain
+	return "http://localhost:1234"
 }
 
 // ReadConfig reads the seedmancer config file and returns the storage path

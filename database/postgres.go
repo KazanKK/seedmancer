@@ -7,14 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
-
-	"archive/zip"
 
 	"github.com/lib/pq"
 	_ "github.com/lib/pq"
@@ -45,6 +42,9 @@ func (p *PostgresManager) ExtractSchema() (*Schema, error) {
 	if p.DB == nil {
 		return nil, errors.New("no database connection")
 	}
+
+	// Debug varchar lengths
+	p.debugVarcharLengths()
 
 	// First, get all enum types and their values
 	enumQuery := `
@@ -77,7 +77,7 @@ func (p *PostgresManager) ExtractSchema() (*Schema, error) {
 		})
 	}
 
-	// Rest of the existing query for tables and columns
+	// Updated query to include character_maximum_length for varchar columns
 	rows, err := p.DB.Query(`
 		WITH fk_info AS (
 			SELECT
@@ -116,7 +116,8 @@ func (p *PostgresManager) ExtractSchema() (*Schema, error) {
 			pk_info.column_name IS NOT NULL as is_primary,
 			unique_info.column_name IS NOT NULL as is_unique,
 			fk.foreign_table_name,
-			fk.foreign_column_name
+			fk.foreign_column_name,
+			c.character_maximum_length
 		FROM 
 			information_schema.tables t
 			JOIN information_schema.columns c ON t.table_name = c.table_name
@@ -137,13 +138,13 @@ func (p *PostgresManager) ExtractSchema() (*Schema, error) {
 	}
 	defer rows.Close()
 
-	schema := &Schema{
+schema := &Schema{
 		DatabaseType: "postgres",
 		Enums:  enums,
 		Tables: make([]Table, 0),
 	}
 
-	// Process tables and columns (existing logic)
+	// Process tables and columns
 	currentTable := ""
 	var currentColumns []Column
 
@@ -152,6 +153,7 @@ func (p *PostgresManager) ExtractSchema() (*Schema, error) {
 		var columnDefault sql.NullString
 		var isPrimary, isUnique bool
 		var foreignTable, foreignColumn sql.NullString
+		var charMaxLength sql.NullInt64 // Added for varchar length
 
 		if err := rows.Scan(
 			&tableName,
@@ -164,8 +166,18 @@ func (p *PostgresManager) ExtractSchema() (*Schema, error) {
 			&isUnique,
 			&foreignTable,
 			&foreignColumn,
+			&charMaxLength, // Added for varchar length
 		); err != nil {
 			return nil, err
+		}
+
+		// Log all varchar/character varying columns and their length values
+		if dataType == "character varying" || dataType == "varchar" {
+			if charMaxLength.Valid {
+				p.log("VARCHAR column: %s.%s, MaxLength: %d", tableName, columnName, charMaxLength.Int64)
+			} else {
+				p.log("VARCHAR column: %s.%s, MaxLength: NULL", tableName, columnName)
+			}
 		}
 
 		column := Column{
@@ -174,6 +186,13 @@ func (p *PostgresManager) ExtractSchema() (*Schema, error) {
 			Nullable:   isNullable == "YES",
 			IsPrimary:  isPrimary,
 			IsUnique:   isUnique,
+		}
+
+		// Handle varchar length
+		if charMaxLength.Valid && (dataType == "character varying" || dataType == "varchar") {
+			lengthStr := strconv.FormatInt(charMaxLength.Int64, 10)
+			column.Varchar = &lengthStr
+			p.log("Setting varchar length for %s.%s: %s", tableName, columnName, lengthStr)
 		}
 
 		// Handle foreign keys
@@ -338,6 +357,9 @@ func (p *PostgresManager) createTable(table Table, includeForeignKeys bool) erro
 		} else if strings.HasPrefix(col.Type, "ARRAY") {
 			// Fix ARRAY type syntax - default to text[] if element type not specified
 			colDef += "text[]"
+		} else if (col.Type == "character varying" || col.Type == "varchar") && col.Varchar != nil {
+			// Use varchar with length if specified
+			colDef += fmt.Sprintf("varchar(%s)", *col.Varchar)
 		} else {
 			colDef += col.Type
 		}
@@ -466,23 +488,23 @@ func (p *PostgresManager) importCSV(tableName, csvPath string, schema *Schema) e
 	}
 	defer file.Close()
 
-	// Get columns from schema
-	var columns []string
-	var columnTypes []string
+	// Find table in schema
 	var table *Table
 	for _, t := range schema.Tables {
 		if t.Name == tableName {
 			table = &t
-			for _, col := range t.Columns {
-				columns = append(columns, col.Name)
-				columnTypes = append(columnTypes, col.Type)
-			}
 			break
 		}
 	}
 
-	if len(columns) == 0 {
-		return fmt.Errorf("no columns found in schema for table %s", tableName)
+	if table == nil {
+		return fmt.Errorf("table %s not found in schema", tableName)
+	}
+
+	// Create a map of column names to their types for quick lookup
+	columnTypeMap := make(map[string]string)
+	for _, col := range table.Columns {
+		columnTypeMap[col.Name] = col.Type
 	}
 
 	// Set a higher isolation level for the transaction
@@ -496,17 +518,24 @@ func (p *PostgresManager) importCSV(tableName, csvPath string, schema *Schema) e
 		}
 	}()
 
-	// Use COPY FROM with CSV format for better performance
-	stmt, err := tx.Prepare(pq.CopyIn(tableName, columns...))
+	// Read CSV header to determine column order
+	reader := csv.NewReader(file)
+	header, err := reader.Read()
 	if err != nil {
-		return fmt.Errorf("preparing COPY statement: %v", err)
+		return fmt.Errorf("reading CSV header: %v", err)
 	}
 
-	reader := csv.NewReader(file)
-	// Skip header row
-	if _, err := reader.Read(); err != nil {
-		stmt.Close()
-		return fmt.Errorf("reading CSV header: %v", err)
+	// Validate header columns exist in the schema
+	for _, colName := range header {
+		if _, exists := columnTypeMap[colName]; !exists {
+			p.log("Warning: Column %s in CSV not found in schema for table %s", colName, tableName)
+		}
+	}
+
+	// Prepare COPY statement with the columns from the CSV header
+	stmt, err := tx.Prepare(pq.CopyIn(tableName, header...))
+	if err != nil {
+		return fmt.Errorf("preparing COPY statement: %v", err)
 	}
 
 	rowCount := 0
@@ -520,18 +549,15 @@ func (p *PostgresManager) importCSV(tableName, csvPath string, schema *Schema) e
 			return fmt.Errorf("reading CSV record: %v", err)
 		}
 
-		if len(record) != len(columns) {
+		if len(record) != len(header) {
 			stmt.Close()
-			return fmt.Errorf("column count mismatch: expected %d, got %d in row %d", len(columns), len(record), rowCount+1)
+			return fmt.Errorf("column count mismatch: expected %d, got %d in row %d", len(header), len(record), rowCount+1)
 		}
 
 		values := make([]interface{}, len(record))
 		for i, v := range record {
-			// Process values based on their type
-			var columnType string
-			if i < len(columnTypes) {
-				columnType = columnTypes[i]
-			}
+			// Get column type from map using the header name
+			columnType := columnTypeMap[header[i]]
 			values[i] = p.processCSVValue(v, columnType)
 		}
 
@@ -704,7 +730,7 @@ func (p *PostgresManager) processCSVValue(value string, columnType string) inter
 	}
 	
 	// Handle numeric types
-	if strings.Contains(colType, "int") || colType == "serial" || colType == "bigserial" {
+	if strings.Contains(colType, "int") || strings.Contains(colType, "serial") || strings.Contains(colType, "bigserial") {
 		// Try to parse as integer
 		if i, err := strconv.ParseInt(value, 10, 64); err == nil {
 			return i
@@ -984,6 +1010,15 @@ func (p *PostgresManager) ExportSchema(outputFile string) error {
 		return fmt.Errorf("extracting schema: %v", err)
 	}
 
+	// Debug: Check if varchar fields are present
+	for _, table := range schema.Tables {
+		for _, col := range table.Columns {
+			if (col.Type == "character varying" || col.Type == "varchar") && col.Varchar != nil {
+				p.log("Exporting varchar length for %s.%s: %s", table.Name, col.Name, *col.Varchar)
+			}
+		}
+	}
+
 	// Convert to JSON with pretty printing
 	jsonData, err := json.MarshalIndent(schema, "", "  ")
 	if err != nil {
@@ -999,127 +1034,49 @@ func (p *PostgresManager) ExportSchema(outputFile string) error {
 	return nil
 }
 
-func (p *PostgresManager) Fetch(baseURL, databaseName, version, outputDir, token string) error {
-	// Create request
-	req, err := http.NewRequest("GET", fmt.Sprintf("%s/api/v1.0/databases/testdata/fetch?database_name=%s&version_name=%s", baseURL, databaseName, version), nil)
+// Add a debug query to check character_maximum_length values
+func (p *PostgresManager) debugVarcharLengths() {
+	query := `
+		SELECT 
+			table_name, 
+			column_name, 
+			data_type, 
+			character_maximum_length
+		FROM 
+			information_schema.columns 
+		WHERE 
+			table_schema = 'public' 
+			AND (data_type = 'character varying' OR data_type = 'varchar')
+		ORDER BY 
+			table_name, ordinal_position;
+	`
+	
+	rows, err := p.DB.Query(query)
 	if err != nil {
-		return fmt.Errorf("creating request: %v", err)
+		p.log("Error querying varchar lengths: %v", err)
+		return
 	}
-
-	// Add authorization header
-	req.Header.Add("Authorization", "cli_"+token)
-
-	// Send request
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("fetching data from API: %v", err)
+	defer rows.Close()
+	
+	p.log("Debugging varchar lengths:")
+	for rows.Next() {
+		var tableName, columnName, dataType string
+		var maxLength sql.NullInt64
+		
+		if err := rows.Scan(&tableName, &columnName, &dataType, &maxLength); err != nil {
+			p.log("Error scanning row: %v", err)
+			continue
+		}
+		
+		if maxLength.Valid {
+			p.log("Table: %s, Column: %s, Type: %s, MaxLength: %d", 
+				tableName, columnName, dataType, maxLength.Int64)
+		} else {
+			p.log("Table: %s, Column: %s, Type: %s, MaxLength: NULL", 
+				tableName, columnName, dataType)
+		}
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusUnauthorized {
-		return fmt.Errorf("unauthorized: please check your API token")
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("API returned status code: %d", resp.StatusCode)
-	}
-
-	// Create target directory
-	// targetDir := filepath.Join("databases", databaseName, version)
-	if err := os.MkdirAll(outputDir, 0755); err != nil {
-		return fmt.Errorf("creating target directory: %v", err)
-	}
-
-	// Check Content-Type header
-	contentType := resp.Header.Get("Content-Type")
-	if contentType == "application/zip" {
-		// Direct zip file download
-		return p.extractZip(resp.Body, outputDir)
-	}
-
-	// Try to parse JSON response for S3 URL
-	var response struct {
-		URL string `json:"url"`
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("reading response body: %v", err)
-	}
-
-	if err := json.Unmarshal(body, &response); err != nil {
-		return fmt.Errorf("parsing API response: %v", err)
-	}
-
-	if response.URL == "" {
-		return fmt.Errorf("invalid response format: missing URL")
-	}
-
-	// Download from S3 URL
-	s3Resp, err := http.Get(response.URL)
-	if err != nil {
-		return fmt.Errorf("downloading from S3: %v", err)
-	}
-	defer s3Resp.Body.Close()
-
-	if s3Resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("S3 download failed with status: %d", s3Resp.StatusCode)
-	}
-
-	return p.extractZip(s3Resp.Body, outputDir)
 }
 
-func (p *PostgresManager) extractZip(reader io.Reader, targetDir string) error {
-	// Create temporary file for zip
-	tmpFile, err := os.CreateTemp("", "database-*.zip")
-	if err != nil {
-		return fmt.Errorf("creating temporary file: %v", err)
-	}
-	defer os.Remove(tmpFile.Name())
-	defer tmpFile.Close()
 
-	// Copy download to temporary file
-	if _, err := io.Copy(tmpFile, reader); err != nil {
-		return fmt.Errorf("saving zip file: %v", err)
-	}
-
-	// Extract zip file
-	zipReader, err := zip.OpenReader(tmpFile.Name())
-	if err != nil {
-		return fmt.Errorf("opening zip file: %v", err)
-	}
-	defer zipReader.Close()
-
-	for _, file := range zipReader.File {
-		rc, err := file.Open()
-		if err != nil {
-			return fmt.Errorf("opening file in zip: %v", err)
-		}
-
-		path := filepath.Join(targetDir, file.Name)
-		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-			rc.Close()
-			return fmt.Errorf("creating directories: %v", err)
-		}
-
-		outFile, err := os.Create(path)
-		if err != nil {
-			rc.Close()
-			return fmt.Errorf("creating output file: %v", err)
-		}
-
-		if _, err := io.Copy(outFile, rc); err != nil {
-			outFile.Close()
-			rc.Close()
-			return fmt.Errorf("extracting file: %v", err)
-		}
-
-		outFile.Close()
-		rc.Close()
-		p.log("Extracted: %s", path)
-	}
-
-	return nil
-}
 
