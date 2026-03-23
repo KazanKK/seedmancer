@@ -11,7 +11,7 @@ func TestSanitizeVersionSegment(t *testing.T) {
 	if got := SanitizeVersionSegment("my/db"); got != "my_db" {
 		t.Fatalf("got %q", got)
 	}
-	if got := SanitizeVersionSegment("a(b)"); got != "a_b_" {
+	if got := SanitizeVersionSegment("a(b)"); got != "a(b)" {
 		t.Fatalf("got %q", got)
 	}
 	if got := SanitizeVersionSegment("   "); got != "database" {
@@ -21,9 +21,9 @@ func TestSanitizeVersionSegment(t *testing.T) {
 
 func TestDefaultVersionName_shape(t *testing.T) {
 	n := DefaultVersionName("myapp")
-	re := regexp.MustCompile(`^\d{14}_\(myapp\)$`)
+	re := regexp.MustCompile(`^\d{14}_myapp$`)
 	if !re.MatchString(n) {
-		t.Fatalf("expected YYYYMMDDHHMMSS_(myapp), got %q", n)
+		t.Fatalf("expected YYYYMMDDHHMMSS_myapp, got %q", n)
 	}
 }
 
@@ -42,10 +42,10 @@ func TestResolveSeedVersion_explicit(t *testing.T) {
 func TestResolveSeedVersion_latestTimestamped(t *testing.T) {
 	root := t.TempDir()
 	data := filepath.Join(root, "s", "databases", "db1")
-	_ = os.MkdirAll(filepath.Join(data, "20250101120000_(db1)"), 0755)
-	_ = os.MkdirAll(filepath.Join(data, "20250201120000_(db1)"), 0755)
+	_ = os.MkdirAll(filepath.Join(data, "20250101120000_db1"), 0755)
+	_ = os.MkdirAll(filepath.Join(data, "20250201120000_db1"), 0755)
 	got, _, err := ResolveSeedVersion(root, "s", "db1", "")
-	if err != nil || got != "20250201120000_(db1)" {
+	if err != nil || got != "20250201120000_db1" {
 		t.Fatalf("got %q %v", got, err)
 	}
 }

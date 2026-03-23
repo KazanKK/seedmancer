@@ -20,7 +20,6 @@ func InitCommand() *cli.Command {
 			&cli.StringFlag{
 				Name:  "storage-path",
 				Usage: "Path to store seedmancer files",
-				Value: ".seedmancer",
 			},
 			&cli.StringFlag{
 				Name:  "database-name",
@@ -54,23 +53,27 @@ func InitCommand() *cli.Command {
 				var err error
 
 				if !c.IsSet("storage-path") {
-					storagePath, err = prompt(in, "Storage path", storagePath, true)
+					storagePath, err = prompt(in, "Storage path", storagePath)
 					if err != nil {
 						return err
 					}
 				}
 				if !c.IsSet("database-name") {
-					databaseName, err = prompt(in, "Database name", databaseName, false)
+					databaseName, err = prompt(in, "Database name", databaseName)
 					if err != nil {
 						return err
 					}
 				}
 				if !c.IsSet("database-url") {
-					databaseURL, err = prompt(in, "Database URL", databaseURL, false)
+					databaseURL, err = prompt(in, "Database URL", databaseURL)
 					if err != nil {
 						return err
 					}
 				}
+			}
+
+			if strings.TrimSpace(storagePath) == "" {
+				return fmt.Errorf("storage path cannot be empty")
 			}
 
 			cfg := utils.Config{
@@ -117,8 +120,7 @@ func loadExistingConfig() (utils.Config, error) {
 
 // prompt prints "? Label (default): " and reads one line.
 // If the user presses Enter with no input the default is returned.
-// When required is true and the result is empty, the error is surfaced.
-func prompt(in *bufio.Reader, label, defaultVal string, required bool) (string, error) {
+func prompt(in *bufio.Reader, label, defaultVal string) (string, error) {
 	if defaultVal != "" {
 		fmt.Printf("? %s (%s): ", label, defaultVal)
 	} else {
@@ -132,9 +134,6 @@ func prompt(in *bufio.Reader, label, defaultVal string, required bool) (string, 
 
 	s := strings.TrimSpace(line)
 	if s == "" {
-		if required && defaultVal == "" {
-			return "", fmt.Errorf("%s cannot be empty", label)
-		}
 		return defaultVal, nil
 	}
 	return s, nil

@@ -10,24 +10,24 @@ import (
 	"time"
 )
 
-// Timestamped version directories use: YYYYMMDDHHMMSS_(database_name)
-var timestampedVersionPattern = regexp.MustCompile(`^\d{14}_\(`)
+// Timestamped version directories use: YYYYMMDDHHMMSS_database_name
+var timestampedVersionPattern = regexp.MustCompile(`^\d{14}_`)
 
 // DefaultVersionName is used when export omits --version-name (UTC timestamp + database label).
 func DefaultVersionName(databaseName string) string {
 	ts := time.Now().UTC().Format("20060102150405")
 	safe := SanitizeVersionSegment(databaseName)
-	return fmt.Sprintf("%s_(%s)", ts, safe)
+	return fmt.Sprintf("%s_%s", ts, safe)
 }
 
-// SanitizeVersionSegment makes databaseName safe inside a directory name (no path separators or parens).
+// SanitizeVersionSegment makes databaseName safe inside a directory name (no path separators).
 func SanitizeVersionSegment(s string) string {
 	s = strings.TrimSpace(s)
 	s = strings.Map(func(r rune) rune {
 		switch r {
 		case '/', '\\':
 			return '_'
-		case ':', '*', '?', '"', '<', '>', '|', '(', ')':
+		case ':', '*', '?', '"', '<', '>', '|':
 			return '_'
 		case 0:
 			return -1
