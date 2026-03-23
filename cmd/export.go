@@ -11,7 +11,6 @@ import (
 	utils "github.com/KazanKK/seedmancer/internal/utils"
 
 	"github.com/urfave/cli/v2"
-	"gopkg.in/yaml.v3"
 )
 
 func ExportCommand() *cli.Command {
@@ -31,8 +30,9 @@ func ExportCommand() *cli.Command {
 			},
 			&cli.StringFlag{
 				Name:     "db-url",
-				Required: true,
-				Usage:    "Database connection URL (e.g., postgres://user:pass@localhost:5432/dbname or mysql://user:pass@localhost:3306/dbname)",
+				Required: false,
+				Usage:    "Database connection URL (overrides database_url in seedmancer.yaml and SEEDMANCER_DATABASE_URL)",
+				EnvVars:  []string{"SEEDMANCER_DATABASE_URL"},
 			},
 		},
 		Action: func(c *cli.Context) error {
@@ -43,19 +43,19 @@ func ExportCommand() *cli.Command {
 			}
 			
 			projectRoot := filepath.Dir(configPath)
-			data, err := os.ReadFile(configPath)
+
+			cfg, err := utils.LoadConfig(configPath)
 			if err != nil {
-				return fmt.Errorf("reading config file: %v", err)
-			}
-			
-			var config struct {
-				StoragePath string `yaml:"storage_path"`
-			}
-			if err := yaml.Unmarshal(data, &config); err != nil {
-				return fmt.Errorf("parsing config file: %v", err)
+				return err
 			}
 
 			dbURL := c.String("db-url")
+			if dbURL == "" {
+				dbURL = cfg.DatabaseURL
+			}
+			if dbURL == "" {
+				return fmt.Errorf("database URL required: set database_url in seedmancer.yaml, or use --db-url / SEEDMANCER_DATABASE_URL")
+			}
 			databaseName := c.String("database-name")
 			versionName := c.String("version-name")
 			
@@ -74,7 +74,7 @@ func ExportCommand() *cli.Command {
 			}
 			
 			// Create output directory based on version
-			outputDir := utils.GetVersionPath(projectRoot, config.StoragePath, databaseName, versionName)
+			outputDir := utils.GetVersionPath(projectRoot, cfg.StoragePath, databaseName, versionName)
 			if err := os.MkdirAll(outputDir, 0755); err != nil {
 				return fmt.Errorf("creating output directory: %v", err)
 			}

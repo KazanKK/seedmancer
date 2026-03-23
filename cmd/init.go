@@ -19,30 +19,34 @@ func InitCommand() *cli.Command {
 				Usage: "Path to store seedmancer files",
 				Value: ".seedmancer",
 			},
+			&cli.StringFlag{
+				Name:  "database-url",
+				Usage: "Default database connection URL (written as database_url; optional)",
+			},
 		},
 		Action: func(c *cli.Context) error {
 			storagePath := c.String("storage-path")
-			
+			databaseURL := c.String("database-url")
+
 			// If no --storage-path provided, try to get from existing config
 			if !c.IsSet("storage-path") {
 				if configPath, err := utils.FindConfigFile(); err == nil {
-					data, err := os.ReadFile(configPath)
-					if err == nil {
-						var existingConfig struct {
-							StoragePath string `yaml:"storage_path"`
-						}
-						if err := yaml.Unmarshal(data, &existingConfig); err == nil {
-							storagePath = existingConfig.StoragePath
-						}
+					if existing, err := utils.LoadConfig(configPath); err == nil {
+						storagePath = existing.StoragePath
 					}
 				}
 			}
-			
-			// Create config struct
-			config := struct {
-				StoragePath string `yaml:"storage_path"`
-			}{
+			if !c.IsSet("database-url") {
+				if configPath, err := utils.FindConfigFile(); err == nil {
+					if existing, err := utils.LoadConfig(configPath); err == nil {
+						databaseURL = existing.DatabaseURL
+					}
+				}
+			}
+
+			config := utils.Config{
 				StoragePath: storagePath,
+				DatabaseURL: databaseURL,
 			}
 			
 			// Convert to YAML
@@ -62,6 +66,9 @@ func InitCommand() *cli.Command {
 			}
 			
 			fmt.Printf("Created seedmancer.yaml with storage path: %s\n", storagePath)
+			if databaseURL != "" {
+				fmt.Println("database_url is set in seedmancer.yaml")
+			}
 			return nil
 		},
 	}

@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-
-	"gopkg.in/yaml.v3"
 )
 
 // FindConfigFile tries to find the seedmancer config file in the current directory
@@ -56,17 +54,9 @@ func GetBaseURL() string {
 
 // ReadConfig reads the seedmancer config file and returns the storage path
 func ReadConfig(configPath string) (string, error) {
-	data, err := os.ReadFile(configPath)
+	cfg, err := LoadConfig(configPath)
 	if err != nil {
-		return "", fmt.Errorf("reading config file: %v", err)
+		return "", err
 	}
-	
-	var config struct {
-		StoragePath string `yaml:"storage_path"`
-	}
-	if err := yaml.Unmarshal(data, &config); err != nil {
-		return "", fmt.Errorf("parsing config file: %v", err)
-	}
-	
-	return config.StoragePath, nil
+	return cfg.StoragePath, nil
 }

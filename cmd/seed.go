@@ -11,7 +11,6 @@ import (
 	utils "github.com/KazanKK/seedmancer/internal/utils"
 
 	"github.com/urfave/cli/v2"
-	"gopkg.in/yaml.v3"
 )
 
 func SeedCommand() *cli.Command {
@@ -31,8 +30,9 @@ func SeedCommand() *cli.Command {
 			},
 			&cli.StringFlag{
 				Name:     "db-url",
-				Required: true,
-				Usage:    "Database connection URL (e.g., postgres://user:pass@localhost:5432/dbname or mysql://user:pass@localhost:3306/dbname)",
+				Required: false,
+				Usage:    "Database connection URL (overrides database_url in seedmancer.yaml and SEEDMANCER_DATABASE_URL)",
+				EnvVars:  []string{"SEEDMANCER_DATABASE_URL"},
 			},
 		},
 		Action: func(c *cli.Context) error {
@@ -43,24 +43,24 @@ func SeedCommand() *cli.Command {
 			}
 
 			projectRoot := filepath.Dir(configPath)
-			data, err := os.ReadFile(configPath)
-			if err != nil {
-				return fmt.Errorf("reading config file: %v", err)
-			}
 
-			var config struct {
-				StoragePath string `yaml:"storage_path"`
-			}
-			if err := yaml.Unmarshal(data, &config); err != nil {
-				return fmt.Errorf("parsing config file: %v", err)
+			cfg, err := utils.LoadConfig(configPath)
+			if err != nil {
+				return err
 			}
 
 			databaseName := c.String("database-name")
 			versionName := c.String("version-name")
 			dbURL := c.String("db-url")
+			if dbURL == "" {
+				dbURL = cfg.DatabaseURL
+			}
+			if dbURL == "" {
+				return fmt.Errorf("database URL required: set database_url in seedmancer.yaml, or use --db-url / SEEDMANCER_DATABASE_URL")
+			}
 
 			// Check local test data directory
-			versionPath := filepath.Join(projectRoot, config.StoragePath, "databases", databaseName, versionName)
+			versionPath := filepath.Join(projectRoot, cfg.StoragePath, "databases", databaseName, versionName)
 			if _, err := os.Stat(versionPath); err != nil {
 				if os.IsNotExist(err) {
 					return fmt.Errorf("local test data not found for version '%s'", versionName)
@@ -76,7 +76,11 @@ func SeedCommand() *cli.Command {
 			}
 			
 			if u.Scheme == "postgres" && !strings.Contains(dbURL, "sslmode=") {
-				dbURL += "?sslmode=disable"
+				if strings.Contains(dbURL, "?") {
+					dbURL += "&sslmode=disable"
+				} else {
+					dbURL += "?sslmode=disable"
+				}
 			}
 
 			// Create appropriate database manager based on URL scheme
