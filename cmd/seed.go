@@ -3,7 +3,6 @@ package cmd
 import (
 	"fmt"
 	"net/url"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -20,13 +19,13 @@ func SeedCommand() *cli.Command {
 		Flags: []cli.Flag{
 			&cli.StringFlag{
 				Name:     "database-name",
-				Required: true,
-				Usage:    "Database name",
+				Required: false,
+				Usage:    "Database name (overrides database_name in seedmancer.yaml)",
 			},
 			&cli.StringFlag{
 				Name:     "version-name",
-				Required: true,
-				Usage:    "version name",
+				Required: false,
+				Usage:    "Test data version directory (optional; if omitted, uses latest YYYYMMDDHHMMSS_(...) folder, else unversioned, else sole folder)",
 			},
 			&cli.StringFlag{
 				Name:     "db-url",
@@ -50,7 +49,12 @@ func SeedCommand() *cli.Command {
 			}
 
 			databaseName := c.String("database-name")
-			versionName := c.String("version-name")
+			if databaseName == "" {
+				databaseName = cfg.DatabaseName
+			}
+			if databaseName == "" {
+				return fmt.Errorf("database name required: set database_name in seedmancer.yaml, or use --database-name")
+			}
 			dbURL := c.String("db-url")
 			if dbURL == "" {
 				dbURL = cfg.DatabaseURL
@@ -59,15 +63,11 @@ func SeedCommand() *cli.Command {
 				return fmt.Errorf("database URL required: set database_url in seedmancer.yaml, or use --db-url / SEEDMANCER_DATABASE_URL")
 			}
 
-			// Check local test data directory
-			versionPath := filepath.Join(projectRoot, cfg.StoragePath, "databases", databaseName, versionName)
-			if _, err := os.Stat(versionPath); err != nil {
-				if os.IsNotExist(err) {
-					return fmt.Errorf("local test data not found for version '%s'", versionName)
-				} else {
-					return fmt.Errorf("checking version directory: %v", err)
-				}
+			versionName, versionPath, err := utils.ResolveSeedVersion(projectRoot, cfg.StoragePath, databaseName, c.String("version-name"))
+			if err != nil {
+				return err
 			}
+			fmt.Printf("Using test data version: %s\n", versionName)
 
 			// Add sslmode=disable to the connection string if not present and it's postgres
 			u, err := url.Parse(dbURL)

@@ -20,13 +20,13 @@ func ExportCommand() *cli.Command {
 		Flags: []cli.Flag{
 			&cli.StringFlag{
 				Name:     "database-name",
-				Required: true,
-				Usage:    "Database name",
+				Required: false,
+				Usage:    "Database name (overrides database_name in seedmancer.yaml)",
 			},
 			&cli.StringFlag{
 				Name:     "version-name",
 				Required: false,
-				Usage:    "Version name (optional, defaults to unversioned)",
+				Usage:    "Version directory name (optional; if omitted, uses UTC YYYYMMDDHHMMSS_(database-name))",
 			},
 			&cli.StringFlag{
 				Name:     "db-url",
@@ -57,7 +57,17 @@ func ExportCommand() *cli.Command {
 				return fmt.Errorf("database URL required: set database_url in seedmancer.yaml, or use --db-url / SEEDMANCER_DATABASE_URL")
 			}
 			databaseName := c.String("database-name")
-			versionName := c.String("version-name")
+			if databaseName == "" {
+				databaseName = cfg.DatabaseName
+			}
+			if databaseName == "" {
+				return fmt.Errorf("database name required: set database_name in seedmancer.yaml, or use --database-name")
+			}
+			versionName := strings.TrimSpace(c.String("version-name"))
+			if versionName == "" {
+				versionName = utils.DefaultVersionName(databaseName)
+				fmt.Printf("Using auto-generated version name: %s\n", versionName)
+			}
 			
 			// Add sslmode=disable to PostgreSQL connection if not present
 			u, err := url.Parse(dbURL)
@@ -118,12 +128,6 @@ func ExportCommand() *cli.Command {
 			}
 
 			fmt.Printf("\n✅ Export successful! Data stored in %s\n", outputDir)
-			
-			if versionName == "" {
-				fmt.Println("\nTo save this as a version:")
-				fmt.Printf("  seedmancer save --database-name %s --version-name <version-name>\n", databaseName)
-			}
-			
 			return nil
 		},
 	}

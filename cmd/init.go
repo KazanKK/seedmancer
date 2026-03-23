@@ -23,72 +23,63 @@ func InitCommand() *cli.Command {
 				Value: ".seedmancer",
 			},
 			&cli.StringFlag{
+				Name:  "database-name",
+				Usage: "Default database name",
+			},
+			&cli.StringFlag{
 				Name:  "database-url",
-				Usage: "Default database connection URL (written as database_url; optional)",
+				Usage: "Default database connection URL",
 			},
 		},
 		Action: func(c *cli.Context) error {
+			// Seed values from existing config, then flags override.
 			storagePath := c.String("storage-path")
+			databaseName := c.String("database-name")
 			databaseURL := c.String("database-url")
 
-			if !c.IsSet("storage-path") {
-				if configPath, err := utils.FindConfigFile(); err == nil {
-					if existing, err := utils.LoadConfig(configPath); err == nil {
-						storagePath = existing.StoragePath
-					}
+			if existing, err := loadExistingConfig(); err == nil {
+				if !c.IsSet("storage-path") && existing.StoragePath != "" {
+					storagePath = existing.StoragePath
 				}
-			}
-			if !c.IsSet("database-url") {
-				if configPath, err := utils.FindConfigFile(); err == nil {
-					if existing, err := utils.LoadConfig(configPath); err == nil {
-						databaseURL = existing.DatabaseURL
-					}
+				if !c.IsSet("database-name") && existing.DatabaseName != "" {
+					databaseName = existing.DatabaseName
+				}
+				if !c.IsSet("database-url") && existing.DatabaseURL != "" {
+					databaseURL = existing.DatabaseURL
 				}
 			}
 
-			askStorage := !c.IsSet("storage-path")
-			askDB := !c.IsSet("database-url")
-			interactive := term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd()))
-
-			if interactive && (askStorage || askDB) {
-				totalSteps := 0
-				if askStorage {
-					totalSteps++
-				}
-				if askDB {
-					totalSteps++
-				}
-				printInitIntro(storagePath, databaseURL, totalSteps)
+			if term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd())) {
 				in := bufio.NewReader(os.Stdin)
-				step := 0
 				var err error
-				if askStorage {
-					step++
-					storagePath, err = promptStep(in, step, totalSteps, "Storage path",
-						"Directory for seed data (CSV, schema, etc.).", storagePath)
+
+				if !c.IsSet("storage-path") {
+					storagePath, err = prompt(in, "Storage path", storagePath, true)
 					if err != nil {
 						return err
 					}
-					if strings.TrimSpace(storagePath) == "" {
-						return fmt.Errorf("storage path cannot be empty")
+				}
+				if !c.IsSet("database-name") {
+					databaseName, err = prompt(in, "Database name", databaseName, false)
+					if err != nil {
+						return err
 					}
 				}
-				if askDB {
-					step++
-					databaseURL, err = promptStep(in, step, totalSteps, "Database URL",
-						"Default connection for seed/export. Optional.", databaseURL)
+				if !c.IsSet("database-url") {
+					databaseURL, err = prompt(in, "Database URL", databaseURL, false)
 					if err != nil {
 						return err
 					}
 				}
 			}
 
-			config := utils.Config{
-				StoragePath: storagePath,
-				DatabaseURL: databaseURL,
+			cfg := utils.Config{
+				StoragePath:  storagePath,
+				DatabaseName: databaseName,
+				DatabaseURL:  databaseURL,
 			}
 
-			yamlData, err := yaml.Marshal(config)
+			yamlData, err := yaml.Marshal(cfg)
 			if err != nil {
 				return fmt.Errorf("creating yaml: %v", err)
 			}
@@ -102,47 +93,48 @@ func InitCommand() *cli.Command {
 			}
 
 			fmt.Println()
-			fmt.Printf("Created seedmancer.yaml with storage path: %s\n", storagePath)
+			fmt.Println("Created seedmancer.yaml")
+			fmt.Printf("  storage_path:  %s\n", storagePath)
+			if databaseName != "" {
+				fmt.Printf("  database_name: %s\n", databaseName)
+			}
 			if databaseURL != "" {
-				fmt.Println("database_url is set in seedmancer.yaml")
+				fmt.Printf("  database_url:  %s\n", databaseURL)
 			}
 			return nil
 		},
 	}
 }
 
-func printInitIntro(storagePath, databaseURL string, totalSteps int) {
-	fmt.Println()
-	fmt.Println("  seedmancer init")
-	fmt.Println("  ─────────────────")
-	fmt.Println()
-	fmt.Printf("  This wizard has %d step(s). Defaults you can accept with Enter:\n\n", totalSteps)
-	fmt.Printf("    • storage_path  →  %s\n", storagePath)
-	if databaseURL != "" {
-		fmt.Printf("    • database_url  →  %s\n", databaseURL)
-	} else {
-		fmt.Printf("    • database_url  →  (not set; optional)\n")
+// loadExistingConfig returns the nearest config without failing if none exists.
+func loadExistingConfig() (utils.Config, error) {
+	configPath, err := utils.FindConfigFile()
+	if err != nil {
+		return utils.Config{}, err
 	}
-	fmt.Println()
-	fmt.Println("  ─────────────────")
-	fmt.Println()
+	return utils.LoadConfig(configPath)
 }
 
-func promptStep(in *bufio.Reader, step, total int, title, hint, defaultVal string) (string, error) {
-	fmt.Printf("  Step %d of %d  %s\n", step, total, title)
-	fmt.Printf("  %s\n", hint)
-	if defaultVal == "" {
-		fmt.Printf("  Default: (none — press Enter to skip)\n")
+// prompt prints "? Label (default): " and reads one line.
+// If the user presses Enter with no input the default is returned.
+// When required is true and the result is empty, the error is surfaced.
+func prompt(in *bufio.Reader, label, defaultVal string, required bool) (string, error) {
+	if defaultVal != "" {
+		fmt.Printf("? %s (%s): ", label, defaultVal)
 	} else {
-		fmt.Printf("  Default: %s\n", defaultVal)
+		fmt.Printf("? %s: ", label)
 	}
-	fmt.Print("  › ")
+
 	line, err := in.ReadString('\n')
 	if err != nil {
 		return "", fmt.Errorf("reading input: %w", err)
 	}
+
 	s := strings.TrimSpace(line)
 	if s == "" {
+		if required && defaultVal == "" {
+			return "", fmt.Errorf("%s cannot be empty", label)
+		}
 		return defaultVal, nil
 	}
 	return s, nil

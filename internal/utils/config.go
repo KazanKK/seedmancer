@@ -9,9 +9,9 @@ import (
 
 // Config is the shape of seedmancer.yaml (project or ~/.seedmancer/config.yaml).
 type Config struct {
-	StoragePath string `yaml:"storage_path"`
-	// DatabaseURL is optional; used by seed/export when --db-url is not set.
-	DatabaseURL string `yaml:"database_url,omitempty"`
+	StoragePath  string `yaml:"storage_path"`
+	DatabaseName string `yaml:"database_name,omitempty"`
+	DatabaseURL  string `yaml:"database_url,omitempty"`
 }
 
 // LoadConfig reads and parses the full seedmancer config file.
