@@ -35,12 +35,6 @@ func FetchCommand() *cli.Command {
 				Usage:    "API token for authentication",
 				EnvVars:  []string{"SEEDMANCER_API_TOKEN"},
 			},
-			&cli.StringFlag{
-				Name:    "type",
-				Value:   "postgres",
-				Usage:   "Database type (postgres or mysql)",
-				EnvVars: []string{"SEEDMANCER_DB_TYPE"},
-			},
 		},
 		Action: func(c *cli.Context) error {
 			// Find config file to get storage path and project root
@@ -55,10 +49,9 @@ func FetchCommand() *cli.Command {
 				return fmt.Errorf("reading config: %v", err)
 			}
 
-			databaseName := c.String("database-name")
-			version := c.String("version")
-			token := c.String("token")
-			dbType := c.String("type")
+		databaseName := c.String("database-name")
+		version := c.String("version")
+		token := c.String("token")
 
 			// Create output directory structure
 			outputDir := filepath.Join(projectRoot, storagePath, "databases", databaseName, version)
@@ -77,7 +70,7 @@ func FetchCommand() *cli.Command {
 
 			baseURL := utils.GetBaseURL()
 			
-			if err := fetchData(baseURL, databaseName, version, outputDir, token, dbType); err != nil {
+			if err := fetchData(baseURL, databaseName, version, outputDir, token); err != nil {
 				if err.Error() == "unauthorized: please check your API token" {
 					fmt.Println("\n❌ Authentication failed!")
 					fmt.Println("\nPlease ensure you have:")
@@ -100,10 +93,9 @@ func FetchCommand() *cli.Command {
 }
 
 // fetchData downloads and extracts database schema and test data
-func fetchData(baseURL, databaseName, version, outputDir, token, dbType string) error {
-	// Create request
-	req, err := http.NewRequest("GET", fmt.Sprintf("%s/api/v1.0/databases/testdata/fetch?database_name=%s&version_name=%s&db_type=%s", 
-		baseURL, databaseName, version, dbType), nil)
+func fetchData(baseURL, databaseName, version, outputDir, token string) error {
+	req, err := http.NewRequest("GET", fmt.Sprintf("%s/api/v1.0/databases/testdata/fetch?database_name=%s&version_name=%s",
+		baseURL, databaseName, version), nil)
 	if err != nil {
 		return fmt.Errorf("creating request: %v", err)
 	}

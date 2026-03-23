@@ -31,12 +31,11 @@ type DatabaseType string
 
 const (
 	Postgres DatabaseType = "postgres"
-	MySQL    DatabaseType = "mysql"
 )
 
 // Updated Schema struct to include database type
 type Schema struct {
-    DatabaseType DatabaseType `json:"databaseType"` // "postgres", "mysql", etc.
+	DatabaseType DatabaseType `json:"databaseType"`
     Enums        []EnumItem   `json:"enums"`
     Tables       []Table      `json:"tables,omitempty"`
 }

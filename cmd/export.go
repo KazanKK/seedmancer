@@ -90,42 +90,24 @@ func ExportCommand() *cli.Command {
 			}
 
 			// Handle database connection and export
-			switch u.Scheme {
-			case "postgres":
-				pg := &db.PostgresManager{}
-				if err := pg.ConnectWithDSN(dbURL); err != nil {
-					return fmt.Errorf("connecting to database: %v", err)
-				}
-				
-				fmt.Println("Exporting database schema...")
-				if err := pg.ExportSchema(filepath.Join(outputDir, "schema.json")); err != nil {
-					return fmt.Errorf("exporting schema: %v", err)
-				}
-				
-				fmt.Println("Exporting table data...")
-				if err := pg.ExportToCSV(outputDir); err != nil {
-					return fmt.Errorf("exporting data: %v", err)
-				}
-			
-			case "mysql":
-				my := &db.MySQLManager{}
-				if err := my.ConnectWithDSN(dbURL); err != nil {
-					return fmt.Errorf("connecting to database: %v", err)
-				}
-				
-				fmt.Println("Exporting database schema...")
-				if err := my.ExportSchema(filepath.Join(outputDir, "schema.json")); err != nil {
-					return fmt.Errorf("exporting schema: %v", err)
-				}
-				
-				fmt.Println("Exporting table data...")
-				if err := my.ExportToCSV(outputDir); err != nil {
-					return fmt.Errorf("exporting data: %v", err)
-				}
-				
-			default:
-				return fmt.Errorf("unsupported database type: %s", u.Scheme)
-			}
+		if u.Scheme != "postgres" {
+			return fmt.Errorf("unsupported database type: %s (only postgres is supported)", u.Scheme)
+		}
+
+		pg := &db.PostgresManager{}
+		if err := pg.ConnectWithDSN(dbURL); err != nil {
+			return fmt.Errorf("connecting to database: %v", err)
+		}
+
+		fmt.Println("Exporting database schema...")
+		if err := pg.ExportSchema(filepath.Join(outputDir, "schema.json")); err != nil {
+			return fmt.Errorf("exporting schema: %v", err)
+		}
+
+		fmt.Println("Exporting table data...")
+		if err := pg.ExportToCSV(outputDir); err != nil {
+			return fmt.Errorf("exporting data: %v", err)
+		}
 
 			fmt.Printf("\n✅ Export successful! Data stored in %s\n", outputDir)
 			return nil

@@ -83,27 +83,15 @@ func SeedCommand() *cli.Command {
 				}
 			}
 
-			// Create appropriate database manager based on URL scheme
-			var dbManager db.DatabaseManager
-			
-			switch u.Scheme {
-			case "postgres":
-				pg := &db.PostgresManager{}
-				if err := pg.ConnectWithDSN(dbURL); err != nil {
-					return fmt.Errorf("connecting to database: %v", err)
-				}
-				dbManager = pg
-				
-			case "mysql":
-				my := &db.MySQLManager{}
-				if err := my.ConnectWithDSN(dbURL); err != nil {
-					return fmt.Errorf("connecting to database: %v", err)
-				}
-				dbManager = my
-				
-			default:
-				return fmt.Errorf("unsupported database type: %s", u.Scheme)
-			}
+		if u.Scheme != "postgres" {
+			return fmt.Errorf("unsupported database type: %s (only postgres is supported)", u.Scheme)
+		}
+
+		pg := &db.PostgresManager{}
+		if err := pg.ConnectWithDSN(dbURL); err != nil {
+			return fmt.Errorf("connecting to database: %v", err)
+		}
+		var dbManager db.DatabaseManager = pg
 
 			fmt.Printf("Importing test data from: %s\n", versionPath)
 			if err := dbManager.RestoreFromCSV(versionPath); err != nil {
