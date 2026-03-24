@@ -18,6 +18,7 @@ func main() {
 			cmd.ExportCommand(),
 			cmd.ListCommand(),
 			cmd.FetchCommand(),
+			cmd.GenerateCommand(),
 		},
 	}
 
