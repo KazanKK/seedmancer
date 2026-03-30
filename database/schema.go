@@ -33,9 +33,10 @@ type Function struct {
 }
 
 type Trigger struct {
-	Name       string `json:"name"`
-	TableName  string `json:"tableName"`
-	Definition string `json:"definition"`
+	Name        string `json:"name"`
+	TableName   string `json:"tableName"`
+	TableSchema string `json:"tableSchema"`
+	Definition  string `json:"definition"`
 }
 
 type DatabaseType string

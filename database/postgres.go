@@ -105,33 +105,40 @@ func (p *PostgresManager) ExtractSchema() (*Schema, error) {
 		}
 	}
 
-	// Extract user-defined triggers (excluding internal system triggers)
+	// Extract user-defined triggers whose function lives in the public schema.
+	// This captures triggers on any schema (e.g. auth.users) as long as they
+	// call a user-defined public function, while excluding Supabase system
+	// triggers (pgsodium, realtime, storage, vault, etc.).
 	var triggers []Trigger
 	triggerRows, err := p.DB.Query(`
 		SELECT
 			t.tgname AS name,
 			c.relname AS table_name,
+			tn.nspname AS table_schema,
 			pg_get_triggerdef(t.oid) AS definition
 		FROM pg_trigger t
 		JOIN pg_class c ON c.oid = t.tgrelid
-		JOIN pg_namespace n ON n.oid = c.relnamespace
-		WHERE n.nspname = 'public'
-		AND NOT t.tgisinternal
-		ORDER BY c.relname, t.tgname
+		JOIN pg_namespace tn ON tn.oid = c.relnamespace
+		JOIN pg_proc p ON p.oid = t.tgfoid
+		JOIN pg_namespace fn ON fn.oid = p.pronamespace
+		WHERE NOT t.tgisinternal
+		AND fn.nspname = 'public'
+		ORDER BY tn.nspname, c.relname, t.tgname
 	`)
 	if err != nil {
 		return nil, fmt.Errorf("querying triggers: %v", err)
 	}
 	defer triggerRows.Close()
 	for triggerRows.Next() {
-		var name, tableName, definition string
-		if err := triggerRows.Scan(&name, &tableName, &definition); err != nil {
+		var name, tableName, tableSchema, definition string
+		if err := triggerRows.Scan(&name, &tableName, &tableSchema, &definition); err != nil {
 			return nil, fmt.Errorf("scanning trigger info: %v", err)
 		}
 		triggers = append(triggers, Trigger{
-			Name:       name,
-			TableName:  tableName,
-			Definition: definition,
+			Name:        name,
+			TableName:   tableName,
+			TableSchema: tableSchema,
+			Definition:  definition,
 		})
 	}
 
@@ -393,18 +400,22 @@ func (p *PostgresManager) RestoreFromCSV(directory string) error {
 
 	// Restore triggers — drop first (CREATE OR REPLACE TRIGGER requires PG14+)
 	for _, trigger := range schema.Triggers {
+		tableRef := pq.QuoteIdentifier(trigger.TableName)
+		if trigger.TableSchema != "" && trigger.TableSchema != "public" {
+			tableRef = pq.QuoteIdentifier(trigger.TableSchema) + "." + tableRef
+		}
 		dropSQL := fmt.Sprintf("DROP TRIGGER IF EXISTS %s ON %s",
 			pq.QuoteIdentifier(trigger.Name),
-			pq.QuoteIdentifier(trigger.TableName))
+			tableRef)
 		p.logSQL(fmt.Sprintf("Drop Trigger %s", trigger.Name), dropSQL)
 		if _, err := p.DB.Exec(dropSQL); err != nil {
 			return fmt.Errorf("dropping trigger %s: %v", trigger.Name, err)
 		}
 		p.logSQL(fmt.Sprintf("Restore Trigger %s", trigger.Name), trigger.Definition)
 		if _, err := p.DB.Exec(trigger.Definition); err != nil {
-			return fmt.Errorf("restoring trigger %s on %s: %v", trigger.Name, trigger.TableName, err)
+			return fmt.Errorf("restoring trigger %s on %s: %v", trigger.Name, tableRef, err)
 		}
-		p.log("Restored trigger: %s on %s", trigger.Name, trigger.TableName)
+		p.log("Restored trigger: %s on %s", trigger.Name, tableRef)
 	}
 
 	// Then import data for each table
