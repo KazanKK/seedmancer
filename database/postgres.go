@@ -77,6 +77,64 @@ func (p *PostgresManager) ExtractSchema() (*Schema, error) {
 		})
 	}
 
+	// Extract user-defined functions (prokind 'f'=function, 'p'=procedure; requires PG11+)
+	var functions []Function
+	funcRows, err := p.DB.Query(`
+		SELECT
+			p.proname AS name,
+			pg_get_functiondef(p.oid) AS definition
+		FROM pg_proc p
+		JOIN pg_namespace n ON n.oid = p.pronamespace
+		WHERE n.nspname = 'public'
+		AND p.prokind IN ('f', 'p')
+		ORDER BY p.proname
+	`)
+	if err != nil {
+		p.log("Warning: could not query functions (requires PostgreSQL 11+): %v", err)
+	} else {
+		defer funcRows.Close()
+		for funcRows.Next() {
+			var name, definition string
+			if err := funcRows.Scan(&name, &definition); err != nil {
+				return nil, fmt.Errorf("scanning function info: %v", err)
+			}
+			functions = append(functions, Function{
+				Name:       name,
+				Definition: definition,
+			})
+		}
+	}
+
+	// Extract user-defined triggers (excluding internal system triggers)
+	var triggers []Trigger
+	triggerRows, err := p.DB.Query(`
+		SELECT
+			t.tgname AS name,
+			c.relname AS table_name,
+			pg_get_triggerdef(t.oid) AS definition
+		FROM pg_trigger t
+		JOIN pg_class c ON c.oid = t.tgrelid
+		JOIN pg_namespace n ON n.oid = c.relnamespace
+		WHERE n.nspname = 'public'
+		AND NOT t.tgisinternal
+		ORDER BY c.relname, t.tgname
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("querying triggers: %v", err)
+	}
+	defer triggerRows.Close()
+	for triggerRows.Next() {
+		var name, tableName, definition string
+		if err := triggerRows.Scan(&name, &tableName, &definition); err != nil {
+			return nil, fmt.Errorf("scanning trigger info: %v", err)
+		}
+		triggers = append(triggers, Trigger{
+			Name:       name,
+			TableName:  tableName,
+			Definition: definition,
+		})
+	}
+
 	// Updated query to include character_maximum_length for varchar columns
 	rows, err := p.DB.Query(`
 		WITH fk_info AS (
@@ -140,8 +198,10 @@ func (p *PostgresManager) ExtractSchema() (*Schema, error) {
 
 schema := &Schema{
 		DatabaseType: "postgres",
-		Enums:  enums,
-		Tables: make([]Table, 0),
+		Enums:        enums,
+		Tables:       make([]Table, 0),
+		Functions:    functions,
+		Triggers:     triggers,
 	}
 
 	// Process tables and columns
@@ -320,6 +380,31 @@ func (p *PostgresManager) RestoreFromCSV(directory string) error {
 		if err := p.addForeignKeys(table); err != nil {
 			return fmt.Errorf("adding foreign keys for table %s: %v", table.Name, err)
 		}
+	}
+
+	// Restore functions — pg_get_functiondef always emits CREATE OR REPLACE FUNCTION
+	for _, fn := range schema.Functions {
+		p.logSQL(fmt.Sprintf("Restore Function %s", fn.Name), fn.Definition)
+		if _, err := p.DB.Exec(fn.Definition); err != nil {
+			return fmt.Errorf("restoring function %s: %v", fn.Name, err)
+		}
+		p.log("Restored function: %s", fn.Name)
+	}
+
+	// Restore triggers — drop first (CREATE OR REPLACE TRIGGER requires PG14+)
+	for _, trigger := range schema.Triggers {
+		dropSQL := fmt.Sprintf("DROP TRIGGER IF EXISTS %s ON %s",
+			pq.QuoteIdentifier(trigger.Name),
+			pq.QuoteIdentifier(trigger.TableName))
+		p.logSQL(fmt.Sprintf("Drop Trigger %s", trigger.Name), dropSQL)
+		if _, err := p.DB.Exec(dropSQL); err != nil {
+			return fmt.Errorf("dropping trigger %s: %v", trigger.Name, err)
+		}
+		p.logSQL(fmt.Sprintf("Restore Trigger %s", trigger.Name), trigger.Definition)
+		if _, err := p.DB.Exec(trigger.Definition); err != nil {
+			return fmt.Errorf("restoring trigger %s on %s: %v", trigger.Name, trigger.TableName, err)
+		}
+		p.log("Restored trigger: %s on %s", trigger.Name, trigger.TableName)
 	}
 
 	// Then import data for each table
