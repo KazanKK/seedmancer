@@ -389,33 +389,88 @@ func (p *PostgresManager) RestoreFromCSV(directory string) error {
 		}
 	}
 
-	// Restore functions — pg_get_functiondef always emits CREATE OR REPLACE FUNCTION
-	for _, fn := range schema.Functions {
-		p.logSQL(fmt.Sprintf("Restore Function %s", fn.Name), fn.Definition)
-		if _, err := p.DB.Exec(fn.Definition); err != nil {
-			return fmt.Errorf("restoring function %s: %v", fn.Name, err)
+	// Restore functions — prefer SQL files, fall back to schema.json entries
+	functionsDir := filepath.Join(directory, "functions")
+	if entries, err := os.ReadDir(functionsDir); err == nil {
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") {
+				continue
+			}
+			sqlPath := filepath.Join(functionsDir, entry.Name())
+			content, err := os.ReadFile(sqlPath)
+			if err != nil {
+				return fmt.Errorf("reading function file %s: %v", entry.Name(), err)
+			}
+			fnName := strings.TrimSuffix(entry.Name(), ".sql")
+			p.logSQL(fmt.Sprintf("Restore Function %s", fnName), string(content))
+			if _, err := p.DB.Exec(string(content)); err != nil {
+				return fmt.Errorf("restoring function %s: %v", fnName, err)
+			}
+			p.log("Restored function: %s", fnName)
 		}
-		p.log("Restored function: %s", fn.Name)
+	} else {
+		// Fallback: functions embedded in schema.json (legacy format)
+		for _, fn := range schema.Functions {
+			p.logSQL(fmt.Sprintf("Restore Function %s", fn.Name), fn.Definition)
+			if _, err := p.DB.Exec(fn.Definition); err != nil {
+				return fmt.Errorf("restoring function %s: %v", fn.Name, err)
+			}
+			p.log("Restored function: %s", fn.Name)
+		}
 	}
 
-	// Restore triggers — drop first (CREATE OR REPLACE TRIGGER requires PG14+)
-	for _, trigger := range schema.Triggers {
-		tableRef := pq.QuoteIdentifier(trigger.TableName)
-		if trigger.TableSchema != "" && trigger.TableSchema != "public" {
-			tableRef = pq.QuoteIdentifier(trigger.TableSchema) + "." + tableRef
+	// Restore triggers — prefer SQL files, fall back to schema.json entries.
+	// DROP before CREATE because CREATE OR REPLACE TRIGGER requires PG14+.
+	triggersDir := filepath.Join(directory, "triggers")
+	if entries, err := os.ReadDir(triggersDir); err == nil {
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") {
+				continue
+			}
+			sqlPath := filepath.Join(triggersDir, entry.Name())
+			content, err := os.ReadFile(sqlPath)
+			if err != nil {
+				return fmt.Errorf("reading trigger file %s: %v", entry.Name(), err)
+			}
+			name, tableSchema, tableName, definition, parseErr := parseTriggerSQL(string(content))
+			if parseErr != nil {
+				return fmt.Errorf("parsing trigger file %s: %v", entry.Name(), parseErr)
+			}
+			tableRef := pq.QuoteIdentifier(tableName)
+			if tableSchema != "" && tableSchema != "public" {
+				tableRef = pq.QuoteIdentifier(tableSchema) + "." + tableRef
+			}
+			dropSQL := fmt.Sprintf("DROP TRIGGER IF EXISTS %s ON %s",
+				pq.QuoteIdentifier(name), tableRef)
+			p.logSQL(fmt.Sprintf("Drop Trigger %s", name), dropSQL)
+			if _, err := p.DB.Exec(dropSQL); err != nil {
+				return fmt.Errorf("dropping trigger %s: %v", name, err)
+			}
+			p.logSQL(fmt.Sprintf("Restore Trigger %s", name), definition)
+			if _, err := p.DB.Exec(definition); err != nil {
+				return fmt.Errorf("restoring trigger %s on %s: %v", name, tableRef, err)
+			}
+			p.log("Restored trigger: %s on %s", name, tableRef)
 		}
-		dropSQL := fmt.Sprintf("DROP TRIGGER IF EXISTS %s ON %s",
-			pq.QuoteIdentifier(trigger.Name),
-			tableRef)
-		p.logSQL(fmt.Sprintf("Drop Trigger %s", trigger.Name), dropSQL)
-		if _, err := p.DB.Exec(dropSQL); err != nil {
-			return fmt.Errorf("dropping trigger %s: %v", trigger.Name, err)
+	} else {
+		// Fallback: triggers embedded in schema.json (legacy format)
+		for _, trigger := range schema.Triggers {
+			tableRef := pq.QuoteIdentifier(trigger.TableName)
+			if trigger.TableSchema != "" && trigger.TableSchema != "public" {
+				tableRef = pq.QuoteIdentifier(trigger.TableSchema) + "." + tableRef
+			}
+			dropSQL := fmt.Sprintf("DROP TRIGGER IF EXISTS %s ON %s",
+				pq.QuoteIdentifier(trigger.Name), tableRef)
+			p.logSQL(fmt.Sprintf("Drop Trigger %s", trigger.Name), dropSQL)
+			if _, err := p.DB.Exec(dropSQL); err != nil {
+				return fmt.Errorf("dropping trigger %s: %v", trigger.Name, err)
+			}
+			p.logSQL(fmt.Sprintf("Restore Trigger %s", trigger.Name), trigger.Definition)
+			if _, err := p.DB.Exec(trigger.Definition); err != nil {
+				return fmt.Errorf("restoring trigger %s on %s: %v", trigger.Name, tableRef, err)
+			}
+			p.log("Restored trigger: %s on %s", trigger.Name, tableRef)
 		}
-		p.logSQL(fmt.Sprintf("Restore Trigger %s", trigger.Name), trigger.Definition)
-		if _, err := p.DB.Exec(trigger.Definition); err != nil {
-			return fmt.Errorf("restoring trigger %s on %s: %v", trigger.Name, tableRef, err)
-		}
-		p.log("Restored trigger: %s on %s", trigger.Name, tableRef)
 	}
 
 	// Then import data for each table
@@ -963,12 +1018,6 @@ func (p *PostgresManager) ExportToCSV(outputDir string) error {
 	if p.DB == nil {
 		return errors.New("no database connection")
 	}
-	// First export schema to the same directory
-	schemaPath := filepath.Join(outputDir, "schema.json")
-		if err := p.ExportSchema(schemaPath); err != nil {
-			return fmt.Errorf("exporting schema: %v", err)
-		}
-		p.log("Exported schema to: %s", schemaPath)
 
 	// Get list of tables
 	rows, err := p.DB.Query(`
@@ -1095,39 +1144,105 @@ func (p *PostgresManager) exportTableToCSV(tableName, outputDir string) error {
 	return nil
 }
 
-func (p *PostgresManager) ExportSchema(outputFile string) error {
+// ExportSchema exports the database schema to outputDir.
+// Tables/enums are written to schema.json; functions and triggers are each
+// written as individual .sql files under outputDir/functions/ and
+// outputDir/triggers/ respectively.
+func (p *PostgresManager) ExportSchema(outputDir string) error {
 	if p.DB == nil {
 		return errors.New("no database connection")
 	}
 
-	// Extract schema using existing method
 	schema, err := p.ExtractSchema()
 	if err != nil {
 		return fmt.Errorf("extracting schema: %v", err)
 	}
 
-	// Debug: Check if varchar fields are present
-	for _, table := range schema.Tables {
-		for _, col := range table.Columns {
-			if (col.Type == "character varying" || col.Type == "varchar") && col.Varchar != nil {
-				p.log("Exporting varchar length for %s.%s: %s", table.Name, col.Name, *col.Varchar)
+	// --- Export functions as individual SQL files ---
+	if len(schema.Functions) > 0 {
+		functionsDir := filepath.Join(outputDir, "functions")
+		if err := os.MkdirAll(functionsDir, 0755); err != nil {
+			return fmt.Errorf("creating functions directory: %v", err)
+		}
+		for _, fn := range schema.Functions {
+			sqlPath := filepath.Join(functionsDir, fn.Name+".sql")
+			if err := os.WriteFile(sqlPath, []byte(fn.Definition), 0644); err != nil {
+				return fmt.Errorf("writing function %s: %v", fn.Name, err)
 			}
+			p.log("Exported function: %s -> %s", fn.Name, sqlPath)
 		}
 	}
 
-	// Convert to JSON with pretty printing
-	jsonData, err := json.MarshalIndent(schema, "", "  ")
+	// --- Export triggers as individual SQL files ---
+	// Each file includes a metadata header so it can be restored without
+	// parsing the CREATE TRIGGER statement.
+	if len(schema.Triggers) > 0 {
+		triggersDir := filepath.Join(outputDir, "triggers")
+		if err := os.MkdirAll(triggersDir, 0755); err != nil {
+			return fmt.Errorf("creating triggers directory: %v", err)
+		}
+		for _, trigger := range schema.Triggers {
+			header := fmt.Sprintf("-- seedmancer:trigger\n-- name: %s\n-- table_schema: %s\n-- table_name: %s\n",
+				trigger.Name, trigger.TableSchema, trigger.TableName)
+			content := header + trigger.Definition
+			fileName := fmt.Sprintf("%s_%s.sql", trigger.TableName, trigger.Name)
+			sqlPath := filepath.Join(triggersDir, fileName)
+			if err := os.WriteFile(sqlPath, []byte(content), 0644); err != nil {
+				return fmt.Errorf("writing trigger %s: %v", trigger.Name, err)
+			}
+			p.log("Exported trigger: %s on %s.%s -> %s", trigger.Name, trigger.TableSchema, trigger.TableName, sqlPath)
+		}
+	}
+
+	// --- Write schema.json (tables + enums only, no functions/triggers) ---
+	schemaForJSON := Schema{
+		DatabaseType: schema.DatabaseType,
+		Enums:        schema.Enums,
+		Tables:       schema.Tables,
+	}
+
+	jsonData, err := json.MarshalIndent(schemaForJSON, "", "  ")
 	if err != nil {
 		return fmt.Errorf("converting schema to JSON: %v", err)
 	}
 
-	// Write to file
+	outputFile := filepath.Join(outputDir, "schema.json")
 	if err := os.WriteFile(outputFile, jsonData, 0644); err != nil {
 		return fmt.Errorf("writing schema to file: %v", err)
 	}
 
 	p.log("Schema exported to: %s", outputFile)
 	return nil
+}
+
+// parseTriggerSQL reads the seedmancer metadata header written by ExportSchema and
+// returns the trigger name, table schema, table name, and the raw SQL definition.
+// Header format (lines beginning with "--"):
+//
+//	-- seedmancer:trigger
+//	-- name: <name>
+//	-- table_schema: <schema>
+//	-- table_name: <table>
+func parseTriggerSQL(content string) (name, tableSchema, tableName, definition string, err error) {
+	lines := strings.Split(content, "\n")
+	var sqlLines []string
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "-- name:") {
+			name = strings.TrimSpace(strings.TrimPrefix(trimmed, "-- name:"))
+		} else if strings.HasPrefix(trimmed, "-- table_schema:") {
+			tableSchema = strings.TrimSpace(strings.TrimPrefix(trimmed, "-- table_schema:"))
+		} else if strings.HasPrefix(trimmed, "-- table_name:") {
+			tableName = strings.TrimSpace(strings.TrimPrefix(trimmed, "-- table_name:"))
+		} else if !strings.HasPrefix(trimmed, "--") {
+			sqlLines = append(sqlLines, line)
+		}
+	}
+	definition = strings.TrimSpace(strings.Join(sqlLines, "\n"))
+	if name == "" || tableName == "" || definition == "" {
+		err = fmt.Errorf("missing required metadata (name=%q table_name=%q)", name, tableName)
+	}
+	return
 }
 
 // Add a debug query to check character_maximum_length values

@@ -100,7 +100,7 @@ func ExportCommand() *cli.Command {
 		}
 
 		fmt.Println("Exporting database schema...")
-		if err := pg.ExportSchema(filepath.Join(outputDir, "schema.json")); err != nil {
+		if err := pg.ExportSchema(outputDir); err != nil {
 			return fmt.Errorf("exporting schema: %v", err)
 		}
 
