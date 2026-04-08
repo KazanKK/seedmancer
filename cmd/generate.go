@@ -475,6 +475,6 @@ func resolveAndStoreAPIToken(flagValue string) (string, error) {
 	return "", fmt.Errorf(
 		"Seedmancer API token required.\n" +
 			"  Use --token flag or set SEEDMANCER_API_TOKEN environment variable.\n" +
-			"  Get your token at: https://seedmancer.com/dashboard",
+			"  Get your token at: https://seedmancer.dev/dashboard",
 	)
 }

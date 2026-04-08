@@ -97,4 +97,4 @@ Seedmancer uses a YAML configuration file (`seedmancer.yaml`) to store settings:
 Seedmancer is licensed under the **MIT License**.
 
 ## Support & Contact
-- 🌐 [Website](https://seedmancer.com) (coming soon)
+- 🌐 [Website](https://seedmancer.dev) (coming soon)

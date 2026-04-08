@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // FindConfigFile tries to find the seedmancer config file in the current directory
@@ -46,10 +47,18 @@ func GetVersionPath(projectRoot, storagePath, databaseName, version string) stri
 	return filepath.Join(projectRoot, storagePath, "databases", databaseName, version)
 }
 
-// GetBaseURL returns the appropriate API base URL based on the version
+// GetBaseURL resolves the Seedmancer web API origin (no trailing slash).
+// Priority: SEEDMANCER_API_URL → api_url in seedmancer.yaml → https://seedmancer.dev
 func GetBaseURL() string {
-	// return "https://seedmancer.com" // Replace with your production domain
-	return "http://localhost:1234"
+	if v := os.Getenv("SEEDMANCER_API_URL"); v != "" {
+		return strings.TrimRight(v, "/")
+	}
+	if cfgPath, err := FindConfigFile(); err == nil {
+		if cfg, err := LoadConfig(cfgPath); err == nil && cfg.APIURL != "" {
+			return strings.TrimRight(cfg.APIURL, "/")
+		}
+	}
+	return "https://seedmancer.dev"
 }
 
 // ReadConfig reads the seedmancer config file and returns the storage path
