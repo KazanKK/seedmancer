@@ -75,6 +75,11 @@ func SeedCommand() *cli.Command {
 				return fmt.Errorf("parsing database URL: %v", err)
 			}
 			
+			if u.Scheme == "postgresql" {
+				dbURL = "postgres" + dbURL[len("postgresql"):]
+				u.Scheme = "postgres"
+			}
+
 			if u.Scheme == "postgres" && !strings.Contains(dbURL, "sslmode=") {
 				if strings.Contains(dbURL, "?") {
 					dbURL += "&sslmode=disable"

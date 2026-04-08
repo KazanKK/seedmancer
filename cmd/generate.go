@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -19,37 +18,68 @@ import (
 	"github.com/urfave/cli/v2"
 )
 
-const (
-	openAIEndpoint = "https://api.openai.com/v1/chat/completions"
-	tmpScriptName  = "_tmp_seedmancer_gen.go"
-)
+// ─── API types ────────────────────────────────────────────────────────────────
 
-type openAIMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+type generateJobRequest struct {
+	Schema generateSchema `json:"schema"`
+	Prompt string         `json:"prompt,omitempty"`
 }
 
-type openAIRequest struct {
-	Model       string          `json:"model"`
-	Messages    []openAIMessage `json:"messages"`
-	Temperature float64         `json:"temperature"`
+type generateSchema struct {
+	Enums  []generateEnum   `json:"enums,omitempty"`
+	Tables []generateTable  `json:"tables"`
 }
 
-type openAIResponse struct {
-	Choices []struct {
-		Message struct {
-			Content string `json:"content"`
-		} `json:"message"`
-	} `json:"choices"`
-	Error *struct {
-		Message string `json:"message"`
-	} `json:"error,omitempty"`
+type generateEnum struct {
+	Name   string   `json:"name"`
+	Values []string `json:"values"`
 }
+
+type generateTable struct {
+	Name    string           `json:"name"`
+	Columns []generateColumn `json:"columns"`
+}
+
+type generateColumn struct {
+	Name       string              `json:"name"`
+	Type       string              `json:"type"`
+	Nullable   bool                `json:"nullable"`
+	IsPrimary  bool                `json:"isPrimary"`
+	IsUnique   bool                `json:"isUnique"`
+	Default    string              `json:"default,omitempty"`
+	ForeignKey *generateForeignKey `json:"foreignKey,omitempty"`
+	Enum       string              `json:"enum,omitempty"`
+}
+
+type generateForeignKey struct {
+	Table  string `json:"table"`
+	Column string `json:"column"`
+}
+
+type generateJobResponse struct {
+	JobID string `json:"jobId"`
+}
+
+type generateFileEntry struct {
+	Table   string `json:"table"`
+	Path    string `json:"path"`
+	FileURL string `json:"fileUrl"`
+}
+
+type generateStatusResponse struct {
+	ID           string              `json:"id"`
+	Status       string              `json:"status"`
+	RowCount     int                 `json:"rowCount"` // legacy field from job row
+	Files        []generateFileEntry `json:"files"`
+	ErrorMessage *string             `json:"errorMessage"`
+}
+
+// ─── Command definition ───────────────────────────────────────────────────────
 
 func GenerateCommand() *cli.Command {
 	return &cli.Command{
 		Name:  "generate",
-		Usage: "Generate realistic seed data using AI and save as CSV files",
+		Usage: "Generate realistic seed data via AI and save as CSV files",
 		Flags: []cli.Flag{
 			&cli.StringFlag{
 				Name:     "prompt",
@@ -57,9 +87,9 @@ func GenerateCommand() *cli.Command {
 				Usage:    "Natural language description of the data to generate",
 			},
 			&cli.StringFlag{
-				Name:    "api-key",
-				Usage:   "OpenAI API key (stored locally for future use)",
-				EnvVars: []string{"OPENAI_API_KEY"},
+				Name:    "token",
+				Usage:   "Seedmancer API token (saved locally for future use)",
+				EnvVars: []string{"SEEDMANCER_API_TOKEN"},
 			},
 			&cli.StringFlag{
 				Name:    "db-url",
@@ -74,6 +104,11 @@ func GenerateCommand() *cli.Command {
 				Name:  "version-name",
 				Usage: "Version directory name (optional; auto-generates YYYYMMDDHHMMSS_<database-name> if omitted)",
 			},
+			&cli.StringFlag{
+				Name:    "api-url",
+				Usage:   "Seedmancer API base URL (overrides SEEDMANCER_API_URL and api_url in config)",
+				EnvVars: []string{"SEEDMANCER_API_URL"},
+			},
 		},
 		Action: func(c *cli.Context) error {
 			return runGenerate(c)
@@ -84,13 +119,13 @@ func GenerateCommand() *cli.Command {
 func runGenerate(c *cli.Context) error {
 	prompt := c.String("prompt")
 
-	// Resolve and optionally persist the OpenAI API key.
-	apiKey, err := resolveAndStoreAPIKey(c.String("api-key"))
+	// ── Resolve API token ──────────────────────────────────────────────────────
+	apiToken, err := resolveAndStoreAPIToken(c.String("token"))
 	if err != nil {
 		return err
 	}
 
-	// Resolve config for storage path and database name.
+	// ── Resolve config ─────────────────────────────────────────────────────────
 	configPath, err := utils.FindConfigFile()
 	if err != nil {
 		return fmt.Errorf("finding config file: %v", err)
@@ -116,7 +151,7 @@ func runGenerate(c *cli.Context) error {
 		fmt.Printf("Using auto-generated version name: %s\n", versionName)
 	}
 
-	// Resolve database URL (same pattern as export command).
+	// ── Resolve DB URL ─────────────────────────────────────────────────────────
 	dbURL := c.String("db-url")
 	if dbURL == "" {
 		dbURL = cfg.DatabaseURL
@@ -129,6 +164,10 @@ func runGenerate(c *cli.Context) error {
 	if err != nil {
 		return fmt.Errorf("parsing database URL: %v", err)
 	}
+	if u.Scheme == "postgresql" {
+		dbURL = "postgres" + dbURL[len("postgresql"):]
+		u.Scheme = "postgres"
+	}
 	if u.Scheme != "postgres" {
 		return fmt.Errorf("unsupported database type: %s (only postgres is supported)", u.Scheme)
 	}
@@ -140,97 +179,279 @@ func runGenerate(c *cli.Context) error {
 		}
 	}
 
-	// Output directory mirrors what `export` produces:
-	//   <projectRoot>/<storagePath>/databases/<databaseName>/<versionName>/
+	// ── Output directory ───────────────────────────────────────────────────────
 	outputDir := utils.GetVersionPath(projectRoot, cfg.StoragePath, databaseName, versionName)
 	if err := os.MkdirAll(outputDir, 0755); err != nil {
 		return fmt.Errorf("creating output directory: %v", err)
 	}
 	fmt.Printf("Output directory: %s\n", outputDir)
 
-	// ── Step 1: Export schema from the live database ─────────────────────────
-	fmt.Println("[1/2] Exporting database schema...")
+	// ── Step 1: Export schema from the live database ───────────────────────────
+	fmt.Println("[1/3] Exporting database schema...")
 
 	pg := &db.PostgresManager{}
 	if err := pg.ConnectWithDSN(dbURL); err != nil {
 		return fmt.Errorf("connecting to database: %v", err)
 	}
 
-	schemaPath := filepath.Join(outputDir, "schema.json")
-	if err := pg.ExportSchema(schemaPath); err != nil {
+	if err := pg.ExportSchema(outputDir); err != nil {
 		return fmt.Errorf("exporting schema: %v", err)
 	}
+	schemaPath := filepath.Join(outputDir, "schema.json")
 	fmt.Printf("Schema saved: %s\n", schemaPath)
 
 	schemaBytes, err := os.ReadFile(schemaPath)
 	if err != nil {
 		return fmt.Errorf("reading schema.json: %v", err)
 	}
-	schemaJSON := string(schemaBytes)
 
-	// ── Step 2: Generate Go script using the confirmed schema ───────────────
-	fmt.Println("[2/2] Generating Go data script via OpenAI...")
+	// ── Step 2: Submit generation job to the Seedmancer API ───────────────────
+	fmt.Println("[2/3] Submitting AI generation job...")
 
-	goCode, err := callOpenAI(apiKey, prompt, schemaJSON)
+	apiSchema, err := buildAPISchema(schemaBytes)
 	if err != nil {
-		return fmt.Errorf("generating Go script: %v", err)
+		return fmt.Errorf("building API schema: %v", err)
 	}
 
-	tmpScriptPath := filepath.Join(outputDir, tmpScriptName)
-	if err := os.WriteFile(tmpScriptPath, []byte(goCode), 0644); err != nil {
-		return fmt.Errorf("saving temporary script: %v", err)
+	baseURL := c.String("api-url")
+	if baseURL == "" {
+		baseURL = utils.GetBaseURL()
 	}
-	fmt.Printf("Go script saved: %s\n", tmpScriptPath)
-
-	// ── Step 3: Execute the script — CSVs must land in outputDir ────────────
-	fmt.Println("Generating CSV data...")
-	scriptCmd := exec.Command("go", "run", tmpScriptPath, outputDir)
-	scriptCmd.Stdout = os.Stdout
-	scriptCmd.Stderr = os.Stderr
-	if err := scriptCmd.Run(); err != nil {
-		return fmt.Errorf("executing generated script: %v\nReview %s to diagnose issues", err, tmpScriptPath)
-	}
-
-	// Verify CSV files were actually written to the output directory.
-	csvFiles, err := findCSVFiles(outputDir)
+	baseURL = strings.TrimRight(baseURL, "/")
+	fmt.Printf("API endpoint: %s\n", baseURL)
+	jobID, err := submitGenerateJob(baseURL, apiToken, apiSchema, prompt)
 	if err != nil {
-		return fmt.Errorf("reading output directory: %v", err)
+		return fmt.Errorf("submitting generation job: %v", err)
 	}
-	if len(csvFiles) == 0 {
-		return fmt.Errorf(
-			"generated script produced no CSV files in %s\n"+
-				"The script may have written files to a different location — review %s",
-			outputDir, tmpScriptPath,
-		)
+	fmt.Printf("Job submitted: %s\n", jobID)
+
+	// ── Step 3: Poll until the job completes ───────────────────────────────────
+	fmt.Println("[3/3] Waiting for AI to generate data...")
+
+	files, err := pollJobUntilDone(baseURL, apiToken, jobID)
+	if err != nil {
+		return fmt.Errorf("generation job failed: %v", err)
+	}
+
+	// ── Download each CSV ──────────────────────────────────────────────────────
+	fmt.Printf("\nDownloading %d CSV file(s)...\n", len(files))
+	var csvNames []string
+	for _, f := range files {
+		dest := filepath.Join(outputDir, f.Table+".csv")
+		if err := downloadFile(f.FileURL, dest); err != nil {
+			return fmt.Errorf("downloading %s.csv: %v", f.Table, err)
+		}
+		fmt.Printf("  ✓ %s.csv\n", f.Table)
+		csvNames = append(csvNames, f.Table+".csv")
 	}
 
 	fmt.Printf("\n✅ Generated data stored in: %s\n", outputDir)
-	fmt.Printf("   schema.json + %d CSV file(s): %s\n", len(csvFiles), strings.Join(csvFiles, ", "))
+	fmt.Printf("   schema.json + %d CSV file(s): %s\n", len(csvNames), strings.Join(csvNames, ", "))
 	fmt.Printf("Run 'seedmancer seed --database-name %s --version-name %s' to import into PostgreSQL.\n", databaseName, versionName)
 	return nil
 }
 
-// findCSVFiles returns the base names of all .csv files in dir.
-func findCSVFiles(dir string) ([]string, error) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, err
+// ─── Schema conversion ────────────────────────────────────────────────────────
+
+// buildAPISchema converts the CLI's exported schema.json into the shape the
+// Seedmancer API expects (only enums and tables; functions/triggers are omitted).
+func buildAPISchema(schemaJSON []byte) (generateSchema, error) {
+	var raw struct {
+		Enums  []db.EnumItem `json:"enums"`
+		Tables []db.Table    `json:"tables"`
 	}
-	var names []string
-	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".csv") {
-			names = append(names, e.Name())
+	if err := json.Unmarshal(schemaJSON, &raw); err != nil {
+		return generateSchema{}, fmt.Errorf("parsing schema.json: %v", err)
+	}
+
+	var apiEnums []generateEnum
+	for _, e := range raw.Enums {
+		apiEnums = append(apiEnums, generateEnum{Name: e.Name, Values: e.Values})
+	}
+
+	var apiTables []generateTable
+	for _, t := range raw.Tables {
+		var cols []generateColumn
+		for _, c := range t.Columns {
+			col := generateColumn{
+				Name:      c.Name,
+				Type:      c.Type,
+				Nullable:  c.Nullable,
+				IsPrimary: c.IsPrimary,
+				IsUnique:  c.IsUnique,
+				Enum:      c.Enum,
+			}
+			if c.Default != nil {
+				col.Default = fmt.Sprintf("%v", c.Default)
+			}
+			if c.ForeignKey != nil {
+				col.ForeignKey = &generateForeignKey{
+					Table:  c.ForeignKey.Table,
+					Column: c.ForeignKey.Column,
+				}
+			}
+			cols = append(cols, col)
 		}
+		apiTables = append(apiTables, generateTable{Name: t.Name, Columns: cols})
 	}
-	return names, nil
+
+	return generateSchema{Enums: apiEnums, Tables: apiTables}, nil
 }
 
-// resolveAndStoreAPIKey returns the API key to use, persisting it to the
+// ─── API helpers ──────────────────────────────────────────────────────────────
+
+func submitGenerateJob(baseURL, token string, schema generateSchema, prompt string) (string, error) {
+	body := generateJobRequest{
+		Schema: schema,
+		Prompt: prompt,
+	}
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return "", fmt.Errorf("marshalling request: %v", err)
+	}
+
+	req, err := http.NewRequest("POST", baseURL+"/api/generate-data", bytes.NewReader(payload))
+	if err != nil {
+		return "", fmt.Errorf("creating request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "cli_"+token)
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("calling API: %v", err)
+	}
+	defer resp.Body.Close()
+
+	respBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("reading response: %v", err)
+	}
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		return "", fmt.Errorf("authentication failed — check your API token (--token / SEEDMANCER_API_TOKEN)")
+	}
+	if resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("API error (HTTP %d): %s", resp.StatusCode, string(respBytes))
+	}
+
+	var jobResp generateJobResponse
+	if err := json.Unmarshal(respBytes, &jobResp); err != nil {
+		return "", fmt.Errorf("parsing job response: %v", err)
+	}
+	if jobResp.JobID == "" {
+		return "", fmt.Errorf("API returned empty job ID")
+	}
+	return jobResp.JobID, nil
+}
+
+// pollJobUntilDone polls the generation-status endpoint every 5 seconds until
+// the job completes or fails, with a 10-minute overall timeout.
+func pollJobUntilDone(baseURL, token, jobID string) ([]generateFileEntry, error) {
+	const (
+		pollInterval = 5 * time.Second
+		timeout      = 10 * time.Minute
+	)
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	deadline := time.Now().Add(timeout)
+	dots := 0
+
+	for time.Now().Before(deadline) {
+		status, err := fetchJobStatus(client, baseURL, token, jobID)
+		if err != nil {
+			return nil, fmt.Errorf("polling status: %v", err)
+		}
+
+		switch status.Status {
+		case "completed":
+			fmt.Println(" done!")
+			return status.Files, nil
+		case "error":
+			msg := "unknown error"
+			if status.ErrorMessage != nil {
+				msg = *status.ErrorMessage
+			}
+			return nil, fmt.Errorf("job failed: %s", msg)
+		default:
+			// pending / processing — keep waiting
+			dots++
+			if dots%6 == 0 {
+				fmt.Printf("\r  Still working... (%s) ", status.Status)
+			} else {
+				fmt.Print(".")
+			}
+		}
+
+		time.Sleep(pollInterval)
+	}
+
+	return nil, fmt.Errorf("timed out after %v waiting for job %s", timeout, jobID)
+}
+
+func fetchJobStatus(client *http.Client, baseURL, token, jobID string) (*generateStatusResponse, error) {
+	req, err := http.NewRequest("GET", baseURL+"/api/generation-status?id="+jobID, nil)
+	if err != nil {
+		return nil, fmt.Errorf("creating request: %v", err)
+	}
+	req.Header.Set("Authorization", "cli_"+token)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("calling API: %v", err)
+	}
+	defer resp.Body.Close()
+
+	respBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("reading response: %v", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("status API error (HTTP %d): %s", resp.StatusCode, string(respBytes))
+	}
+
+	var status generateStatusResponse
+	if err := json.Unmarshal(respBytes, &status); err != nil {
+		return nil, fmt.Errorf("parsing status response: %v", err)
+	}
+	return &status, nil
+}
+
+// downloadFile downloads a URL to a local file path.
+func downloadFile(fileURL, destPath string) error {
+	client := &http.Client{Timeout: 5 * time.Minute}
+	resp, err := client.Get(fileURL)
+	if err != nil {
+		return fmt.Errorf("downloading file: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("download HTTP %d", resp.StatusCode)
+	}
+
+	f, err := os.Create(destPath)
+	if err != nil {
+		return fmt.Errorf("creating file: %v", err)
+	}
+	defer f.Close()
+
+	if _, err := io.Copy(f, resp.Body); err != nil {
+		return fmt.Errorf("writing file: %v", err)
+	}
+	return nil
+}
+
+// ─── Token helpers ────────────────────────────────────────────────────────────
+
+// resolveAndStoreAPIToken returns the API token to use, persisting it to the
 // global config when supplied via the flag so subsequent runs need not repeat it.
-func resolveAndStoreAPIKey(flagValue string) (string, error) {
+func resolveAndStoreAPIToken(flagValue string) (string, error) {
 	if flagValue != "" {
-		if err := utils.SaveOpenAIKey(flagValue); err != nil {
-			fmt.Printf("Warning: could not persist API key: %v\n", err)
+		if err := utils.SaveAPIToken(flagValue); err != nil {
+			fmt.Printf("Warning: could not persist API token: %v\n", err)
 		}
 		return flagValue, nil
 	}
@@ -239,141 +460,21 @@ func resolveAndStoreAPIKey(flagValue string) (string, error) {
 	homeDir, err := os.UserHomeDir()
 	if err == nil {
 		globalCfg, cfgErr := utils.LoadConfig(filepath.Join(homeDir, ".seedmancer", "config.yaml"))
-		if cfgErr == nil && globalCfg.OpenAIAPIKey != "" {
-			return globalCfg.OpenAIAPIKey, nil
+		if cfgErr == nil && globalCfg.APIToken != "" {
+			return globalCfg.APIToken, nil
 		}
 	}
 
 	// Fall back to the nearest project seedmancer.yaml.
 	if configPath, cfgErr := utils.FindConfigFile(); cfgErr == nil {
-		if cfg, loadErr := utils.LoadConfig(configPath); loadErr == nil && cfg.OpenAIAPIKey != "" {
-			return cfg.OpenAIAPIKey, nil
+		if cfg, loadErr := utils.LoadConfig(configPath); loadErr == nil && cfg.APIToken != "" {
+			return cfg.APIToken, nil
 		}
 	}
 
 	return "", fmt.Errorf(
-		"OpenAI API key required: use --api-key flag or set OPENAI_API_KEY environment variable\n" +
-			"  Example: seedmancer generate --prompt \"...\" --api-key sk-...",
+		"Seedmancer API token required.\n" +
+			"  Use --token flag or set SEEDMANCER_API_TOKEN environment variable.\n" +
+			"  Get your token at: https://seedmancer.com/dashboard",
 	)
-}
-
-// callOpenAI asks OpenAI to generate a Go data-generation script that strictly
-// follows the already-confirmed schemaJSON.
-func callOpenAI(apiKey, userPrompt string, schemaJSON string) (string, error) {
-	reqBody := openAIRequest{
-		Model: "gpt-4o",
-		Messages: []openAIMessage{
-			{Role: "system", Content: buildCodeSystemPrompt()},
-			{Role: "user", Content: buildCodeUserPrompt(userPrompt, schemaJSON)},
-		},
-		Temperature: 0.2,
-	}
-	raw, err := doOpenAIRequest(apiKey, reqBody)
-	if err != nil {
-		return "", err
-	}
-	code := extractGoCode(raw)
-	if code == "" {
-		return "", fmt.Errorf("OpenAI returned empty code")
-	}
-	return code, nil
-}
-
-// doOpenAIRequest executes a single chat-completions call and returns the raw
-// text content of the first choice.
-func doOpenAIRequest(apiKey string, reqBody openAIRequest) (string, error) {
-	payload, err := json.Marshal(reqBody)
-	if err != nil {
-		return "", fmt.Errorf("marshalling request: %v", err)
-	}
-
-	req, err := http.NewRequest("POST", openAIEndpoint, bytes.NewReader(payload))
-	if err != nil {
-		return "", fmt.Errorf("creating HTTP request: %v", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+apiKey)
-
-	client := &http.Client{Timeout: 120 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("calling OpenAI API: %v", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("reading API response: %v", err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("OpenAI API error (HTTP %d): %s", resp.StatusCode, string(body))
-	}
-
-	var aiResp openAIResponse
-	if err := json.Unmarshal(body, &aiResp); err != nil {
-		return "", fmt.Errorf("parsing API response: %v", err)
-	}
-	if aiResp.Error != nil {
-		return "", fmt.Errorf("OpenAI error: %s", aiResp.Error.Message)
-	}
-	if len(aiResp.Choices) == 0 {
-		return "", fmt.Errorf("empty response from OpenAI")
-	}
-	return aiResp.Choices[0].Message.Content, nil
-}
-
-// extractGoCode strips optional markdown code fences from a Go source response.
-func extractGoCode(content string) string {
-	content = strings.TrimSpace(content)
-	if strings.HasPrefix(content, "```") {
-		lines := strings.Split(content, "\n")
-		lines = lines[1:] // drop the opening ```go / ``` line
-		if len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "```" {
-			lines = lines[:len(lines)-1]
-		}
-		content = strings.Join(lines, "\n")
-	}
-	return strings.TrimSpace(content)
-}
-
-func buildCodeSystemPrompt() string {
-	return `You are an expert Go developer specializing in generating realistic database seed data.
-You write clean, self-contained Go programs that use ONLY the Go standard library.
-Always return ONLY valid Go source code — no markdown fences, no explanations, no commentary.`
-}
-
-func buildCodeUserPrompt(userDesc string, schemaJSON string) string {
-	return fmt.Sprintf(`Generate a self-contained Go program (package main, stdlib only) that creates realistic seed data.
-
-User description: "%s"
-
-Use this exact schema to generate the seed data:
-%s
-
-Requirements:
-
-1. Read output directory from os.Args[1].
-
-2. For each table in the schema (in the order they appear), create <output_dir>/<tablename>.csv:
-   - First row is the header — column names in the EXACT order they appear in the schema
-   - Subsequent rows are data values; use empty string for NULL
-   - Booleans  : "true" or "false"
-   - Timestamps: RFC3339 e.g. "2024-01-15T10:30:00Z"
-
-3. Foreign keys:
-   - Generate all parent rows first; store their IDs in a slice
-   - For each child row pick a random parent ID from that slice
-
-4. Realistic data:
-   - Seed math/rand with 42 for reproducibility
-   - Values should look real (varied names, plausible emails, realistic amounts)
-   - Do NOT use placeholder values like "user1", "email2"
-
-5. Performance:
-   - Use bufio.NewWriter for CSV writing
-   - Pre-allocate slices where size is known
-   - Stream rows; do not accumulate all rows in memory before writing
-
-Return ONLY the Go source code. No markdown fences, no explanations.
-`, userDesc, schemaJSON)
 }
