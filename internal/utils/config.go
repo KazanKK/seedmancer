@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/KazanKK/seedmancer/internal/ui"
 	"gopkg.in/yaml.v3"
 )
 
@@ -15,7 +16,7 @@ type Config struct {
 	DatabaseURL  string `yaml:"database_url,omitempty"`
 	OpenAIAPIKey string `yaml:"openai_api_key,omitempty"`
 	APIToken     string `yaml:"api_token,omitempty"`
-	APIURL       string `yaml:"api_url,omitempty"` // e.g. https://seedmancer.dev for production CLI
+	APIURL       string `yaml:"api_url,omitempty"` // e.g. https://api.seedmancer.dev (HTTP API host)
 }
 
 // LoadConfig reads and parses the full seedmancer config file.
@@ -60,7 +61,7 @@ func SaveOpenAIKey(apiKey string) error {
 		return fmt.Errorf("writing config: %v", err)
 	}
 
-	fmt.Printf("OpenAI API key saved to %s\n", configPath)
+	ui.Debug("OpenAI API key saved to %s", configPath)
 	return nil
 }
 

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/KazanKK/seedmancer/internal/ui"
 	utils "github.com/KazanKK/seedmancer/internal/utils"
 
 	"github.com/urfave/cli/v2"
@@ -20,38 +21,34 @@ import (
 func SyncCommand() *cli.Command {
 	return &cli.Command{
 		Name:  "sync",
-		Usage: "Sync local test data to cloud storage",
+		Usage: "Sync local test data to cloud storage (defaults to all databases and versions)",
 		Flags: []cli.Flag{
 			&cli.StringFlag{
-				Name:     "database-name",
-				Required: true,
-				Usage:    "Database name",
+				Name:  "database-name",
+				Usage: "Database name (omit to sync all databases)",
 			},
 			&cli.StringFlag{
-				Name:     "version",
-				Required: true,
-				Usage:    "Version name",
+				Name:  "version",
+				Usage: "Version name (omit to sync all versions)",
 			},
 			&cli.StringFlag{
-				Name:     "token",
-				Required: false,
-				Usage:    "API token (or set SEEDMANCER_API_TOKEN env var)",
-				EnvVars:  []string{"SEEDMANCER_API_TOKEN"},
+				Name:    "token",
+				Usage:   "API token (or set SEEDMANCER_API_TOKEN env var)",
+				EnvVars: []string{"SEEDMANCER_API_TOKEN"},
 			},
 		},
 		Action: func(c *cli.Context) error {
-			// Find config file to get storage path and project root
 			configPath, err := utils.FindConfigFile()
 			if err != nil {
 				return fmt.Errorf("finding config file: %v", err)
 			}
-			
+
 			projectRoot := filepath.Dir(configPath)
 			data, err := os.ReadFile(configPath)
 			if err != nil {
 				return fmt.Errorf("reading config file: %v", err)
 			}
-			
+
 			var config struct {
 				StoragePath string `yaml:"storage_path"`
 			}
@@ -59,114 +56,180 @@ func SyncCommand() *cli.Command {
 				return fmt.Errorf("parsing config file: %v", err)
 			}
 
-			databaseName := c.String("database-name")
-			version := c.String("version")
 			token := c.String("token")
-
 			if token == "" {
 				return fmt.Errorf("API token is required. Set --token flag or SEEDMANCER_API_TOKEN env var")
 			}
 
-			// Check if version exists locally
-			versionPath := filepath.Join(projectRoot, config.StoragePath, "databases", databaseName, version)
-			unversionedPath := filepath.Join(projectRoot, config.StoragePath, "databases", databaseName, "unversioned")
+			basesDir := filepath.Join(projectRoot, config.StoragePath, "databases")
 
-			if _, err := os.Stat(versionPath); err != nil {
-				if os.IsNotExist(err) {
-					// Check if unversioned exists
-					if _, err := os.Stat(unversionedPath); err == nil {
-						fmt.Printf("Version '%s' not found.\n", version)
-						fmt.Printf("An unversioned database exists. Use the unversioned database instead? (y/N): ")
-
-						var response string
-						fmt.Scanln(&response)
-						if strings.ToLower(response) == "y" {
-							if err := os.Rename(unversionedPath, versionPath); err != nil {
-								return fmt.Errorf("renaming unversioned database: %v", err)
-							}
-							fmt.Printf("Renamed unversioned database to '%s'.\n", version)
-						} else {
-							return fmt.Errorf("sync canceled. Please specify an existing test data version")
-						}
-					} else {
-						return fmt.Errorf("test data version '%s' not found and no unversioned data exists", version)
-					}
-				} else {
-					return fmt.Errorf("accessing version directory: %v", err)
-				}
-			}
-
-			// Find all CSV files in the version directory
-			entries, err := os.ReadDir(versionPath)
+			targets, err := discoverSyncTargets(basesDir, c.String("database-name"), c.String("version"))
 			if err != nil {
-				return fmt.Errorf("reading version directory: %v", err)
+				return err
 			}
 
-			var files []string
-			for _, entry := range entries {
-				if !entry.IsDir() && strings.HasSuffix(strings.ToLower(entry.Name()), ".csv") {
-					files = append(files, filepath.Join(versionPath, entry.Name()))
-				}
+			if len(targets) == 0 {
+				return fmt.Errorf("no data found to sync")
 			}
 
-			if len(files) == 0 {
-				return fmt.Errorf("no CSV files found in version directory")
+			if len(targets) > 1 {
+				ui.Step("Syncing %d dataset(s)", len(targets))
 			}
 
-			fmt.Printf("Found %d CSV files to sync\n", len(files))
-			fmt.Println("Compressing files...")
-			
-			zipData, err := compressFiles(files)
-			if err != nil {
-				return fmt.Errorf("compressing files: %v", err)
+			baseURL := utils.GetBaseURL()
+			synced := 0
+
+			for _, t := range targets {
+				if err := syncOne(t, baseURL, token); err != nil {
+					ui.Error("%s / %s: %v", t.databaseName, t.versionName, err)
+					continue
+				}
+				synced++
 			}
 
-			zipSize := float64(zipData.Len()) / 1024 / 1024 // Size in MB
-			fmt.Printf("Compressed file size: %.2f MB\n", zipSize)
-
-			if zipSize <= 10 {
-				// For files under 10MB, use direct API upload
-				fmt.Println("Using direct API upload for small file...")
-				baseURL := utils.GetBaseURL()
-				url := fmt.Sprintf("%s/api/v1.0/databases/testdata/sync/db?database_name=%s&version_name=%s", 
-					baseURL, databaseName, version)
-
-				// Create a new buffer with the zip data
-				zipBuffer := bytes.NewBuffer(zipData.Bytes())
-				
-				req, err := http.NewRequest("POST", url, zipBuffer)
-				if err != nil {
-					return fmt.Errorf("creating request: %v", err)
-				}
-
-				req.Header.Set("Content-Type", "application/zip")
-				req.Header.Set("Authorization", fmt.Sprintf("cli_%s", token))
-				req.ContentLength = int64(zipBuffer.Len())
-
-				fmt.Printf("Uploading zip file (%d bytes)...\n", zipBuffer.Len())
-
-				resp, err := http.DefaultClient.Do(req)
-				if err != nil {
-					return fmt.Errorf("uploading file: %v", err)
-				}
-				defer resp.Body.Close()
-
-				if resp.StatusCode != http.StatusOK {
-					body, _ := io.ReadAll(resp.Body)
-					return fmt.Errorf("upload failed: %s - %s", resp.Status, string(body))
-				}
-			} else {
-				// For larger files, use the existing S3 presigned URL method
-				fmt.Println("Using S3 presigned URL for large file...")
-				if err := uploadZipFileWithAuth(zipData, databaseName, version, token); err != nil {
-					return fmt.Errorf("uploading zip: %v", err)
-				}
+			if synced == 0 {
+				return fmt.Errorf("all syncs failed")
 			}
 
-			fmt.Println("\n✅ Sync complete!")
+			ui.Success("Sync complete! %d/%d dataset(s) uploaded", synced, len(targets))
+			ui.Info("View your data at https://seedmancer.dev/dashboard/datasets")
 			return nil
 		},
 	}
+}
+
+type syncTarget struct {
+	databaseName string
+	versionName  string
+	path         string
+}
+
+func discoverSyncTargets(basesDir, dbFlag, versionFlag string) ([]syncTarget, error) {
+	if dbFlag != "" && versionFlag != "" {
+		versionPath := filepath.Join(basesDir, dbFlag, versionFlag)
+		if _, err := os.Stat(versionPath); err != nil {
+			if os.IsNotExist(err) {
+				return nil, fmt.Errorf("version '%s/%s' not found at %s", dbFlag, versionFlag, versionPath)
+			}
+			return nil, fmt.Errorf("accessing version directory: %v", err)
+		}
+		return []syncTarget{{databaseName: dbFlag, versionName: versionFlag, path: versionPath}}, nil
+	}
+
+	var databases []string
+	if dbFlag != "" {
+		databases = []string{dbFlag}
+	} else {
+		entries, err := os.ReadDir(basesDir)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil, fmt.Errorf("no databases directory found at %s", basesDir)
+			}
+			return nil, fmt.Errorf("reading databases directory: %v", err)
+		}
+		for _, e := range entries {
+			if e.IsDir() {
+				databases = append(databases, e.Name())
+			}
+		}
+	}
+
+	var targets []syncTarget
+	for _, db := range databases {
+		dbPath := filepath.Join(basesDir, db)
+
+		if versionFlag != "" {
+			vp := filepath.Join(dbPath, versionFlag)
+			if _, err := os.Stat(vp); err == nil {
+				targets = append(targets, syncTarget{databaseName: db, versionName: versionFlag, path: vp})
+			}
+			continue
+		}
+
+		versions, err := os.ReadDir(dbPath)
+		if err != nil {
+			continue
+		}
+		for _, v := range versions {
+			if !v.IsDir() {
+				continue
+			}
+			targets = append(targets, syncTarget{databaseName: db, versionName: v.Name(), path: filepath.Join(dbPath, v.Name())})
+		}
+	}
+
+	return targets, nil
+}
+
+func syncOne(t syncTarget, baseURL, token string) error {
+	entries, err := os.ReadDir(t.path)
+	if err != nil {
+		return fmt.Errorf("reading directory: %v", err)
+	}
+
+	var files []string
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		lower := strings.ToLower(entry.Name())
+		if strings.HasSuffix(lower, ".csv") || strings.HasSuffix(lower, ".json") {
+			files = append(files, filepath.Join(t.path, entry.Name()))
+		}
+	}
+
+	if len(files) == 0 {
+		ui.Warn("%s / %s: no CSV or JSON files, skipping", t.databaseName, t.versionName)
+		return nil
+	}
+
+	ui.Step("%s / %s — %d file(s)", t.databaseName, t.versionName, len(files))
+
+	sp := ui.StartSpinner("Compressing...")
+	zipData, err := compressFiles(files)
+	if err != nil {
+		sp.Stop(false, "Compression failed")
+		return fmt.Errorf("compressing files: %v", err)
+	}
+	sp.Stop(true, fmt.Sprintf("Compressed (%.1f MB)", float64(zipData.Len())/1024/1024))
+
+	sp = ui.StartSpinner("Uploading...")
+	apiURL := fmt.Sprintf("%s/v1.0/datasets/sync?database_name=%s&version_name=%s",
+		baseURL, t.databaseName, t.versionName)
+	ui.Debug("POST %s", apiURL)
+
+	req, err := http.NewRequest("POST", apiURL, bytes.NewReader(zipData.Bytes()))
+	if err != nil {
+		sp.Stop(false, "Upload failed")
+		return fmt.Errorf("creating request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/zip")
+	req.Header.Set("Authorization", utils.BearerAPIToken(token))
+	req.ContentLength = int64(zipData.Len())
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		sp.Stop(false, "Upload failed")
+		return fmt.Errorf("uploading: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		sp.Stop(false, "Upload failed")
+		return fmt.Errorf("server responded %s: %s", resp.Status, string(body))
+	}
+	sp.Stop(true, "Uploaded")
+
+	var result struct {
+		ID        string `json:"id"`
+		FileCount int    `json:"fileCount"`
+	}
+	if err := json.Unmarshal(body, &result); err == nil && result.ID != "" {
+		ui.Info("  ID: %s  |  Files: %d", result.ID, result.FileCount)
+	}
+
+	return nil
 }
 
 func compressFiles(files []string) (*bytes.Buffer, error) {
@@ -175,37 +238,30 @@ func compressFiles(files []string) (*bytes.Buffer, error) {
 	defer zipWriter.Close()
 
 	for _, file := range files {
-		// Open the file
 		fileToZip, err := os.Open(file)
 		if err != nil {
 			return nil, fmt.Errorf("failed to open file %s: %v", file, err)
 		}
 		defer fileToZip.Close()
 
-		// Get file info
 		info, err := fileToZip.Stat()
 		if err != nil {
 			return nil, fmt.Errorf("failed to get file info %s: %v", file, err)
 		}
 
-		// Create zip header
 		header, err := zip.FileInfoHeader(info)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create header %s: %v", file, err)
 		}
 
-		// Use base name for files
 		header.Name = filepath.Base(file)
-		// Use best compression
 		header.Method = zip.Deflate
 
-		// Create writer for this file in zip
 		writer, err := zipWriter.CreateHeader(header)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create zip entry %s: %v", file, err)
 		}
 
-		// Copy file content to zip
 		if _, err := io.Copy(writer, fileToZip); err != nil {
 			return nil, fmt.Errorf("failed to write file to zip %s: %v", file, err)
 		}
@@ -216,104 +272,4 @@ func compressFiles(files []string) (*bytes.Buffer, error) {
 	}
 
 	return buf, nil
-}
-
-func getPresignedURLWithAuth(baseURL, databaseName, testDataVersionName, fileName, token string) (string, error) {
-	url := fmt.Sprintf("%s/api/v1.0/databases/testdata/sync?database_name=%s&version_name=%s", baseURL, databaseName, testDataVersionName)
-	
-	fmt.Printf("Requesting presigned URL from: %s\n", url) // Debug log
-
-	payload := map[string]string{
-		"fileName":    fileName,
-		"contentType": "application/zip",
-	}
-	
-	payloadBytes, err := json.Marshal(payload)
-	if err != nil {
-		return "", fmt.Errorf("marshaling payload: %v", err)
-	}
-
-	req, err := http.NewRequest("PUT", url, bytes.NewBuffer(payloadBytes))
-	if err != nil {
-		return "", fmt.Errorf("creating request: %v", err)
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", fmt.Sprintf("cli_%s", token))
-
-	fmt.Println("Sending request with headers:", req.Header) // Debug log
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("making request: %v", err)
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("API request failed: %s - %s", resp.Status, string(body))
-	}
-
-	var result struct {
-		URL string `json:"url"`
-	}
-	if err := json.Unmarshal(body, &result); err != nil {
-		return "", fmt.Errorf("parsing response: %v, body: %s", err, string(body))
-	}
-
-	if result.URL == "" {
-		return "", fmt.Errorf("received empty upload URL from API")
-	}
-
-	fmt.Printf("Received presigned URL: %s\n", result.URL) // Debug log
-
-	return result.URL, nil
-}
-
-func uploadZipFileWithAuth(zipData *bytes.Buffer, databaseName, testDataVersionName, token string) error {
-	if zipData.Len() == 0 {
-		return fmt.Errorf("zip file is empty")
-	}
-
-	baseURL := utils.GetBaseURL()
-	if baseURL == "" {
-		return fmt.Errorf("base URL is empty")
-	}
-
-	fileName := fmt.Sprintf("%s/%s/testdata.zip", databaseName, testDataVersionName)
-	
-	// Get presigned URL with auth
-	presignedURL, err := getPresignedURLWithAuth(baseURL, databaseName, testDataVersionName, fileName, token)
-	if err != nil {
-		return fmt.Errorf("getting presigned URL: %v", err)
-	}
-
-	if presignedURL == "" {
-		return fmt.Errorf("received empty presigned URL")
-	}
-
-	// Upload zip file
-	req, err := http.NewRequest("PUT", presignedURL, bytes.NewReader(zipData.Bytes()))
-	if err != nil {
-		return fmt.Errorf("creating upload request: %v", err)
-	}
-
-	req.Header.Set("Content-Type", "application/zip")
-	req.ContentLength = int64(zipData.Len())
-
-	fmt.Printf("Uploading to: %s\n", presignedURL) // Debug log
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("making upload request: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("upload failed with status %s: %s", resp.Status, string(body))
-	}
-
-	fmt.Println("Successfully uploaded zip file")
-	return nil
 }

@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	db "github.com/KazanKK/seedmancer/database"
+	"github.com/KazanKK/seedmancer/internal/ui"
 	utils "github.com/KazanKK/seedmancer/internal/utils"
 
 	"github.com/urfave/cli/v2"
@@ -35,7 +36,6 @@ func SeedCommand() *cli.Command {
 			},
 		},
 		Action: func(c *cli.Context) error {
-			// Find config file to get storage path and project root
 			configPath, err := utils.FindConfigFile()
 			if err != nil {
 				return fmt.Errorf("finding config file: %v", err)
@@ -67,14 +67,13 @@ func SeedCommand() *cli.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Printf("Using test data version: %s\n", versionName)
+			ui.Step("Using version: %s", versionName)
 
-			// Add sslmode=disable to the connection string if not present and it's postgres
 			u, err := url.Parse(dbURL)
 			if err != nil {
 				return fmt.Errorf("parsing database URL: %v", err)
 			}
-			
+
 			if u.Scheme == "postgresql" {
 				dbURL = "postgres" + dbURL[len("postgresql"):]
 				u.Scheme = "postgres"
@@ -88,22 +87,23 @@ func SeedCommand() *cli.Command {
 				}
 			}
 
-		if u.Scheme != "postgres" {
-			return fmt.Errorf("unsupported database type: %s (only postgres is supported)", u.Scheme)
-		}
-
-		pg := &db.PostgresManager{}
-		if err := pg.ConnectWithDSN(dbURL); err != nil {
-			return fmt.Errorf("connecting to database: %v", err)
-		}
-		var dbManager db.DatabaseManager = pg
-
-			fmt.Printf("Importing test data from: %s\n", versionPath)
-			if err := dbManager.RestoreFromCSV(versionPath); err != nil {
-				return fmt.Errorf("importing test data: %v", err)
+			if u.Scheme != "postgres" {
+				return fmt.Errorf("unsupported database type: %s (only postgres is supported)", u.Scheme)
 			}
 
-			fmt.Printf("\n✅ Successfully imported version '%s'\n", versionName)
+			pg := &db.PostgresManager{}
+			if err := pg.ConnectWithDSN(dbURL); err != nil {
+				return fmt.Errorf("connecting to database: %v", err)
+			}
+			var dbManager db.DatabaseManager = pg
+
+			ui.Debug("Source path: %s", versionPath)
+			sp := ui.StartSpinner("Importing test data...")
+			if err := dbManager.RestoreFromCSV(versionPath); err != nil {
+				sp.Stop(false, "Import failed")
+				return fmt.Errorf("importing test data: %v", err)
+			}
+			sp.Stop(true, fmt.Sprintf("Imported version '%s'", versionName))
 			return nil
 		},
 	}

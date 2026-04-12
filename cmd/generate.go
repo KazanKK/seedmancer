@@ -13,6 +13,7 @@ import (
 	"time"
 
 	db "github.com/KazanKK/seedmancer/database"
+	"github.com/KazanKK/seedmancer/internal/ui"
 	utils "github.com/KazanKK/seedmancer/internal/utils"
 
 	"github.com/urfave/cli/v2"
@@ -26,8 +27,8 @@ type generateJobRequest struct {
 }
 
 type generateSchema struct {
-	Enums  []generateEnum   `json:"enums,omitempty"`
-	Tables []generateTable  `json:"tables"`
+	Enums  []generateEnum  `json:"enums,omitempty"`
+	Tables []generateTable `json:"tables"`
 }
 
 type generateEnum struct {
@@ -69,7 +70,7 @@ type generateFileEntry struct {
 type generateStatusResponse struct {
 	ID           string              `json:"id"`
 	Status       string              `json:"status"`
-	RowCount     int                 `json:"rowCount"` // legacy field from job row
+	RowCount     int                 `json:"rowCount"`
 	Files        []generateFileEntry `json:"files"`
 	ErrorMessage *string             `json:"errorMessage"`
 }
@@ -119,13 +120,11 @@ func GenerateCommand() *cli.Command {
 func runGenerate(c *cli.Context) error {
 	prompt := c.String("prompt")
 
-	// ── Resolve API token ──────────────────────────────────────────────────────
 	apiToken, err := resolveAndStoreAPIToken(c.String("token"))
 	if err != nil {
 		return err
 	}
 
-	// ── Resolve config ─────────────────────────────────────────────────────────
 	configPath, err := utils.FindConfigFile()
 	if err != nil {
 		return fmt.Errorf("finding config file: %v", err)
@@ -148,10 +147,9 @@ func runGenerate(c *cli.Context) error {
 	versionName := strings.TrimSpace(c.String("version-name"))
 	if versionName == "" {
 		versionName = utils.DefaultVersionName(databaseName)
-		fmt.Printf("Using auto-generated version name: %s\n", versionName)
+		ui.Info("Auto-generated version: %s", versionName)
 	}
 
-	// ── Resolve DB URL ─────────────────────────────────────────────────────────
 	dbURL := c.String("db-url")
 	if dbURL == "" {
 		dbURL = cfg.DatabaseURL
@@ -179,37 +177,37 @@ func runGenerate(c *cli.Context) error {
 		}
 	}
 
-	// ── Output directory ───────────────────────────────────────────────────────
 	outputDir := utils.GetVersionPath(projectRoot, cfg.StoragePath, databaseName, versionName)
 	if err := os.MkdirAll(outputDir, 0755); err != nil {
 		return fmt.Errorf("creating output directory: %v", err)
 	}
-	fmt.Printf("Output directory: %s\n", outputDir)
+	ui.Debug("Output directory: %s", outputDir)
 
-	// ── Step 1: Export schema from the live database ───────────────────────────
-	fmt.Println("[1/3] Exporting database schema...")
-
+	// Step 1: Export schema
+	sp := ui.StartSpinner("Exporting database schema...")
 	pg := &db.PostgresManager{}
 	if err := pg.ConnectWithDSN(dbURL); err != nil {
+		sp.Stop(false, "Failed to connect")
 		return fmt.Errorf("connecting to database: %v", err)
 	}
 
 	if err := pg.ExportSchema(outputDir); err != nil {
+		sp.Stop(false, "Schema export failed")
 		return fmt.Errorf("exporting schema: %v", err)
 	}
 	schemaPath := filepath.Join(outputDir, "schema.json")
-	fmt.Printf("Schema saved: %s\n", schemaPath)
+	sp.Stop(true, "Schema exported")
 
 	schemaBytes, err := os.ReadFile(schemaPath)
 	if err != nil {
 		return fmt.Errorf("reading schema.json: %v", err)
 	}
 
-	// ── Step 2: Submit generation job to the Seedmancer API ───────────────────
-	fmt.Println("[2/3] Submitting AI generation job...")
-
+	// Step 2: Submit generation job
+	sp = ui.StartSpinner("Submitting AI generation job...")
 	apiSchema, err := buildAPISchema(schemaBytes)
 	if err != nil {
+		sp.Stop(false, "Schema conversion failed")
 		return fmt.Errorf("building API schema: %v", err)
 	}
 
@@ -218,43 +216,45 @@ func runGenerate(c *cli.Context) error {
 		baseURL = utils.GetBaseURL()
 	}
 	baseURL = strings.TrimRight(baseURL, "/")
-	fmt.Printf("API endpoint: %s\n", baseURL)
+	ui.Debug("API endpoint: %s", baseURL)
+
 	jobID, err := submitGenerateJob(baseURL, apiToken, apiSchema, prompt)
 	if err != nil {
+		sp.Stop(false, "Job submission failed")
 		return fmt.Errorf("submitting generation job: %v", err)
 	}
-	fmt.Printf("Job submitted: %s\n", jobID)
+	sp.Stop(true, fmt.Sprintf("Job submitted: %s", jobID))
 
-	// ── Step 3: Poll until the job completes ───────────────────────────────────
-	fmt.Println("[3/3] Waiting for AI to generate data...")
-
+	// Step 3: Poll until done
+	sp = ui.StartSpinner("Generating data with AI...")
 	files, err := pollJobUntilDone(baseURL, apiToken, jobID)
 	if err != nil {
+		sp.Stop(false, "Generation failed")
 		return fmt.Errorf("generation job failed: %v", err)
 	}
+	sp.Stop(true, fmt.Sprintf("Generated %d file(s)", len(files)))
 
-	// ── Download each CSV ──────────────────────────────────────────────────────
-	fmt.Printf("\nDownloading %d CSV file(s)...\n", len(files))
+	// Download CSVs
+	ui.Step("Downloading CSV files...")
 	var csvNames []string
 	for _, f := range files {
 		dest := filepath.Join(outputDir, f.Table+".csv")
 		if err := downloadFile(f.FileURL, dest); err != nil {
 			return fmt.Errorf("downloading %s.csv: %v", f.Table, err)
 		}
-		fmt.Printf("  ✓ %s.csv\n", f.Table)
+		ui.Success("%s.csv", f.Table)
 		csvNames = append(csvNames, f.Table+".csv")
 	}
 
-	fmt.Printf("\n✅ Generated data stored in: %s\n", outputDir)
-	fmt.Printf("   schema.json + %d CSV file(s): %s\n", len(csvNames), strings.Join(csvNames, ", "))
-	fmt.Printf("Run 'seedmancer seed --database-name %s --version-name %s' to import into PostgreSQL.\n", databaseName, versionName)
+	fmt.Println()
+	ui.Success("Generated data stored in: %s", outputDir)
+	ui.Info("schema.json + %d CSV file(s): %s", len(csvNames), strings.Join(csvNames, ", "))
+	ui.Info("Run 'seedmancer seed --database-name %s --version-name %s' to import.", databaseName, versionName)
 	return nil
 }
 
 // ─── Schema conversion ────────────────────────────────────────────────────────
 
-// buildAPISchema converts the CLI's exported schema.json into the shape the
-// Seedmancer API expects (only enums and tables; functions/triggers are omitted).
 func buildAPISchema(schemaJSON []byte) (generateSchema, error) {
 	var raw struct {
 		Enums  []db.EnumItem `json:"enums"`
@@ -310,12 +310,12 @@ func submitGenerateJob(baseURL, token string, schema generateSchema, prompt stri
 		return "", fmt.Errorf("marshalling request: %v", err)
 	}
 
-	req, err := http.NewRequest("POST", baseURL+"/api/generate-data", bytes.NewReader(payload))
+	req, err := http.NewRequest("POST", baseURL+"/generate-data", bytes.NewReader(payload))
 	if err != nil {
 		return "", fmt.Errorf("creating request: %v", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "cli_"+token)
+	req.Header.Set("Authorization", utils.BearerAPIToken(token))
 
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
@@ -346,8 +346,6 @@ func submitGenerateJob(baseURL, token string, schema generateSchema, prompt stri
 	return jobResp.JobID, nil
 }
 
-// pollJobUntilDone polls the generation-status endpoint every 5 seconds until
-// the job completes or fails, with a 10-minute overall timeout.
 func pollJobUntilDone(baseURL, token, jobID string) ([]generateFileEntry, error) {
 	const (
 		pollInterval = 5 * time.Second
@@ -356,7 +354,6 @@ func pollJobUntilDone(baseURL, token, jobID string) ([]generateFileEntry, error)
 
 	client := &http.Client{Timeout: 15 * time.Second}
 	deadline := time.Now().Add(timeout)
-	dots := 0
 
 	for time.Now().Before(deadline) {
 		status, err := fetchJobStatus(client, baseURL, token, jobID)
@@ -366,7 +363,6 @@ func pollJobUntilDone(baseURL, token, jobID string) ([]generateFileEntry, error)
 
 		switch status.Status {
 		case "completed":
-			fmt.Println(" done!")
 			return status.Files, nil
 		case "error":
 			msg := "unknown error"
@@ -375,13 +371,7 @@ func pollJobUntilDone(baseURL, token, jobID string) ([]generateFileEntry, error)
 			}
 			return nil, fmt.Errorf("job failed: %s", msg)
 		default:
-			// pending / processing — keep waiting
-			dots++
-			if dots%6 == 0 {
-				fmt.Printf("\r  Still working... (%s) ", status.Status)
-			} else {
-				fmt.Print(".")
-			}
+			ui.Debug("Job status: %s", status.Status)
 		}
 
 		time.Sleep(pollInterval)
@@ -391,11 +381,11 @@ func pollJobUntilDone(baseURL, token, jobID string) ([]generateFileEntry, error)
 }
 
 func fetchJobStatus(client *http.Client, baseURL, token, jobID string) (*generateStatusResponse, error) {
-	req, err := http.NewRequest("GET", baseURL+"/api/generation-status?id="+jobID, nil)
+	req, err := http.NewRequest("GET", baseURL+"/generation-status?id="+jobID, nil)
 	if err != nil {
 		return nil, fmt.Errorf("creating request: %v", err)
 	}
-	req.Header.Set("Authorization", "cli_"+token)
+	req.Header.Set("Authorization", utils.BearerAPIToken(token))
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -419,7 +409,6 @@ func fetchJobStatus(client *http.Client, baseURL, token, jobID string) (*generat
 	return &status, nil
 }
 
-// downloadFile downloads a URL to a local file path.
 func downloadFile(fileURL, destPath string) error {
 	client := &http.Client{Timeout: 5 * time.Minute}
 	resp, err := client.Get(fileURL)
@@ -446,17 +435,14 @@ func downloadFile(fileURL, destPath string) error {
 
 // ─── Token helpers ────────────────────────────────────────────────────────────
 
-// resolveAndStoreAPIToken returns the API token to use, persisting it to the
-// global config when supplied via the flag so subsequent runs need not repeat it.
 func resolveAndStoreAPIToken(flagValue string) (string, error) {
 	if flagValue != "" {
 		if err := utils.SaveAPIToken(flagValue); err != nil {
-			fmt.Printf("Warning: could not persist API token: %v\n", err)
+			ui.Warn("Could not persist API token: %v", err)
 		}
 		return flagValue, nil
 	}
 
-	// Fall back to the global ~/.seedmancer/config.yaml.
 	homeDir, err := os.UserHomeDir()
 	if err == nil {
 		globalCfg, cfgErr := utils.LoadConfig(filepath.Join(homeDir, ".seedmancer", "config.yaml"))
@@ -465,7 +451,6 @@ func resolveAndStoreAPIToken(flagValue string) (string, error) {
 		}
 	}
 
-	// Fall back to the nearest project seedmancer.yaml.
 	if configPath, cfgErr := utils.FindConfigFile(); cfgErr == nil {
 		if cfg, loadErr := utils.LoadConfig(configPath); loadErr == nil && cfg.APIToken != "" {
 			return cfg.APIToken, nil
@@ -475,6 +460,6 @@ func resolveAndStoreAPIToken(flagValue string) (string, error) {
 	return "", fmt.Errorf(
 		"Seedmancer API token required.\n" +
 			"  Use --token flag or set SEEDMANCER_API_TOKEN environment variable.\n" +
-			"  Get your token at: https://seedmancer.dev/dashboard",
+			"  Get your token at: https://seedmancer.dev/dashboard/settings",
 	)
 }

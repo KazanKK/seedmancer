@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/KazanKK/seedmancer/internal/ui"
 	"github.com/lib/pq"
 	_ "github.com/lib/pq"
 )
@@ -22,11 +23,11 @@ type PostgresManager struct {
 }
 
 func (p *PostgresManager) log(format string, args ...interface{}) {
-	fmt.Printf("[postgres] "+format+"\n", args...)
+	ui.Debug("[postgres] "+format, args...)
 }
 
 func (p *PostgresManager) logSQL(operation, sql string) {
-	fmt.Printf("[postgres] %s:\n%s\n", operation, sql)
+	ui.Debug("[postgres] %s:\n%s", operation, sql)
 }
 
 func (p *PostgresManager) ConnectWithDSN(dsn string) error {
@@ -325,37 +326,37 @@ func (p *PostgresManager) RestoreFromCSV(directory string) error {
 		return fmt.Errorf("reading schema: %v", err)
 	}
 
-	// First create all enum types
+	if len(schema.Enums) > 0 {
+		ui.Step("Creating enum types...")
+	}
 	for _, enum := range schema.Enums {
-		// Check if enum exists
 		checkSQL := fmt.Sprintf("SELECT EXISTS (SELECT 1 FROM pg_type WHERE typname = '%s')", enum.Name)
 		var exists bool
 		if err := p.DB.QueryRow(checkSQL).Scan(&exists); err != nil {
 			return fmt.Errorf("checking if enum %s exists: %v", enum.Name, err)
 		}
-		
+
 		if !exists {
-			// Create the enum type
 			values := make([]string, len(enum.Values))
 			for i, v := range enum.Values {
 				values[i] = fmt.Sprintf("'%s'", v)
 			}
-			
+
 			createEnumSQL := fmt.Sprintf("CREATE TYPE %s AS ENUM (%s);",
 				pq.QuoteIdentifier(enum.Name),
 				strings.Join(values, ", "))
-				
+
 			p.logSQL("Create Enum", createEnumSQL)
-			
+
 			if _, err := p.DB.Exec(createEnumSQL); err != nil {
 				return fmt.Errorf("creating enum %s: %v", enum.Name, err)
 			}
-			
+
 			p.log("Created enum: %s", enum.Name)
 		}
 	}
 
-	// Then create tables if they don't exist (without foreign keys)
+	ui.Step("Preparing %d table(s)...", len(schema.Tables))
 	for _, table := range schema.Tables {
 		// Check if table exists
 		checkSQL := fmt.Sprintf("SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = 'public' AND table_name = '%s')", table.Name)
@@ -473,7 +474,7 @@ func (p *PostgresManager) RestoreFromCSV(directory string) error {
 		}
 	}
 
-	// Then import data for each table
+	ui.Step("Importing data...")
 	for _, table := range schema.Tables {
 		csvPath := filepath.Join(directory, table.Name+".csv")
 		if _, err := os.Stat(csvPath); err == nil {
@@ -759,7 +760,7 @@ func (p *PostgresManager) importCSV(tableName, csvPath string, schema *Schema) e
 		return fmt.Errorf("committing transaction: %v", err)
 	}
 
-	p.log("Successfully imported %d rows into table %s", rowCount, tableName)
+	ui.Debug("Imported %d rows into %s", rowCount, tableName)
 	return nil
 }
 
@@ -1040,13 +1041,13 @@ func (p *PostgresManager) ExportToCSV(outputDir string) error {
 		tables = append(tables, tableName)
 	}
 
-	// Export each table
 	for _, tableName := range tables {
 		if err := p.exportTableToCSV(tableName, outputDir); err != nil {
 			return fmt.Errorf("exporting table %s: %v", tableName, err)
 		}
-		p.log("Exported table: %s", tableName)
+		ui.Debug("Exported table: %s", tableName)
 	}
+	ui.Success("Exported %d table(s)", len(tables))
 
 	return nil
 }
@@ -1169,8 +1170,9 @@ func (p *PostgresManager) ExportSchema(outputDir string) error {
 			if err := os.WriteFile(sqlPath, []byte(fn.Definition), 0644); err != nil {
 				return fmt.Errorf("writing function %s: %v", fn.Name, err)
 			}
-			p.log("Exported function: %s -> %s", fn.Name, sqlPath)
+			ui.Debug("Exported function: %s", fn.Name)
 		}
+		ui.Success("Exported %d function(s)", len(schema.Functions))
 	}
 
 	// --- Export triggers as individual SQL files ---
@@ -1190,8 +1192,9 @@ func (p *PostgresManager) ExportSchema(outputDir string) error {
 			if err := os.WriteFile(sqlPath, []byte(content), 0644); err != nil {
 				return fmt.Errorf("writing trigger %s: %v", trigger.Name, err)
 			}
-			p.log("Exported trigger: %s on %s.%s -> %s", trigger.Name, trigger.TableSchema, trigger.TableName, sqlPath)
+			ui.Debug("Exported trigger: %s on %s.%s", trigger.Name, trigger.TableSchema, trigger.TableName)
 		}
+		ui.Success("Exported %d trigger(s)", len(schema.Triggers))
 	}
 
 	// --- Write schema.json (tables + enums only, no functions/triggers) ---
@@ -1211,7 +1214,7 @@ func (p *PostgresManager) ExportSchema(outputDir string) error {
 		return fmt.Errorf("writing schema to file: %v", err)
 	}
 
-	p.log("Schema exported to: %s", outputFile)
+	ui.Debug("Schema exported to: %s", outputFile)
 	return nil
 }
 

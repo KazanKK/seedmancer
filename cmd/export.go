@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	db "github.com/KazanKK/seedmancer/database"
+	"github.com/KazanKK/seedmancer/internal/ui"
 	utils "github.com/KazanKK/seedmancer/internal/utils"
 
 	"github.com/urfave/cli/v2"
@@ -36,12 +37,11 @@ func ExportCommand() *cli.Command {
 			},
 		},
 		Action: func(c *cli.Context) error {
-			// Find config file to get storage path and project root
 			configPath, err := utils.FindConfigFile()
 			if err != nil {
 				return fmt.Errorf("finding config file: %v", err)
 			}
-			
+
 			projectRoot := filepath.Dir(configPath)
 
 			cfg, err := utils.LoadConfig(configPath)
@@ -66,15 +66,14 @@ func ExportCommand() *cli.Command {
 			versionName := strings.TrimSpace(c.String("version-name"))
 			if versionName == "" {
 				versionName = utils.DefaultVersionName(databaseName)
-				fmt.Printf("Using auto-generated version name: %s\n", versionName)
+				ui.Info("Auto-generated version: %s", versionName)
 			}
-			
-			// Add sslmode=disable to PostgreSQL connection if not present
+
 			u, err := url.Parse(dbURL)
 			if err != nil {
 				return fmt.Errorf("parsing database URL: %v", err)
 			}
-			
+
 			if u.Scheme == "postgresql" {
 				dbURL = "postgres" + dbURL[len("postgresql"):]
 				u.Scheme = "postgres"
@@ -87,34 +86,36 @@ func ExportCommand() *cli.Command {
 					dbURL += "?sslmode=disable"
 				}
 			}
-			
-			// Create output directory based on version
+
 			outputDir := utils.GetVersionPath(projectRoot, cfg.StoragePath, databaseName, versionName)
 			if err := os.MkdirAll(outputDir, 0755); err != nil {
 				return fmt.Errorf("creating output directory: %v", err)
 			}
 
-			// Handle database connection and export
-		if u.Scheme != "postgres" {
-			return fmt.Errorf("unsupported database type: %s (only postgres is supported)", u.Scheme)
-		}
+			if u.Scheme != "postgres" {
+				return fmt.Errorf("unsupported database type: %s (only postgres is supported)", u.Scheme)
+			}
 
-		pg := &db.PostgresManager{}
-		if err := pg.ConnectWithDSN(dbURL); err != nil {
-			return fmt.Errorf("connecting to database: %v", err)
-		}
+			pg := &db.PostgresManager{}
+			if err := pg.ConnectWithDSN(dbURL); err != nil {
+				return fmt.Errorf("connecting to database: %v", err)
+			}
 
-		fmt.Println("Exporting database schema...")
-		if err := pg.ExportSchema(outputDir); err != nil {
-			return fmt.Errorf("exporting schema: %v", err)
-		}
+			sp := ui.StartSpinner("Exporting schema...")
+			if err := pg.ExportSchema(outputDir); err != nil {
+				sp.Stop(false, "Schema export failed")
+				return fmt.Errorf("exporting schema: %v", err)
+			}
+			sp.Stop(true, "Schema exported")
 
-		fmt.Println("Exporting table data...")
-		if err := pg.ExportToCSV(outputDir); err != nil {
-			return fmt.Errorf("exporting data: %v", err)
-		}
+			sp = ui.StartSpinner("Exporting table data...")
+			if err := pg.ExportToCSV(outputDir); err != nil {
+				sp.Stop(false, "Data export failed")
+				return fmt.Errorf("exporting data: %v", err)
+			}
+			sp.Stop(true, "Data exported")
 
-			fmt.Printf("\n✅ Export successful! Data stored in %s\n", outputDir)
+			ui.Success("Export complete → %s", outputDir)
 			return nil
 		},
 	}

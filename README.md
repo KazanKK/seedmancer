@@ -1,100 +1,194 @@
-# Seedmancer
+# Seedmancer CLI
 
-Seedmancer is a simple CLI tool to manage and reset database test data for testing. Resetting to a specific test data version is done by restoring from CSV files.
+A CLI tool to manage and reset database test data. Export snapshots as CSV, restore on demand, sync to the cloud, and generate realistic data with AI.
 
 ## Features
-- 🚀 **Fast Database Reset** – Restore your database to a specific state instantly.
-- 🔄 **Test Data Versioning** – Save and manage multiple test data versions.
-- 🔌 **Supports PostgreSQL & MySQL** – With planned support for more databases.
-- 📦 **Seamless CI/CD Integration (Coming Soon)** – Works with GitHub Actions, Jenkins, and more.
 
+- **Snapshot & Restore** — Export your database to versioned CSV files and restore instantly
+- **AI Data Generation** — Generate realistic seed data from a natural language prompt via the Seedmancer API
+- **Cloud Sync** — Push local test data to Seedmancer cloud and fetch it on any machine
+- **Auto Versioning** — Version names are auto-generated as `YYYYMMDDHHMMSS_<database>` when omitted
+- **PostgreSQL** — Full support (MySQL planned)
 
 ## Installation
 
-### Manual Download
-download the latest binary from [GitHub Releases](https://github.com/KazanKK/Seedmancer/releases)
-#### Linux(arm64)
+Download the latest binary from [GitHub Releases](https://github.com/KazanKK/Seedmancer/releases).
+
+### Linux (arm64)
+
 ```sh
-curl -L https://github.com/KazanKK/seedmancer/releases/download/v0.1.0/seedmancer_Linux_arm64 -o seedmancer_Linux_arm64
-chmod +x seedmancer_Linux_arm64
-mv seedmancer_Linux_arm64 /usr/local/bin/seedmancer
+curl -L https://github.com/KazanKK/seedmancer/releases/download/v0.1.0/seedmancer_Linux_arm64 -o seedmancer
+chmod +x seedmancer
+mv seedmancer /usr/local/bin/seedmancer
 ```
 
-#### Linux(x86_64)
+### Linux (x86_64)
+
 ```sh
-curl -L https://github.com/KazanKK/seedmancer/releases/download/v0.1.0/seedmancer_Linux_x86_64 -o seedmancer_Linux_x86_64
-chmod +x seedmancer_Linux_x86_64
-mv seedmancer_Linux_x86_64 /usr/local/bin/seedmancer
+curl -L https://github.com/KazanKK/seedmancer/releases/download/v0.1.0/seedmancer_Linux_x86_64 -o seedmancer
+chmod +x seedmancer
+mv seedmancer /usr/local/bin/seedmancer
 ```
 
-#### MacOS(arm64)
+### macOS (arm64)
+
 ```sh
-curl -L https://github.com/KazanKK/seedmancer/releases/download/v0.1.0/seedmancer_Darwin_arm64 -o seedmancer_Darwin_arm64
-chmod +x seedmancer_Darwin_arm64
-sudo mv seedmancer_Darwin_arm64  /usr/local/bin/seedmancer
+curl -L https://github.com/KazanKK/seedmancer/releases/download/v0.1.0/seedmancer_Darwin_arm64 -o seedmancer
+chmod +x seedmancer
+sudo mv seedmancer /usr/local/bin/seedmancer
 ```
 
-## Getting Started
-### Initialize a New Project
+## Quick Start
+
 ```sh
+# 1. Initialize project
 seedmancer init
+
+# 2. Export current database state
+seedmancer export \
+  --database-name mydb \
+  --version-name baseline \
+  --db-url "postgres://user:pass@localhost:5432/mydb"
+
+# 3. Restore to that snapshot
+seedmancer seed \
+  --database-name mydb \
+  --version-name baseline \
+  --db-url "postgres://user:pass@localhost:5432/mydb"
 ```
-This sets up configuration files for Seedmancer in your project.
 
-### Export Existing Database Schema & Data
-```sh
-seedmancer export --database-name mydb --version-name baseline --db-url "postgres://user:pass@localhost:5432/mydb"
-```
-Exports the database schema and data to local CSV files.
-
-### Restore Database to a Specific Test Data Version
-```sh
-seedmancer seed --database-name mydb --version-name baseline --db-url "postgres://user:pass@localhost:5432/mydb"
-```
-Resets the database to the specified test data version.
-
-### Direct Edit of CSV Files
-You can directly edit the CSV files to change the test data.
-Do not edit the `schema.json` file.
-
+You can directly edit the exported CSV files to adjust test data. Do not edit `schema.json`.
 
 ## Command Reference
+
+### Global Flags
+
+| Flag | Description | Env |
+|------|-------------|-----|
+| `--debug` | Show detailed debug output | `SEEDMANCER_DEBUG` |
+
 ### `seedmancer init`
-Initializes a new Seedmancer project.
+
+Initialize a Seedmancer project. Creates `seedmancer.yaml` and the storage directory. Prompts interactively when run in a terminal; existing config values are used as defaults.
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--storage-path` | Directory to store exported data | *(prompted)* |
+| `--database-name` | Default database name | *(prompted)* |
+| `--database-url` | Default PostgreSQL connection URL | *(prompted)* |
 
 ### `seedmancer export`
-Exports the database schema and data.
 
-| Argument | Description | Required | Default |
-|----------|------------|----------|---------|
-| `--database-name` | Name of the database to export. You can name it anything you want. | ✅ Yes | - |
-| `--db-url` | Database connection URL | ✅ Yes | - |
-| `--version-name` | Version name for the export | No | `unversioned` |
+Export current database schema and data to local CSV files.
+
+| Flag | Description | Required | Env |
+|------|-------------|----------|-----|
+| `--database-name` | Logical name for this database | Yes (or set in config) | |
+| `--version-name` | Version label for the snapshot | No (auto-generated) | |
+| `--db-url` | PostgreSQL connection URL | Yes (or set in config) | `SEEDMANCER_DATABASE_URL` |
+
+Output is saved to `.seedmancer/databases/<database-name>/<version-name>/` containing `schema.json` and one `.csv` per table.
 
 ### `seedmancer seed`
-Restores the database to a specific test data version.
 
-| Argument | Description | Required | Default |
-|----------|------------|----------|---------|
-| `--database-name` | Name of the database you want to use | ✅ Yes | - |
-| `--version-name` | Test data version to apply | ✅ Yes | - |
-| `--db-url` | Database connection URL | ✅ Yes | - |
+Restore the database to a previously exported version. Drops existing data and reloads from CSV.
 
-### `seedmancer list` 
-Lists available databases and test data versions.
+| Flag | Description | Required | Env |
+|------|-------------|----------|-----|
+| `--database-name` | Database name (matches export directory) | Yes (or set in config) | |
+| `--version-name` | Version to restore | No (auto-resolves latest) | |
+| `--db-url` | PostgreSQL connection URL | Yes (or set in config) | `SEEDMANCER_DATABASE_URL` |
 
+When `--version-name` is omitted, the CLI picks the latest timestamped version, then `unversioned`, then the sole version if only one exists.
 
-## Configuration File
-Seedmancer uses a YAML configuration file (`seedmancer.yaml`) to store settings:
+### `seedmancer list`
+
+List all databases and test data versions (local and/or remote).
+
+| Flag | Description | Env |
+|------|-------------|-----|
+| `--local` | Show only local versions | |
+| `--remote` | Show only remote (cloud) versions | |
+| `--token` | Seedmancer API token (required for remote) | `SEEDMANCER_API_TOKEN` |
+
+When neither `--local` nor `--remote` is set, both are shown.
+
+### `seedmancer fetch`
+
+Download a test data version from Seedmancer cloud into your local storage. Replaces any existing local version with the same name.
+
+| Flag | Description | Required | Env |
+|------|-------------|----------|-----|
+| `--database-name` | Database name to fetch | Yes | |
+| `--version` | Version name to fetch | Yes | |
+| `--token` | Seedmancer API token | Yes | `SEEDMANCER_API_TOKEN` |
+
+### `seedmancer generate`
+
+Generate realistic seed data via AI. Reads the live database schema, submits a generation job to the Seedmancer API, polls until complete, then downloads the resulting CSV files.
+
+| Flag | Description | Required | Env |
+|------|-------------|----------|-----|
+| `--prompt` | Natural language description of data to generate | Yes | |
+| `--token` | Seedmancer API token (persisted to `~/.seedmancer/config.yaml`) | Yes (first time) | `SEEDMANCER_API_TOKEN` |
+| `--db-url` | PostgreSQL connection URL | Yes (or set in config) | `SEEDMANCER_DATABASE_URL` |
+| `--database-name` | Logical database name | No (uses config) | |
+| `--version-name` | Version label for generated data | No (auto-generated) | |
+| `--api-url` | Override API base URL | No | `SEEDMANCER_API_URL` |
+
+Example:
+
+```sh
+seedmancer generate \
+  --prompt "50 users with realistic names and emails, 200 orders" \
+  --database-name mydb
+
+# Then seed the generated data
+seedmancer seed --database-name mydb --version-name <generated-version>
+```
+
+### `seedmancer sync`
+
+Upload local test data to Seedmancer cloud. Syncs all databases and versions by default, or filter with flags.
+
+| Flag | Description | Env |
+|------|-------------|-----|
+| `--database-name` | Sync only this database (omit for all) | |
+| `--version` | Sync only this version (omit for all) | |
+| `--token` | Seedmancer API token | `SEEDMANCER_API_TOKEN` |
+
+## Configuration
+
+### Project config — `seedmancer.yaml`
+
+Created by `seedmancer init` in your project root.
 
 | Key | Description | Default |
-|-----|------------|---------|
-| `storage_path` | Where to store test data files | `.seedmancer` |
+|-----|-------------|---------|
+| `storage_path` | Directory for exported data | `.seedmancer` |
+| `database_name` | Default database name | |
+| `database_url` | Default PostgreSQL connection URL | |
+| `api_url` | Seedmancer API base URL | `https://api.seedmancer.dev` |
+| `api_token` | API token (alternative to env var) | |
 
----
+### Global config — `~/.seedmancer/config.yaml`
+
+Persisted automatically when you provide `--token` or `--api-key`. Stores credentials so you don't need to pass them every time.
+
+| Key | Description |
+|-----|-------------|
+| `api_token` | Seedmancer API token |
+| `openai_api_key` | OpenAI API key (legacy) |
+
+## Environment Variables
+
+| Variable | Flag equivalent | Used by |
+|----------|----------------|---------|
+| `SEEDMANCER_DATABASE_URL` | `--db-url` | export, seed, generate |
+| `SEEDMANCER_API_TOKEN` | `--token` | list, fetch, generate, sync |
+| `SEEDMANCER_API_URL` | `--api-url` | generate |
+| `SEEDMANCER_DEBUG` | `--debug` | all commands |
 
 ## License
-Seedmancer is licensed under the **MIT License**.
 
-## Support & Contact
-- 🌐 [Website](https://seedmancer.dev) (coming soon)
+MIT — [https://seedmancer.dev](https://seedmancer.dev)

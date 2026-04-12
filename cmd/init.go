@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/KazanKK/seedmancer/internal/ui"
 	utils "github.com/KazanKK/seedmancer/internal/utils"
 	"github.com/urfave/cli/v2"
 	"golang.org/x/term"
@@ -31,7 +32,6 @@ func InitCommand() *cli.Command {
 			},
 		},
 		Action: func(c *cli.Context) error {
-			// Seed values from existing config, then flags override.
 			storagePath := c.String("storage-path")
 			databaseName := c.String("database-name")
 			databaseURL := c.String("database-url")
@@ -95,21 +95,19 @@ func InitCommand() *cli.Command {
 				return fmt.Errorf("creating storage directory: %v", err)
 			}
 
-			fmt.Println()
-			fmt.Println("Created seedmancer.yaml")
-			fmt.Printf("  storage_path:  %s\n", storagePath)
+			ui.Success("Created seedmancer.yaml")
+			ui.KeyValue("storage_path: ", storagePath)
 			if databaseName != "" {
-				fmt.Printf("  database_name: %s\n", databaseName)
+				ui.KeyValue("database_name:", databaseName)
 			}
 			if databaseURL != "" {
-				fmt.Printf("  database_url:  %s\n", databaseURL)
+				ui.KeyValue("database_url: ", databaseURL)
 			}
 			return nil
 		},
 	}
 }
 
-// loadExistingConfig returns the nearest config without failing if none exists.
 func loadExistingConfig() (utils.Config, error) {
 	configPath, err := utils.FindConfigFile()
 	if err != nil {
@@ -118,13 +116,11 @@ func loadExistingConfig() (utils.Config, error) {
 	return utils.LoadConfig(configPath)
 }
 
-// prompt prints "? Label (default): " and reads one line.
-// If the user presses Enter with no input the default is returned.
 func prompt(in *bufio.Reader, label, defaultVal string) (string, error) {
 	if defaultVal != "" {
-		fmt.Printf("? %s (%s): ", label, defaultVal)
+		fmt.Printf("  \033[36m?\033[0m %s \033[90m(%s)\033[0m: ", label, defaultVal)
 	} else {
-		fmt.Printf("? %s: ", label)
+		fmt.Printf("  \033[36m?\033[0m %s: ", label)
 	}
 
 	line, err := in.ReadString('\n')

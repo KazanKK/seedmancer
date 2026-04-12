@@ -47,8 +47,8 @@ func GetVersionPath(projectRoot, storagePath, databaseName, version string) stri
 	return filepath.Join(projectRoot, storagePath, "databases", databaseName, version)
 }
 
-// GetBaseURL resolves the Seedmancer web API origin (no trailing slash).
-// Priority: SEEDMANCER_API_URL → api_url in seedmancer.yaml → https://seedmancer.dev
+// GetBaseURL resolves the Seedmancer HTTP API origin (no trailing slash).
+// Priority: SEEDMANCER_API_URL → api_url in seedmancer.yaml → https://api.seedmancer.dev
 func GetBaseURL() string {
 	if v := os.Getenv("SEEDMANCER_API_URL"); v != "" {
 		return strings.TrimRight(v, "/")
@@ -58,7 +58,12 @@ func GetBaseURL() string {
 			return strings.TrimRight(cfg.APIURL, "/")
 		}
 	}
-	return "https://seedmancer.dev"
+	return "https://api.seedmancer.dev"
+}
+
+// BearerAPIToken returns the Authorization header value for a dashboard API token (opaque secret).
+func BearerAPIToken(token string) string {
+	return "Bearer " + token
 }
 
 // ReadConfig reads the seedmancer config file and returns the storage path
