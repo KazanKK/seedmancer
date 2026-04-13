@@ -35,6 +35,12 @@ func ExportCommand() *cli.Command {
 				Usage:    "Database connection URL (overrides database_url in seedmancer.yaml and SEEDMANCER_DATABASE_URL)",
 				EnvVars:  []string{"SEEDMANCER_DATABASE_URL"},
 			},
+			&cli.BoolFlag{
+				Name:    "force",
+				Aliases: []string{"y"},
+				Usage:   "Overwrite existing version without confirmation (for CI/CD)",
+				Value:   false,
+			},
 		},
 		Action: func(c *cli.Context) error {
 			configPath, err := utils.FindConfigFile()
@@ -88,6 +94,20 @@ func ExportCommand() *cli.Command {
 			}
 
 			outputDir := utils.GetVersionPath(projectRoot, cfg.StoragePath, databaseName, versionName)
+
+			if info, statErr := os.Stat(outputDir); statErr == nil && info.IsDir() {
+				ui.Warn("Version %q already exists at %s", versionName, outputDir)
+				if !c.Bool("force") {
+					if !ui.Confirm("Overwrite existing test data?", false) {
+						ui.Info("Export cancelled.")
+						return nil
+					}
+				}
+				if err := os.RemoveAll(outputDir); err != nil {
+					return fmt.Errorf("removing existing version directory: %v", err)
+				}
+			}
+
 			if err := os.MkdirAll(outputDir, 0755); err != nil {
 				return fmt.Errorf("creating output directory: %v", err)
 			}

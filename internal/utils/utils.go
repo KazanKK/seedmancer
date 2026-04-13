@@ -74,3 +74,33 @@ func ReadConfig(configPath string) (string, error) {
 	}
 	return cfg.StoragePath, nil
 }
+
+// ResolveAPIToken returns a token from the first available source:
+// 1. Explicit value (--token flag / SEEDMANCER_API_TOKEN env — already merged by urfave)
+// 2. api_token in project seedmancer.yaml
+// 3. api_token in ~/.seedmancer/config.yaml
+func ResolveAPIToken(flagValue string) (string, error) {
+	if flagValue != "" {
+		return flagValue, nil
+	}
+
+	if configPath, err := FindConfigFile(); err == nil {
+		if cfg, err := LoadConfig(configPath); err == nil && cfg.APIToken != "" {
+			return cfg.APIToken, nil
+		}
+	}
+
+	homeDir, err := os.UserHomeDir()
+	if err == nil {
+		globalCfg, cfgErr := LoadConfig(filepath.Join(homeDir, ".seedmancer", "config.yaml"))
+		if cfgErr == nil && globalCfg.APIToken != "" {
+			return globalCfg.APIToken, nil
+		}
+	}
+
+	return "", fmt.Errorf(
+		"API token required.\n" +
+			"  Use --token flag or set SEEDMANCER_API_TOKEN environment variable.\n" +
+			"  Get your token at: https://seedmancer.dev/dashboard/settings",
+	)
+}

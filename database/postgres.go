@@ -391,6 +391,7 @@ func (p *PostgresManager) RestoreFromCSV(directory string) error {
 	}
 
 	// Restore functions — prefer SQL files, fall back to schema.json entries
+	var fnCount int
 	functionsDir := filepath.Join(directory, "functions")
 	if entries, err := os.ReadDir(functionsDir); err == nil {
 		for _, entry := range entries {
@@ -408,20 +409,25 @@ func (p *PostgresManager) RestoreFromCSV(directory string) error {
 				return fmt.Errorf("restoring function %s: %v", fnName, err)
 			}
 			p.log("Restored function: %s", fnName)
+			fnCount++
 		}
 	} else {
-		// Fallback: functions embedded in schema.json (legacy format)
 		for _, fn := range schema.Functions {
 			p.logSQL(fmt.Sprintf("Restore Function %s", fn.Name), fn.Definition)
 			if _, err := p.DB.Exec(fn.Definition); err != nil {
 				return fmt.Errorf("restoring function %s: %v", fn.Name, err)
 			}
 			p.log("Restored function: %s", fn.Name)
+			fnCount++
 		}
+	}
+	if fnCount > 0 {
+		ui.Step("Restored %d function(s)", fnCount)
 	}
 
 	// Restore triggers — prefer SQL files, fall back to schema.json entries.
 	// DROP before CREATE because CREATE OR REPLACE TRIGGER requires PG14+.
+	var trigCount int
 	triggersDir := filepath.Join(directory, "triggers")
 	if entries, err := os.ReadDir(triggersDir); err == nil {
 		for _, entry := range entries {
@@ -452,9 +458,9 @@ func (p *PostgresManager) RestoreFromCSV(directory string) error {
 				return fmt.Errorf("restoring trigger %s on %s: %v", name, tableRef, err)
 			}
 			p.log("Restored trigger: %s on %s", name, tableRef)
+			trigCount++
 		}
 	} else {
-		// Fallback: triggers embedded in schema.json (legacy format)
 		for _, trigger := range schema.Triggers {
 			tableRef := pq.QuoteIdentifier(trigger.TableName)
 			if trigger.TableSchema != "" && trigger.TableSchema != "public" {
@@ -471,7 +477,11 @@ func (p *PostgresManager) RestoreFromCSV(directory string) error {
 				return fmt.Errorf("restoring trigger %s on %s: %v", trigger.Name, tableRef, err)
 			}
 			p.log("Restored trigger: %s on %s", trigger.Name, tableRef)
+			trigCount++
 		}
+	}
+	if trigCount > 0 {
+		ui.Step("Restored %d trigger(s)", trigCount)
 	}
 
 	ui.Step("Importing data...")
@@ -499,47 +509,50 @@ func (p *PostgresManager) createTable(table Table, includeForeignKeys bool) erro
 	var uniqueConstraints []string
 
 	for _, col := range table.Columns {
-		// Build column definition
 		colDef := fmt.Sprintf("%s ", pq.QuoteIdentifier(col.Name))
-		
-		// Handle data type
-		if col.Type == "enum" && col.Enum != "" {
-			// Use the exact enum name as stored in the schema
-			colDef += pq.QuoteIdentifier(col.Enum)
-		} else if strings.HasPrefix(col.Type, "ARRAY") {
-			// Fix ARRAY type syntax - default to text[] if element type not specified
-			colDef += "text[]"
-		} else if (col.Type == "character varying" || col.Type == "varchar") && col.Varchar != nil {
-			// Use varchar with length if specified
-			colDef += fmt.Sprintf("varchar(%s)", *col.Varchar)
-		} else {
-			colDef += col.Type
-		}
-		
-		// Handle nullable
-		if !col.Nullable {
-			colDef += " NOT NULL"
-		}
-		
-		// Handle default value - ensure it's properly formatted
-		if col.Default != "" && col.Default != nil {
-			// Check if Default is a string or another type
-			switch v := col.Default.(type) {
-			case string:
-				colDef += " DEFAULT " + v
+
+		defaultStr := columnDefaultString(col.Default)
+		isNextval := strings.Contains(strings.ToLower(defaultStr), "nextval(")
+
+		if isNextval {
+			// Convert integer+nextval → SERIAL, bigint+nextval → BIGSERIAL.
+			// This lets PostgreSQL create the backing sequence automatically.
+			switch strings.ToLower(col.Type) {
+			case "bigint":
+				colDef += "BIGSERIAL"
+			case "smallint":
+				colDef += "SMALLSERIAL"
 			default:
-				colDef += " DEFAULT " + fmt.Sprintf("%v", v)
+				colDef += "SERIAL"
+			}
+			if !col.Nullable {
+				colDef += " NOT NULL"
+			}
+		} else {
+			if col.Type == "enum" && col.Enum != "" {
+				colDef += pq.QuoteIdentifier(col.Enum)
+			} else if strings.HasPrefix(col.Type, "ARRAY") {
+				colDef += "text[]"
+			} else if (col.Type == "character varying" || col.Type == "varchar") && col.Varchar != nil {
+				colDef += fmt.Sprintf("varchar(%s)", *col.Varchar)
+			} else {
+				colDef += col.Type
+			}
+
+			if !col.Nullable {
+				colDef += " NOT NULL"
+			}
+
+			if defaultStr != "" {
+				colDef += " DEFAULT " + defaultStr
 			}
 		}
-		
+
 		columnDefs = append(columnDefs, colDef)
-		
-		// Track primary keys
+
 		if col.IsPrimary {
 			primaryKeys = append(primaryKeys, col.Name)
 		}
-		
-		// Track unique constraints
 		if col.IsUnique && !col.IsPrimary {
 			uniqueConstraints = append(uniqueConstraints, col.Name)
 		}
@@ -1004,6 +1017,20 @@ func (p *PostgresManager) ReadSchemaFromFile(filename string) (*Schema, error) {
 	}
 
 	return &schema, nil
+}
+
+// columnDefaultString extracts the default value as a string, handling the
+// untyped interface{} from JSON unmarshalling.
+func columnDefaultString(v interface{}) string {
+	if v == nil {
+		return ""
+	}
+	switch s := v.(type) {
+	case string:
+		return s
+	default:
+		return fmt.Sprintf("%v", s)
+	}
 }
 
 // Helper function to properly quote and join enum values

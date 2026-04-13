@@ -13,32 +13,51 @@ import (
 
 	"github.com/olekukonko/tablewriter"
 	"github.com/urfave/cli/v2"
-	"gopkg.in/yaml.v3"
 )
 
-type ListResponse struct {
-	Databases []struct {
-		ID               string   `json:"id"`
-		Name             string   `json:"name"`
-		Tables           []string `json:"tables"`
-		Enums            []string `json:"enums"`
-		TestDataVersions []struct {
-			ID   string `json:"id"`
-			Name string `json:"name"`
-		} `json:"testDataVersions"`
-	} `json:"databases"`
+type datasetsResponse struct {
+	Datasets []datasetItem `json:"datasets"`
+}
+
+type datasetItem struct {
+	ID           string         `json:"id"`
+	Name         string         `json:"name"`
+	Description  *string        `json:"description"`
+	DatabaseName string         `json:"databaseName"`
+	VersionName  string         `json:"versionName"`
+	FileCount    int            `json:"fileCount"`
+	TotalSize    int64          `json:"totalSize"`
+	Files        []datasetFile  `json:"files"`
+	CreatedAt    string         `json:"createdAt"`
+	UpdatedAt    string         `json:"updatedAt"`
+}
+
+type datasetFile struct {
+	Name       string `json:"name"`
+	Size       int    `json:"size"`
+	Rows       int    `json:"rows"`
+	HasContent bool   `json:"hasContent,omitempty"`
+}
+
+type listEntry struct {
+	Database string `json:"database"`
+	Version  string `json:"version"`
+}
+
+type listOutput struct {
+	Local  []listEntry `json:"local,omitempty"`
+	Remote []listEntry `json:"remote,omitempty"`
 }
 
 func ListCommand() *cli.Command {
 	return &cli.Command{
 		Name:  "list",
-		Usage: "List databases and versions",
+		Usage: "List databases and versions (local, remote, or both)",
 		Flags: []cli.Flag{
 			&cli.StringFlag{
-				Name:     "token",
-				Required: false,
-				Usage:    "API token (or set SEEDMANCER_API_TOKEN env var)",
-				EnvVars:  []string{"SEEDMANCER_API_TOKEN"},
+				Name:    "token",
+				Usage:   "API token (or set SEEDMANCER_API_TOKEN env var)",
+				EnvVars: []string{"SEEDMANCER_API_TOKEN"},
 			},
 			&cli.BoolFlag{
 				Name:  "local",
@@ -50,154 +69,187 @@ func ListCommand() *cli.Command {
 				Usage: "List only remote databases and versions",
 				Value: false,
 			},
+			&cli.BoolFlag{
+				Name:  "json",
+				Usage: "Output as JSON (for CI/CD and scripting)",
+				Value: false,
+			},
 		},
 		Action: func(c *cli.Context) error {
-			configPath, err := utils.FindConfigFile()
-			if err != nil {
-				return fmt.Errorf("finding config file: %v", err)
-			}
-
-			projectRoot := filepath.Dir(configPath)
-			data, err := os.ReadFile(configPath)
-			if err != nil {
-				return fmt.Errorf("reading config file: %v", err)
-			}
-
-			var config struct {
-				StoragePath string `yaml:"storage_path"`
-			}
-			if err := yaml.Unmarshal(data, &config); err != nil {
-				return fmt.Errorf("parsing config file: %v", err)
-			}
-
-			token := c.String("token")
 			localOnly := c.Bool("local")
 			remoteOnly := c.Bool("remote")
+			jsonMode := c.Bool("json")
 
 			if !localOnly && !remoteOnly {
 				localOnly = true
 				remoteOnly = true
 			}
 
+			var out listOutput
+
 			if localOnly {
-				ui.Title("Local")
-
-				databasesDir := filepath.Join(projectRoot, config.StoragePath, "databases")
-				if _, err := os.Stat(databasesDir); os.IsNotExist(err) {
-					ui.Info("No local databases found.")
-				} else {
-					entries, err := os.ReadDir(databasesDir)
-					if err != nil {
-						return fmt.Errorf("reading databases directory: %v", err)
-					}
-
-					if len(entries) == 0 {
-						ui.Info("No local databases found.")
+				entries, err := listLocal()
+				if err != nil && !remoteOnly {
+					if jsonMode {
+						out.Local = []listEntry{}
 					} else {
-						table := tablewriter.NewWriter(os.Stdout)
-						table.SetHeader([]string{"Database", "Version"})
-						table.SetBorder(false)
-						table.SetColumnSeparator("  ")
-						table.SetHeaderAlignment(tablewriter.ALIGN_LEFT)
-						table.SetAlignment(tablewriter.ALIGN_LEFT)
-
-						for _, entry := range entries {
-							if entry.IsDir() {
-								dbName := entry.Name()
-								versionsDir := filepath.Join(databasesDir, dbName)
-
-								versionEntries, err := os.ReadDir(versionsDir)
-								if err != nil {
-									return fmt.Errorf("reading versions directory: %v", err)
-								}
-
-								for _, versionEntry := range versionEntries {
-									if versionEntry.IsDir() {
-										table.Append([]string{dbName, versionEntry.Name()})
-									}
-								}
-							}
+						ui.Title("Local")
+						ui.Info("No local databases found.")
+					}
+				} else if err != nil {
+					// remote-only with no config is fine — skip local silently
+				} else {
+					if jsonMode {
+						out.Local = entries
+					} else {
+						ui.Title("Local")
+						if len(entries) == 0 {
+							ui.Info("No local databases found.")
+						} else {
+							renderTable(entries)
 						}
-
-						table.Render()
 					}
 				}
 			}
 
 			if remoteOnly {
-				if token == "" {
-					if localOnly {
+				token, tokenErr := utils.ResolveAPIToken(c.String("token"))
+				if tokenErr != nil {
+					if localOnly && !jsonMode {
 						ui.Title("Remote")
 						ui.Warn("API token required to list remote databases.")
 						ui.Info("Use --token flag or set SEEDMANCER_API_TOKEN environment variable.")
 						return nil
 					}
-					return fmt.Errorf("API token required to list remote databases")
-				}
-
-				ui.Title("Remote")
-
-				baseURL := utils.GetBaseURL()
-				url := fmt.Sprintf("%s/v1.0/databases/testdata/list", baseURL)
-				ui.Debug("GET %s", url)
-
-				req, err := http.NewRequest("GET", url, nil)
-				if err != nil {
-					return fmt.Errorf("creating request: %v", err)
-				}
-
-				req.Header.Set("Authorization", utils.BearerAPIToken(token))
-
-				resp, err := http.DefaultClient.Do(req)
-				if err != nil {
-					return fmt.Errorf("making request: %v", err)
-				}
-				defer resp.Body.Close()
-
-				if resp.StatusCode == http.StatusUnauthorized {
-					return fmt.Errorf("unauthorized: please check your API token")
-				}
-
-				if resp.StatusCode != http.StatusOK {
-					body, _ := io.ReadAll(resp.Body)
-					return fmt.Errorf("API request failed: %s - %s", resp.Status, string(body))
-				}
-
-				body, err := io.ReadAll(resp.Body)
-				if err != nil {
-					return fmt.Errorf("reading response body: %v", err)
-				}
-
-				var listResp ListResponse
-				if err := json.Unmarshal(body, &listResp); err != nil {
-					return fmt.Errorf("parsing response JSON: %v", err)
-				}
-
-				if len(listResp.Databases) == 0 {
-					ui.Info("No remote databases found.")
-				} else {
-					table := tablewriter.NewWriter(os.Stdout)
-					table.SetHeader([]string{"Database", "Version"})
-					table.SetBorder(false)
-					table.SetColumnSeparator("  ")
-					table.SetHeaderAlignment(tablewriter.ALIGN_LEFT)
-					table.SetAlignment(tablewriter.ALIGN_LEFT)
-
-					for _, db := range listResp.Databases {
-						if len(db.TestDataVersions) == 0 {
-							table.Append([]string{db.Name, "(no versions)"})
-						} else {
-							for _, version := range db.TestDataVersions {
-								table.Append([]string{db.Name, version.Name})
-							}
-						}
+					if jsonMode && localOnly {
+						return outputJSON(out)
 					}
+					return tokenErr
+				}
 
-					table.Render()
+				entries, err := listRemote(token)
+				if err != nil {
+					return err
+				}
+
+				if jsonMode {
+					out.Remote = entries
+				} else {
+					ui.Title("Remote")
+					if len(entries) == 0 {
+						ui.Info("No remote databases found.")
+					} else {
+						renderTable(entries)
+					}
 				}
 			}
 
+			if jsonMode {
+				return outputJSON(out)
+			}
 			return nil
 		},
 	}
+}
+
+func listLocal() ([]listEntry, error) {
+	configPath, err := utils.FindConfigFile()
+	if err != nil {
+		return nil, err
+	}
+
+	projectRoot := filepath.Dir(configPath)
+	cfg, err := utils.LoadConfig(configPath)
+	if err != nil {
+		return nil, err
+	}
+
+	databasesDir := filepath.Join(projectRoot, cfg.StoragePath, "databases")
+	if _, err := os.Stat(databasesDir); os.IsNotExist(err) {
+		return nil, nil
+	}
+
+	dbEntries, err := os.ReadDir(databasesDir)
+	if err != nil {
+		return nil, fmt.Errorf("reading databases directory: %v", err)
+	}
+
+	var entries []listEntry
+	for _, dbEntry := range dbEntries {
+		if !dbEntry.IsDir() {
+			continue
+		}
+		dbName := dbEntry.Name()
+		versionEntries, err := os.ReadDir(filepath.Join(databasesDir, dbName))
+		if err != nil {
+			continue
+		}
+		for _, vEntry := range versionEntries {
+			if vEntry.IsDir() {
+				entries = append(entries, listEntry{Database: dbName, Version: vEntry.Name()})
+			}
+		}
+	}
+	return entries, nil
+}
+
+func listRemote(token string) ([]listEntry, error) {
+	baseURL := utils.GetBaseURL()
+	reqURL := fmt.Sprintf("%s/v1.0/datasets", baseURL)
+	ui.Debug("GET %s", reqURL)
+
+	req, err := http.NewRequest("GET", reqURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("creating request: %v", err)
+	}
+	req.Header.Set("Authorization", utils.BearerAPIToken(token))
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("making request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		return nil, fmt.Errorf("unauthorized: please check your API token")
+	}
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("API request failed: %s - %s", resp.Status, string(body))
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("reading response body: %v", err)
+	}
+
+	var dsResp datasetsResponse
+	if err := json.Unmarshal(body, &dsResp); err != nil {
+		return nil, fmt.Errorf("parsing response JSON: %v", err)
+	}
+
+	var entries []listEntry
+	for _, ds := range dsResp.Datasets {
+		entries = append(entries, listEntry{Database: ds.DatabaseName, Version: ds.VersionName})
+	}
+	return entries, nil
+}
+
+func renderTable(entries []listEntry) {
+	table := tablewriter.NewWriter(os.Stdout)
+	table.SetHeader([]string{"Database", "Version"})
+	table.SetBorder(false)
+	table.SetColumnSeparator("  ")
+	table.SetHeaderAlignment(tablewriter.ALIGN_LEFT)
+	table.SetAlignment(tablewriter.ALIGN_LEFT)
+	for _, e := range entries {
+		table.Append([]string{e.Database, e.Version})
+	}
+	table.Render()
+}
+
+func outputJSON(v interface{}) error {
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(v)
 }

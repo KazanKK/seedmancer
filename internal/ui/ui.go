@@ -81,6 +81,37 @@ func KeyValue(key, value string) {
 	fmt.Fprintf(os.Stderr, "  %s %s\n", color(dim, key), value)
 }
 
+// IsTerminal returns true when stderr is a TTY (interactive session).
+func IsTerminal() bool { return !noColor }
+
+// Confirm prompts the user with a yes/no question. Returns true for y/Y/yes.
+// In non-TTY environments, returns the defaultVal without prompting.
+func Confirm(prompt string, defaultVal bool) bool {
+	hint := "[y/N]"
+	if defaultVal {
+		hint = "[Y/n]"
+	}
+	fmt.Fprintf(os.Stderr, "%s %s %s ", color(yellow, "?"), prompt, color(dim, hint))
+
+	if noColor {
+		// non-interactive: use default
+		if defaultVal {
+			fmt.Fprintln(os.Stderr, "y")
+		} else {
+			fmt.Fprintln(os.Stderr, "n")
+		}
+		return defaultVal
+	}
+
+	var answer string
+	fmt.Scanln(&answer)
+	answer = strings.ToLower(strings.TrimSpace(answer))
+	if answer == "" {
+		return defaultVal
+	}
+	return answer == "y" || answer == "yes"
+}
+
 // Spinner provides animated progress for long-running operations.
 type Spinner struct {
 	message string
