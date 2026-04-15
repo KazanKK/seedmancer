@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,8 +21,10 @@ import (
 // ─── API types ────────────────────────────────────────────────────────────────
 
 type generateJobRequest struct {
-	Schema generateSchema `json:"schema"`
-	Prompt string         `json:"prompt,omitempty"`
+	Schema       generateSchema `json:"schema"`
+	Prompt       string         `json:"prompt,omitempty"`
+	DatabaseName string         `json:"databaseName,omitempty"`
+	VersionName  string         `json:"versionName,omitempty"`
 }
 
 type generateSchema struct {
@@ -93,17 +94,13 @@ func GenerateCommand() *cli.Command {
 				EnvVars: []string{"SEEDMANCER_API_TOKEN"},
 			},
 			&cli.StringFlag{
-				Name:    "db-url",
-				Usage:   "PostgreSQL connection URL",
-				EnvVars: []string{"SEEDMANCER_DATABASE_URL"},
-			},
-			&cli.StringFlag{
 				Name:  "database-name",
 				Usage: "Database name used for the output directory (overrides database_name in seedmancer.yaml)",
 			},
 			&cli.StringFlag{
-				Name:  "version-name",
-				Usage: "Version directory name (optional; auto-generates YYYYMMDDHHMMSS_<database-name> if omitted)",
+				Name:     "version-name",
+				Required: true,
+				Usage:    "Version directory that contains schema.json (e.g. 'ecommerce', '20260414_test')",
 			},
 			&cli.StringFlag{
 				Name:    "api-url",
@@ -119,6 +116,7 @@ func GenerateCommand() *cli.Command {
 
 func runGenerate(c *cli.Context) error {
 	prompt := c.String("prompt")
+	versionName := strings.TrimSpace(c.String("version-name"))
 
 	apiToken, err := resolveAndStoreAPIToken(c.String("token"))
 	if err != nil {
@@ -144,67 +142,19 @@ func runGenerate(c *cli.Context) error {
 		return fmt.Errorf("database name required: use --database-name or set database_name in seedmancer.yaml")
 	}
 
-	versionName := strings.TrimSpace(c.String("version-name"))
-	if versionName == "" {
-		versionName = utils.DefaultVersionName(databaseName)
-		ui.Info("Auto-generated version: %s", versionName)
-	}
-
-	dbURL := c.String("db-url")
-	if dbURL == "" {
-		dbURL = cfg.DatabaseURL
-	}
-	if dbURL == "" {
-		return fmt.Errorf("database URL required: set database_url in seedmancer.yaml, or use --db-url / SEEDMANCER_DATABASE_URL")
-	}
-
-	u, err := url.Parse(dbURL)
+	_, versionDir, err := utils.ResolveSeedVersion(projectRoot, cfg.StoragePath, databaseName, versionName)
 	if err != nil {
-		return fmt.Errorf("parsing database URL: %v", err)
-	}
-	if u.Scheme == "postgresql" {
-		dbURL = "postgres" + dbURL[len("postgresql"):]
-		u.Scheme = "postgres"
-	}
-	if u.Scheme != "postgres" {
-		return fmt.Errorf("unsupported database type: %s (only postgres is supported)", u.Scheme)
-	}
-	if !strings.Contains(dbURL, "sslmode=") {
-		if strings.Contains(dbURL, "?") {
-			dbURL += "&sslmode=disable"
-		} else {
-			dbURL += "?sslmode=disable"
-		}
+		return fmt.Errorf("resolving version: %v", err)
 	}
 
-	outputDir := utils.GetVersionPath(projectRoot, cfg.StoragePath, databaseName, versionName)
-	if err := os.MkdirAll(outputDir, 0755); err != nil {
-		return fmt.Errorf("creating output directory: %v", err)
-	}
-	ui.Debug("Output directory: %s", outputDir)
-
-	// Step 1: Export schema
-	sp := ui.StartSpinner("Exporting database schema...")
-	pg := &db.PostgresManager{}
-	if err := pg.ConnectWithDSN(dbURL); err != nil {
-		sp.Stop(false, "Failed to connect")
-		return fmt.Errorf("connecting to database: %v", err)
-	}
-
-	if err := pg.ExportSchema(outputDir); err != nil {
-		sp.Stop(false, "Schema export failed")
-		return fmt.Errorf("exporting schema: %v", err)
-	}
-	schemaPath := filepath.Join(outputDir, "schema.json")
-	sp.Stop(true, "Schema exported")
-
+	schemaPath := filepath.Join(versionDir, "schema.json")
 	schemaBytes, err := os.ReadFile(schemaPath)
 	if err != nil {
-		return fmt.Errorf("reading schema.json: %v", err)
+		return fmt.Errorf("reading %s: %v\nRun 'seedmancer export' first to create the schema.", schemaPath, err)
 	}
+	ui.Info("Using schema: %s", schemaPath)
 
-	// Step 2: Submit generation job
-	sp = ui.StartSpinner("Submitting AI generation job...")
+	sp := ui.StartSpinner("Submitting AI generation job...")
 	apiSchema, err := buildAPISchema(schemaBytes)
 	if err != nil {
 		sp.Stop(false, "Schema conversion failed")
@@ -218,27 +168,22 @@ func runGenerate(c *cli.Context) error {
 	baseURL = strings.TrimRight(baseURL, "/")
 	ui.Debug("API endpoint: %s", baseURL)
 
-	jobID, err := submitGenerateJob(baseURL, apiToken, apiSchema, prompt)
+	jobID, err := submitGenerateJob(baseURL, apiToken, apiSchema, prompt, databaseName, versionName)
 	if err != nil {
 		sp.Stop(false, "Job submission failed")
 		return fmt.Errorf("submitting generation job: %v", err)
 	}
 	sp.Stop(true, fmt.Sprintf("Job submitted: %s", jobID))
 
-	// Step 3: Poll until done
-	sp = ui.StartSpinner("Generating data with AI...")
 	files, err := pollJobUntilDone(baseURL, apiToken, jobID)
 	if err != nil {
-		sp.Stop(false, "Generation failed")
 		return fmt.Errorf("generation job failed: %v", err)
 	}
-	sp.Stop(true, fmt.Sprintf("Generated %d file(s)", len(files)))
 
-	// Download CSVs
 	ui.Step("Downloading CSV files...")
 	var csvNames []string
 	for _, f := range files {
-		dest := filepath.Join(outputDir, f.Table+".csv")
+		dest := filepath.Join(versionDir, f.Table+".csv")
 		if err := downloadFile(f.FileURL, dest); err != nil {
 			return fmt.Errorf("downloading %s.csv: %v", f.Table, err)
 		}
@@ -247,7 +192,7 @@ func runGenerate(c *cli.Context) error {
 	}
 
 	fmt.Println()
-	ui.Success("Generated data stored in: %s", outputDir)
+	ui.Success("Generated data stored in: %s", versionDir)
 	ui.Info("schema.json + %d CSV file(s): %s", len(csvNames), strings.Join(csvNames, ", "))
 	ui.Info("Run 'seedmancer seed --database-name %s --version-name %s' to import.", databaseName, versionName)
 	return nil
@@ -300,10 +245,12 @@ func buildAPISchema(schemaJSON []byte) (generateSchema, error) {
 
 // ─── API helpers ──────────────────────────────────────────────────────────────
 
-func submitGenerateJob(baseURL, token string, schema generateSchema, prompt string) (string, error) {
+func submitGenerateJob(baseURL, token string, schema generateSchema, prompt, databaseName, versionName string) (string, error) {
 	body := generateJobRequest{
-		Schema: schema,
-		Prompt: prompt,
+		Schema:       schema,
+		Prompt:       prompt,
+		DatabaseName: databaseName,
+		VersionName:  versionName,
 	}
 	payload, err := json.Marshal(body)
 	if err != nil {
@@ -346,37 +293,65 @@ func submitGenerateJob(baseURL, token string, schema generateSchema, prompt stri
 	return jobResp.JobID, nil
 }
 
+var statusLabels = map[string]string{
+	"pending":            "Queued, waiting to start...",
+	"processing":        "Processing...",
+	"generating_script": "Analyzing schema...",
+	"executing":         "Generating data...",
+	"uploading":         "Finalizing files...",
+}
+
 func pollJobUntilDone(baseURL, token, jobID string) ([]generateFileEntry, error) {
 	const (
-		pollInterval = 5 * time.Second
+		pollInterval = 3 * time.Second
 		timeout      = 10 * time.Minute
 	)
 
 	client := &http.Client{Timeout: 15 * time.Second}
 	deadline := time.Now().Add(timeout)
+	start := time.Now()
+	lastStatus := ""
+
+	sp := ui.StartSpinner("Waiting for worker...")
 
 	for time.Now().Before(deadline) {
 		status, err := fetchJobStatus(client, baseURL, token, jobID)
 		if err != nil {
+			sp.Stop(false, "Polling failed")
 			return nil, fmt.Errorf("polling status: %v", err)
 		}
 
+		elapsed := time.Since(start).Truncate(time.Second)
+
 		switch status.Status {
 		case "completed":
+			sp.Stop(true, fmt.Sprintf("Generated %d file(s) in %s", len(status.Files), elapsed))
 			return status.Files, nil
 		case "error":
 			msg := "unknown error"
 			if status.ErrorMessage != nil {
 				msg = *status.ErrorMessage
 			}
+			sp.Stop(false, fmt.Sprintf("Generation failed (%s)", elapsed))
 			return nil, fmt.Errorf("job failed: %s", msg)
 		default:
-			ui.Debug("Job status: %s", status.Status)
+			if status.Status != lastStatus {
+				lastStatus = status.Status
+				label, ok := statusLabels[status.Status]
+				if !ok {
+					label = fmt.Sprintf("Status: %s", status.Status)
+				}
+				sp.Stop(true, label)
+				sp = ui.StartSpinner(fmt.Sprintf("%s (%s)", label, elapsed))
+			} else {
+				sp.UpdateMessage(fmt.Sprintf("%s (%s)", statusLabels[status.Status], elapsed))
+			}
 		}
 
 		time.Sleep(pollInterval)
 	}
 
+	sp.Stop(false, "Timed out")
 	return nil, fmt.Errorf("timed out after %v waiting for job %s", timeout, jobID)
 }
 

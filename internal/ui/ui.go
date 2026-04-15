@@ -148,6 +148,15 @@ func (s *Spinner) run() {
 	}
 }
 
+func (s *Spinner) UpdateMessage(msg string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.stopped {
+		return
+	}
+	s.message = msg
+}
+
 func (s *Spinner) Stop(success bool, message string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
