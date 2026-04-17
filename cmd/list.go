@@ -15,33 +15,15 @@ import (
 	"github.com/urfave/cli/v2"
 )
 
-type datasetsResponse struct {
-	Datasets []datasetItem `json:"datasets"`
-}
-
-type datasetItem struct {
-	ID           string         `json:"id"`
-	Name         string         `json:"name"`
-	Description  *string        `json:"description"`
-	DatabaseName string         `json:"databaseName"`
-	VersionName  string         `json:"versionName"`
-	FileCount    int            `json:"fileCount"`
-	TotalSize    int64          `json:"totalSize"`
-	Files        []datasetFile  `json:"files"`
-	CreatedAt    string         `json:"createdAt"`
-	UpdatedAt    string         `json:"updatedAt"`
-}
-
-type datasetFile struct {
-	Name       string `json:"name"`
-	Size       int    `json:"size"`
-	Rows       int    `json:"rows"`
-	HasContent bool   `json:"hasContent,omitempty"`
-}
-
+// listEntry is one row in the rendered table — a dataset scoped under a
+// schema's fingerprint-short label. `SchemaLabel` is either the user's
+// custom display name or the fingerprint short id used on disk.
 type listEntry struct {
-	Database string `json:"database"`
-	Version  string `json:"version"`
+	SchemaLabel      string `json:"schemaLabel"`
+	SchemaShort      string `json:"schemaShort"`
+	Dataset          string `json:"dataset"`
+	FileCount        int    `json:"fileCount,omitempty"`
+	LastUpdated      string `json:"lastUpdated,omitempty"`
 }
 
 type listOutput struct {
@@ -52,7 +34,7 @@ type listOutput struct {
 func ListCommand() *cli.Command {
 	return &cli.Command{
 		Name:  "list",
-		Usage: "List databases and versions (local, remote, or both)",
+		Usage: "List schemas and datasets (local, remote, or both)",
 		Flags: []cli.Flag{
 			&cli.StringFlag{
 				Name:    "token",
@@ -61,12 +43,12 @@ func ListCommand() *cli.Command {
 			},
 			&cli.BoolFlag{
 				Name:  "local",
-				Usage: "List only local databases and versions",
+				Usage: "List only local datasets",
 				Value: false,
 			},
 			&cli.BoolFlag{
 				Name:  "remote",
-				Usage: "List only remote databases and versions",
+				Usage: "List only remote datasets",
 				Value: false,
 			},
 			&cli.BoolFlag{
@@ -80,6 +62,7 @@ func ListCommand() *cli.Command {
 			remoteOnly := c.Bool("remote")
 			jsonMode := c.Bool("json")
 
+			// No flags → show both.
 			if !localOnly && !remoteOnly {
 				localOnly = true
 				remoteOnly = true
@@ -88,23 +71,21 @@ func ListCommand() *cli.Command {
 			var out listOutput
 
 			if localOnly {
-				entries, err := listLocal()
-				if err != nil && !remoteOnly {
+				entries, err := listLocalEntries()
+				if err != nil {
 					if jsonMode {
 						out.Local = []listEntry{}
 					} else {
 						ui.Title("Local")
-						ui.Info("No local databases found.")
+						ui.Warn("%v", err)
 					}
-				} else if err != nil {
-					// remote-only with no config is fine — skip local silently
 				} else {
 					if jsonMode {
 						out.Local = entries
 					} else {
 						ui.Title("Local")
 						if len(entries) == 0 {
-							ui.Info("No local databases found.")
+							ui.Info("No local schemas found. Run `seedmancer export` first.")
 						} else {
 							renderTable(entries)
 						}
@@ -115,19 +96,21 @@ func ListCommand() *cli.Command {
 			if remoteOnly {
 				token, tokenErr := utils.ResolveAPIToken(c.String("token"))
 				if tokenErr != nil {
-					if localOnly && !jsonMode {
+					if !jsonMode {
 						ui.Title("Remote")
-						ui.Warn("API token required to list remote databases.")
+						ui.Warn("API token required to list remote schemas.")
 						ui.Info("Use --token flag or set SEEDMANCER_API_TOKEN environment variable.")
-						return nil
 					}
-					if jsonMode && localOnly {
+					if jsonMode {
 						return outputJSON(out)
+					}
+					if localOnly {
+						return nil
 					}
 					return tokenErr
 				}
 
-				entries, err := listRemote(token)
+				entries, err := listRemoteEntries(token)
 				if err != nil {
 					return err
 				}
@@ -137,7 +120,7 @@ func ListCommand() *cli.Command {
 				} else {
 					ui.Title("Remote")
 					if len(entries) == 0 {
-						ui.Info("No remote databases found.")
+						ui.Info("No remote schemas found.")
 					} else {
 						renderTable(entries)
 					}
@@ -152,7 +135,7 @@ func ListCommand() *cli.Command {
 	}
 }
 
-func listLocal() ([]listEntry, error) {
+func listLocalEntries() ([]listEntry, error) {
 	configPath, err := utils.FindConfigFile()
 	if err != nil {
 		return nil, err
@@ -164,36 +147,36 @@ func listLocal() ([]listEntry, error) {
 		return nil, err
 	}
 
-	databasesDir := filepath.Join(projectRoot, cfg.StoragePath, "databases")
-	if _, err := os.Stat(databasesDir); os.IsNotExist(err) {
-		return nil, nil
-	}
-
-	dbEntries, err := os.ReadDir(databasesDir)
+	schemas, err := utils.ListLocalSchemas(projectRoot, cfg.StoragePath)
 	if err != nil {
-		return nil, fmt.Errorf("reading databases directory: %v", err)
+		return nil, err
 	}
 
 	var entries []listEntry
-	for _, dbEntry := range dbEntries {
-		if !dbEntry.IsDir() {
+	for _, s := range schemas {
+		// `SchemaLabel` on disk is always the fp-short — display names live on
+		// the server. A schema folder with no datasets still shows up with an
+		// em-dash so users notice it exists.
+		if len(s.Datasets) == 0 {
+			entries = append(entries, listEntry{
+				SchemaLabel: s.FingerprintShort,
+				SchemaShort: s.FingerprintShort,
+				Dataset:     "—",
+			})
 			continue
 		}
-		dbName := dbEntry.Name()
-		versionEntries, err := os.ReadDir(filepath.Join(databasesDir, dbName))
-		if err != nil {
-			continue
-		}
-		for _, vEntry := range versionEntries {
-			if vEntry.IsDir() {
-				entries = append(entries, listEntry{Database: dbName, Version: vEntry.Name()})
-			}
+		for _, d := range s.Datasets {
+			entries = append(entries, listEntry{
+				SchemaLabel: s.FingerprintShort,
+				SchemaShort: s.FingerprintShort,
+				Dataset:     d,
+			})
 		}
 	}
 	return entries, nil
 }
 
-func listRemote(token string) ([]listEntry, error) {
+func listRemoteEntries(token string) ([]listEntry, error) {
 	baseURL := utils.GetBaseURL()
 	reqURL := fmt.Sprintf("%s/v1.0/datasets", baseURL)
 	ui.Debug("GET %s", reqURL)
@@ -223,27 +206,42 @@ func listRemote(token string) ([]listEntry, error) {
 		return nil, fmt.Errorf("reading response body: %v", err)
 	}
 
-	var dsResp datasetsResponse
+	var dsResp datasetListResponse
 	if err := json.Unmarshal(body, &dsResp); err != nil {
 		return nil, fmt.Errorf("parsing response JSON: %v", err)
 	}
 
 	var entries []listEntry
 	for _, ds := range dsResp.Datasets {
-		entries = append(entries, listEntry{Database: ds.DatabaseName, Version: ds.VersionName})
+		e := listEntry{
+			Dataset:     ds.Name,
+			FileCount:   ds.FileCount,
+			LastUpdated: ds.UpdatedAt,
+		}
+		if ds.Schema != nil {
+			e.SchemaShort = ds.Schema.FingerprintShort
+			if ds.Schema.DisplayName != nil && *ds.Schema.DisplayName != "" {
+				e.SchemaLabel = *ds.Schema.DisplayName
+			} else {
+				e.SchemaLabel = ds.Schema.FingerprintShort
+			}
+		} else {
+			e.SchemaLabel = "(orphan)"
+		}
+		entries = append(entries, e)
 	}
 	return entries, nil
 }
 
 func renderTable(entries []listEntry) {
 	table := tablewriter.NewWriter(os.Stdout)
-	table.SetHeader([]string{"Database", "Version"})
+	table.SetHeader([]string{"Schema", "Short ID", "Dataset"})
 	table.SetBorder(false)
 	table.SetColumnSeparator("  ")
 	table.SetHeaderAlignment(tablewriter.ALIGN_LEFT)
 	table.SetAlignment(tablewriter.ALIGN_LEFT)
 	for _, e := range entries {
-		table.Append([]string{e.Database, e.Version})
+		table.Append([]string{e.SchemaLabel, e.SchemaShort, e.Dataset})
 	}
 	table.Render()
 }

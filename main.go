@@ -31,6 +31,7 @@ func main() {
 			cmd.FetchCommand(),
 			cmd.GenerateCommand(),
 			cmd.SyncCommand(),
+			cmd.SchemasCommand(),
 		},
 	}
 

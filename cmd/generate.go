@@ -21,10 +21,9 @@ import (
 // ─── API types ────────────────────────────────────────────────────────────────
 
 type generateJobRequest struct {
-	Schema       generateSchema `json:"schema"`
-	Prompt       string         `json:"prompt,omitempty"`
-	DatabaseName string         `json:"databaseName,omitempty"`
-	VersionName  string         `json:"versionName,omitempty"`
+	Schema      generateSchema `json:"schema"`
+	DatasetName string         `json:"datasetName,omitempty"`
+	Prompt      string         `json:"prompt,omitempty"`
 }
 
 type generateSchema struct {
@@ -78,10 +77,19 @@ type generateStatusResponse struct {
 
 // ─── Command definition ───────────────────────────────────────────────────────
 
+// GenerateCommand runs an AI generation job against an existing local schema.
+//
+// Schema source resolution:
+//  1. --from <dataset>             → use the schema folder containing that dataset
+//  2. --schema <fp-prefix>         → pick a schema folder directly by fingerprint
+//  3. (neither)                    → auto-select if exactly one local schema exists
+//
+// The resulting CSVs land under the schema's `datasets/<--name>/` folder so the
+// layout stays consistent with `export` output.
 func GenerateCommand() *cli.Command {
 	return &cli.Command{
 		Name:  "generate",
-		Usage: "Generate realistic seed data via AI and save as CSV files",
+		Usage: "Generate realistic CSV data via AI into a new dataset",
 		Flags: []cli.Flag{
 			&cli.StringFlag{
 				Name:     "prompt",
@@ -89,18 +97,21 @@ func GenerateCommand() *cli.Command {
 				Usage:    "Natural language description of the data to generate",
 			},
 			&cli.StringFlag{
+				Name:  "schema",
+				Usage: "Fingerprint prefix of the local schema to use (defaults to the sole local schema)",
+			},
+			&cli.StringFlag{
+				Name:  "from",
+				Usage: "Existing dataset name to derive the schema from (wins over --schema)",
+			},
+			&cli.StringFlag{
+				Name:  "name",
+				Usage: "Dataset name to create (optional; defaults to YYYYMMDDHHMMSS)",
+			},
+			&cli.StringFlag{
 				Name:    "token",
 				Usage:   "Seedmancer API token (saved locally for future use)",
 				EnvVars: []string{"SEEDMANCER_API_TOKEN"},
-			},
-			&cli.StringFlag{
-				Name:  "database-name",
-				Usage: "Database name used for the output directory (overrides database_name in seedmancer.yaml)",
-			},
-			&cli.StringFlag{
-				Name:     "version-name",
-				Required: true,
-				Usage:    "Version directory that contains schema.json (e.g. 'ecommerce', '20260414_test')",
 			},
 			&cli.StringFlag{
 				Name:    "api-url",
@@ -116,7 +127,6 @@ func GenerateCommand() *cli.Command {
 
 func runGenerate(c *cli.Context) error {
 	prompt := c.String("prompt")
-	versionName := strings.TrimSpace(c.String("version-name"))
 
 	apiToken, err := resolveAndStoreAPIToken(c.String("token"))
 	if err != nil {
@@ -125,7 +135,7 @@ func runGenerate(c *cli.Context) error {
 
 	configPath, err := utils.FindConfigFile()
 	if err != nil {
-		return fmt.Errorf("finding config file: %v", err)
+		return err
 	}
 	projectRoot := filepath.Dir(configPath)
 
@@ -134,25 +144,41 @@ func runGenerate(c *cli.Context) error {
 		return fmt.Errorf("reading config: %v", err)
 	}
 
-	databaseName := strings.TrimSpace(c.String("database-name"))
-	if databaseName == "" {
-		databaseName = cfg.DatabaseName
-	}
-	if databaseName == "" {
-		return fmt.Errorf("database name required: use --database-name or set database_name in seedmancer.yaml")
+	schemaPrefix := strings.TrimSpace(c.String("schema"))
+	fromDataset := strings.TrimSpace(c.String("from"))
+
+	var sourceSchema utils.LocalSchema
+	if fromDataset != "" {
+		s, _, err := utils.FindLocalDataset(projectRoot, cfg.StoragePath, schemaPrefix, fromDataset)
+		if err != nil {
+			return fmt.Errorf("locating source schema from --from %q: %v", fromDataset, err)
+		}
+		sourceSchema = s
+	} else {
+		s, err := utils.ResolveLocalSchema(projectRoot, cfg.StoragePath, schemaPrefix)
+		if err != nil {
+			return err
+		}
+		sourceSchema = s
 	}
 
-	_, versionDir, err := utils.ResolveSeedVersion(projectRoot, cfg.StoragePath, databaseName, versionName)
+	schemaBytes, err := os.ReadFile(sourceSchema.SchemaJSONPath)
 	if err != nil {
-		return fmt.Errorf("resolving version: %v", err)
+		return fmt.Errorf("reading %s: %v\nRun 'seedmancer export' first to create schema.json.", sourceSchema.SchemaJSONPath, err)
 	}
+	ui.Info("Using schema: %s  (%s)", sourceSchema.FingerprintShort, sourceSchema.SchemaJSONPath)
 
-	schemaPath := filepath.Join(versionDir, "schema.json")
-	schemaBytes, err := os.ReadFile(schemaPath)
-	if err != nil {
-		return fmt.Errorf("reading %s: %v\nRun 'seedmancer export' first to create the schema.", schemaPath, err)
+	datasetName := strings.TrimSpace(c.String("name"))
+	if datasetName == "" {
+		datasetName = time.Now().UTC().Format("20060102150405")
+		ui.Info("Auto-generated dataset name: %s", datasetName)
 	}
-	ui.Info("Using schema: %s", schemaPath)
+	datasetName = utils.SanitizeDatasetSegment(datasetName)
+
+	outputDir := utils.DatasetPath(projectRoot, cfg.StoragePath, sourceSchema.FingerprintShort, datasetName)
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		return fmt.Errorf("creating dataset directory: %v", err)
+	}
 
 	sp := ui.StartSpinner("Submitting AI generation job...")
 	apiSchema, err := buildAPISchema(schemaBytes)
@@ -168,7 +194,7 @@ func runGenerate(c *cli.Context) error {
 	baseURL = strings.TrimRight(baseURL, "/")
 	ui.Debug("API endpoint: %s", baseURL)
 
-	jobID, err := submitGenerateJob(baseURL, apiToken, apiSchema, prompt, databaseName, versionName)
+	jobID, err := submitGenerateJob(baseURL, apiToken, apiSchema, prompt, datasetName)
 	if err != nil {
 		sp.Stop(false, "Job submission failed")
 		return fmt.Errorf("submitting generation job: %v", err)
@@ -183,7 +209,7 @@ func runGenerate(c *cli.Context) error {
 	ui.Step("Downloading CSV files...")
 	var csvNames []string
 	for _, f := range files {
-		dest := filepath.Join(versionDir, f.Table+".csv")
+		dest := filepath.Join(outputDir, f.Table+".csv")
 		if err := downloadFile(f.FileURL, dest); err != nil {
 			return fmt.Errorf("downloading %s.csv: %v", f.Table, err)
 		}
@@ -192,9 +218,10 @@ func runGenerate(c *cli.Context) error {
 	}
 
 	fmt.Println()
-	ui.Success("Generated data stored in: %s", versionDir)
-	ui.Info("schema.json + %d CSV file(s): %s", len(csvNames), strings.Join(csvNames, ", "))
-	ui.Info("Run 'seedmancer seed --database-name %s --version-name %s' to import.", databaseName, versionName)
+	ui.Success("Generated dataset → %s", outputDir)
+	ui.Info("%d CSV file(s): %s", len(csvNames), strings.Join(csvNames, ", "))
+	ui.Info("Run 'seedmancer seed --name %s' to import locally,", datasetName)
+	ui.Info("or 'seedmancer sync --name %s' to upload.", datasetName)
 	return nil
 }
 
@@ -245,12 +272,11 @@ func buildAPISchema(schemaJSON []byte) (generateSchema, error) {
 
 // ─── API helpers ──────────────────────────────────────────────────────────────
 
-func submitGenerateJob(baseURL, token string, schema generateSchema, prompt, databaseName, versionName string) (string, error) {
+func submitGenerateJob(baseURL, token string, schema generateSchema, prompt, datasetName string) (string, error) {
 	body := generateJobRequest{
-		Schema:       schema,
-		Prompt:       prompt,
-		DatabaseName: databaseName,
-		VersionName:  versionName,
+		Schema:      schema,
+		DatasetName: datasetName,
+		Prompt:      prompt,
 	}
 	payload, err := json.Marshal(body)
 	if err != nil {
@@ -264,7 +290,7 @@ func submitGenerateJob(baseURL, token string, schema generateSchema, prompt, dat
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", utils.BearerAPIToken(token))
 
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := &http.Client{Timeout: 120 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("calling API: %v", err)
@@ -294,7 +320,7 @@ func submitGenerateJob(baseURL, token string, schema generateSchema, prompt, dat
 }
 
 var statusLabels = map[string]string{
-	"pending":            "Queued, waiting to start...",
+	"pending":           "Queued, waiting to start...",
 	"processing":        "Processing...",
 	"generating_script": "Analyzing schema...",
 	"executing":         "Generating data...",

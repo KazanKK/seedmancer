@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,21 +16,28 @@ import (
 	utils "github.com/KazanKK/seedmancer/internal/utils"
 
 	"github.com/urfave/cli/v2"
-	"gopkg.in/yaml.v3"
 )
 
+// SyncCommand uploads a local dataset to the cloud.
+//
+// The server identifies the target schema from the fingerprint of the
+// zip's `schema.json`, so we never send a schema name — it's fully
+// derived. When the user's local `.seedmancer/` holds multiple schemas
+// each with a dataset of the same name, `--schema <fp-prefix>` is
+// required to disambiguate.
 func SyncCommand() *cli.Command {
 	return &cli.Command{
 		Name:  "sync",
-		Usage: "Sync local test data to cloud storage (defaults to all databases and versions)",
+		Usage: "Upload a single local dataset to the cloud",
 		Flags: []cli.Flag{
 			&cli.StringFlag{
-				Name:  "database-name",
-				Usage: "Database name (omit to sync all databases)",
+				Name:     "name",
+				Usage:    "Dataset name to sync",
+				Required: true,
 			},
 			&cli.StringFlag{
-				Name:  "version",
-				Usage: "Version name (omit to sync all versions)",
+				Name:  "schema",
+				Usage: "Fingerprint prefix (only required when multiple local schemas have a dataset with --name)",
 			},
 			&cli.StringFlag{
 				Name:    "token",
@@ -40,153 +48,59 @@ func SyncCommand() *cli.Command {
 		Action: func(c *cli.Context) error {
 			configPath, err := utils.FindConfigFile()
 			if err != nil {
-				return fmt.Errorf("finding config file: %v", err)
+				return err
 			}
-
 			projectRoot := filepath.Dir(configPath)
-			data, err := os.ReadFile(configPath)
-			if err != nil {
-				return fmt.Errorf("reading config file: %v", err)
-			}
-
-			var config struct {
-				StoragePath string `yaml:"storage_path"`
-			}
-			if err := yaml.Unmarshal(data, &config); err != nil {
-				return fmt.Errorf("parsing config file: %v", err)
-			}
-
-			token := c.String("token")
-			if token == "" {
-				return fmt.Errorf("API token is required. Set --token flag or SEEDMANCER_API_TOKEN env var")
-			}
-
-			basesDir := filepath.Join(projectRoot, config.StoragePath, "databases")
-
-			targets, err := discoverSyncTargets(basesDir, c.String("database-name"), c.String("version"))
+			cfg, err := utils.LoadConfig(configPath)
 			if err != nil {
 				return err
 			}
 
-			if len(targets) == 0 {
-				return fmt.Errorf("no data found to sync")
+			token, err := utils.ResolveAPIToken(c.String("token"))
+			if err != nil {
+				return err
 			}
 
-			if len(targets) > 1 {
-				ui.Step("Syncing %d dataset(s)", len(targets))
+			datasetName := strings.TrimSpace(c.String("name"))
+			if datasetName == "" {
+				return fmt.Errorf("--name is required")
 			}
+			schemaPrefix := strings.TrimSpace(c.String("schema"))
+
+			schema, datasetDir, err := utils.FindLocalDataset(projectRoot, cfg.StoragePath, schemaPrefix, datasetName)
+			if err != nil {
+				return err
+			}
+
+			ui.Step("%s / %s  (schema %s)", datasetName, filepath.Base(schema.Path), schema.FingerprintShort)
 
 			baseURL := utils.GetBaseURL()
-			synced := 0
-
-			for _, t := range targets {
-				if err := syncOne(t, baseURL, token); err != nil {
-					ui.Error("%s / %s: %v", t.databaseName, t.versionName, err)
-					continue
-				}
-				synced++
-			}
-
-			if synced == 0 {
-				return fmt.Errorf("all syncs failed")
-			}
-
-			ui.Success("Sync complete! %d/%d dataset(s) uploaded", synced, len(targets))
-			ui.Info("View your data at https://seedmancer.dev/dashboard/datasets")
-			return nil
+			return syncOne(schema, datasetDir, datasetName, baseURL, token)
 		},
 	}
 }
 
-type syncTarget struct {
-	databaseName string
-	versionName  string
-	path         string
-}
-
-func discoverSyncTargets(basesDir, dbFlag, versionFlag string) ([]syncTarget, error) {
-	if dbFlag != "" && versionFlag != "" {
-		versionPath := filepath.Join(basesDir, dbFlag, versionFlag)
-		if _, err := os.Stat(versionPath); err != nil {
-			if os.IsNotExist(err) {
-				return nil, fmt.Errorf("version '%s/%s' not found at %s", dbFlag, versionFlag, versionPath)
-			}
-			return nil, fmt.Errorf("accessing version directory: %v", err)
-		}
-		return []syncTarget{{databaseName: dbFlag, versionName: versionFlag, path: versionPath}}, nil
-	}
-
-	var databases []string
-	if dbFlag != "" {
-		databases = []string{dbFlag}
-	} else {
-		entries, err := os.ReadDir(basesDir)
-		if err != nil {
-			if os.IsNotExist(err) {
-				return nil, fmt.Errorf("no databases directory found at %s", basesDir)
-			}
-			return nil, fmt.Errorf("reading databases directory: %v", err)
-		}
-		for _, e := range entries {
-			if e.IsDir() {
-				databases = append(databases, e.Name())
-			}
-		}
-	}
-
-	var targets []syncTarget
-	for _, db := range databases {
-		dbPath := filepath.Join(basesDir, db)
-
-		if versionFlag != "" {
-			vp := filepath.Join(dbPath, versionFlag)
-			if _, err := os.Stat(vp); err == nil {
-				targets = append(targets, syncTarget{databaseName: db, versionName: versionFlag, path: vp})
-			}
-			continue
-		}
-
-		versions, err := os.ReadDir(dbPath)
-		if err != nil {
-			continue
-		}
-		for _, v := range versions {
-			if !v.IsDir() {
-				continue
-			}
-			targets = append(targets, syncTarget{databaseName: db, versionName: v.Name(), path: filepath.Join(dbPath, v.Name())})
-		}
-	}
-
-	return targets, nil
-}
-
-func syncOne(t syncTarget, baseURL, token string) error {
-	entries, err := os.ReadDir(t.path)
+func syncOne(schema utils.LocalSchema, datasetDir, datasetName, baseURL, token string) error {
+	schemaFiles, err := utils.SchemaFiles(schema.Path)
 	if err != nil {
-		return fmt.Errorf("reading directory: %v", err)
+		return err
+	}
+	dataFiles, err := utils.DatasetFiles(datasetDir)
+	if err != nil {
+		return err
+	}
+	if len(dataFiles) == 0 {
+		return fmt.Errorf("no CSV or JSON files in %s", datasetDir)
 	}
 
-	var files []string
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		lower := strings.ToLower(entry.Name())
-		if strings.HasSuffix(lower, ".csv") || strings.HasSuffix(lower, ".json") {
-			files = append(files, filepath.Join(t.path, entry.Name()))
-		}
-	}
-
-	if len(files) == 0 {
-		ui.Warn("%s / %s: no CSV or JSON files, skipping", t.databaseName, t.versionName)
-		return nil
-	}
-
-	ui.Step("%s / %s — %d file(s)", t.databaseName, t.versionName, len(files))
+	// Zip entries: schema sidecars + data CSVs, all flat at the root so the
+	// server sees `schema.json` and `<table>.csv` as siblings.
+	entries := make([]string, 0, len(schemaFiles)+len(dataFiles))
+	entries = append(entries, schemaFiles...)
+	entries = append(entries, dataFiles...)
 
 	sp := ui.StartSpinner("Compressing...")
-	zipData, err := compressFiles(files)
+	zipData, err := compressFiles(entries)
 	if err != nil {
 		sp.Stop(false, "Compression failed")
 		return fmt.Errorf("compressing files: %v", err)
@@ -194,8 +108,9 @@ func syncOne(t syncTarget, baseURL, token string) error {
 	sp.Stop(true, fmt.Sprintf("Compressed (%.1f MB)", float64(zipData.Len())/1024/1024))
 
 	sp = ui.StartSpinner("Uploading...")
-	apiURL := fmt.Sprintf("%s/v1.0/datasets/sync?database_name=%s&version_name=%s",
-		baseURL, t.databaseName, t.versionName)
+	q := url.Values{}
+	q.Set("name", datasetName)
+	apiURL := fmt.Sprintf("%s/v1.0/datasets/sync?%s", baseURL, q.Encode())
 	ui.Debug("POST %s", apiURL)
 
 	req, err := http.NewRequest("POST", apiURL, bytes.NewReader(zipData.Bytes()))
@@ -222,54 +137,83 @@ func syncOne(t syncTarget, baseURL, token string) error {
 	sp.Stop(true, "Uploaded")
 
 	var result struct {
-		ID        string `json:"id"`
-		FileCount int    `json:"fileCount"`
+		ID               string `json:"id"`
+		Name             string `json:"name"`
+		SchemaID         string `json:"schemaId"`
+		Fingerprint      string `json:"fingerprint"`
+		FingerprintShort string `json:"fingerprintShort"`
+		SchemaCreated    bool   `json:"schemaCreated"`
+		Updated          bool   `json:"updated"`
+		FileCount        int    `json:"fileCount"`
 	}
-	if err := json.Unmarshal(body, &result); err == nil && result.ID != "" {
-		ui.Info("  ID: %s  |  Files: %d", result.ID, result.FileCount)
+	if err := json.Unmarshal(body, &result); err != nil || result.ID == "" {
+		// Non-fatal — the server returned 2xx, just print what we got.
+		ui.Success("Sync complete!")
+		return nil
 	}
 
+	verb := "Uploaded"
+	if result.Updated {
+		verb = "Updated"
+	}
+	ui.Success("%s dataset %q", verb, result.Name)
+	ui.KeyValue("  Schema: ", fmt.Sprintf("%s%s", result.FingerprintShort, newSchemaBadge(result.SchemaCreated)))
+	ui.KeyValue("  Dataset ID: ", result.ID)
+	ui.KeyValue("  Files: ", fmt.Sprintf("%d", result.FileCount))
+	fmt.Println()
+	ui.Info("View it at https://seedmancer.dev/dashboard/schemas")
 	return nil
+}
+
+func newSchemaBadge(created bool) string {
+	if created {
+		return "  (new)"
+	}
+	return ""
 }
 
 func compressFiles(files []string) (*bytes.Buffer, error) {
 	buf := new(bytes.Buffer)
 	zipWriter := zip.NewWriter(buf)
-	defer zipWriter.Close()
 
 	for _, file := range files {
-		fileToZip, err := os.Open(file)
-		if err != nil {
-			return nil, fmt.Errorf("failed to open file %s: %v", file, err)
-		}
-		defer fileToZip.Close()
-
-		info, err := fileToZip.Stat()
-		if err != nil {
-			return nil, fmt.Errorf("failed to get file info %s: %v", file, err)
-		}
-
-		header, err := zip.FileInfoHeader(info)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create header %s: %v", file, err)
-		}
-
-		header.Name = filepath.Base(file)
-		header.Method = zip.Deflate
-
-		writer, err := zipWriter.CreateHeader(header)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create zip entry %s: %v", file, err)
-		}
-
-		if _, err := io.Copy(writer, fileToZip); err != nil {
-			return nil, fmt.Errorf("failed to write file to zip %s: %v", file, err)
+		if err := addFileToZip(zipWriter, file); err != nil {
+			_ = zipWriter.Close()
+			return nil, err
 		}
 	}
 
 	if err := zipWriter.Close(); err != nil {
 		return nil, fmt.Errorf("failed to close zip writer: %v", err)
 	}
-
 	return buf, nil
+}
+
+func addFileToZip(zw *zip.Writer, path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("opening %s: %v", path, err)
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil {
+		return fmt.Errorf("stat %s: %v", path, err)
+	}
+
+	header, err := zip.FileInfoHeader(info)
+	if err != nil {
+		return fmt.Errorf("zip header %s: %v", path, err)
+	}
+	header.Name = filepath.Base(path)
+	header.Method = zip.Deflate
+
+	writer, err := zw.CreateHeader(header)
+	if err != nil {
+		return fmt.Errorf("zip entry %s: %v", path, err)
+	}
+	if _, err := io.Copy(writer, f); err != nil {
+		return fmt.Errorf("writing %s: %v", path, err)
+	}
+	return nil
 }

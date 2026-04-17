@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/KazanKK/seedmancer/internal/ui"
 	utils "github.com/KazanKK/seedmancer/internal/utils"
@@ -15,27 +17,54 @@ import (
 	"github.com/urfave/cli/v2"
 )
 
+// fetchResult is the --json shape emitted after a successful fetch.
 type fetchResult struct {
-	Database string   `json:"database"`
-	Version  string   `json:"version"`
-	Output   string   `json:"output"`
-	Files    []string `json:"files"`
+	Dataset          string   `json:"dataset"`
+	SchemaID         string   `json:"schemaId"`
+	SchemaShort      string   `json:"schemaShort"`
+	SchemaFingerprint string  `json:"schemaFingerprint"`
+	SchemaDisplayName string  `json:"schemaDisplayName,omitempty"`
+	Output           string   `json:"output"`
+	Files            []string `json:"files"`
+}
+
+// datasetAPI mirrors the /v1.0/datasets response shape. Only the fields we
+// actually consume are decoded; everything else is ignored by encoding/json.
+type datasetAPI struct {
+	ID        string          `json:"id"`
+	Name      string          `json:"name"`
+	FileCount int             `json:"fileCount"`
+	TotalSize int64           `json:"totalSize"`
+	CreatedAt string          `json:"createdAt"`
+	UpdatedAt string          `json:"updatedAt"`
+	Schema    *schemaRefShort `json:"schema"`
+}
+
+type schemaRefShort struct {
+	ID               string `json:"id"`
+	DisplayName      *string `json:"displayName"`
+	Fingerprint      string `json:"fingerprint"`
+	FingerprintShort string `json:"fingerprintShort"`
+	IsLegacy         bool   `json:"isLegacy"`
+}
+
+type datasetListResponse struct {
+	Datasets []datasetAPI `json:"datasets"`
 }
 
 func FetchCommand() *cli.Command {
 	return &cli.Command{
 		Name:  "fetch",
-		Usage: "Fetch seed data from the cloud (CI/CD friendly)",
+		Usage: "Download a dataset from the cloud into local storage",
 		Flags: []cli.Flag{
 			&cli.StringFlag{
-				Name:     "database-name",
+				Name:     "name",
 				Required: true,
-				Usage:    "Database name",
+				Usage:    "Dataset name to fetch",
 			},
 			&cli.StringFlag{
-				Name:     "version",
-				Required: true,
-				Usage:    "Version name",
+				Name:  "schema",
+				Usage: "Fingerprint prefix (required if the dataset name exists under multiple schemas)",
 			},
 			&cli.StringFlag{
 				Name:    "token",
@@ -45,7 +74,7 @@ func FetchCommand() *cli.Command {
 			&cli.StringFlag{
 				Name:    "output",
 				Aliases: []string{"o"},
-				Usage:   "Output directory (overrides storage_path from config; no config file needed)",
+				Usage:   "Output directory (overrides the default <storagePath>/schemas/<fp-short>/datasets/<name> layout)",
 			},
 			&cli.BoolFlag{
 				Name:  "json",
@@ -54,16 +83,29 @@ func FetchCommand() *cli.Command {
 			},
 		},
 		Action: func(c *cli.Context) error {
-			databaseName := c.String("database-name")
-			version := c.String("version")
+			datasetName := strings.TrimSpace(c.String("name"))
+			if datasetName == "" {
+				return fmt.Errorf("--name is required")
+			}
+			schemaPrefix := strings.TrimSpace(c.String("schema"))
+			outputFlag := strings.TrimSpace(c.String("output"))
 			jsonMode := c.Bool("json")
 
 			token, err := utils.ResolveAPIToken(c.String("token"))
 			if err != nil {
 				return err
 			}
+			baseURL := utils.GetBaseURL()
 
-			outputDir, err := resolveFetchOutputDir(c.String("output"), databaseName, version)
+			// Ask the server for every dataset matching the name (and optional
+			// schema prefix filter). This gives us both the dataset id for
+			// downloading and the schema fingerprint for the local folder.
+			match, err := findRemoteDataset(baseURL, token, datasetName, schemaPrefix)
+			if err != nil {
+				return err
+			}
+
+			outputDir, err := resolveFetchOutput(outputFlag, match, datasetName)
 			if err != nil {
 				return err
 			}
@@ -77,17 +119,10 @@ func FetchCommand() *cli.Command {
 				return fmt.Errorf("creating output directory: %v", err)
 			}
 
-			baseURL := utils.GetBaseURL()
+			label := displayLabelForSchema(match.Schema)
+			sp := ui.StartSpinner(fmt.Sprintf("Fetching %s  (schema %s)...", datasetName, label))
 
-			sp := ui.StartSpinner(fmt.Sprintf("Fetching %s/%s...", databaseName, version))
-
-			datasetID, err := findDatasetID(baseURL, token, databaseName, version)
-			if err != nil {
-				sp.Stop(false, "Fetch failed")
-				return err
-			}
-
-			downloadURL, err := getDownloadURL(baseURL, token, datasetID)
+			downloadURL, err := getDownloadURL(baseURL, token, match.ID)
 			if err != nil {
 				sp.Stop(false, "Fetch failed")
 				return err
@@ -98,16 +133,21 @@ func FetchCommand() *cli.Command {
 				sp.Stop(false, "Fetch failed")
 				return err
 			}
-
-			sp.Stop(true, fmt.Sprintf("Fetched %s/%s → %s (%d files)", databaseName, version, outputDir, len(extracted)))
+			sp.Stop(true, fmt.Sprintf("Fetched %s → %s (%d files)", datasetName, outputDir, len(extracted)))
 
 			if jsonMode {
-				return outputJSON(fetchResult{
-					Database: databaseName,
-					Version:  version,
-					Output:   outputDir,
-					Files:    extracted,
-				})
+				res := fetchResult{
+					Dataset:           datasetName,
+					Output:            outputDir,
+					Files:             extracted,
+					SchemaID:          match.Schema.ID,
+					SchemaShort:       match.Schema.FingerprintShort,
+					SchemaFingerprint: match.Schema.Fingerprint,
+				}
+				if match.Schema.DisplayName != nil {
+					res.SchemaDisplayName = *match.Schema.DisplayName
+				}
+				return outputJSON(res)
 			}
 
 			return nil
@@ -115,47 +155,131 @@ func FetchCommand() *cli.Command {
 	}
 }
 
-func findDatasetID(baseURL, token, databaseName, version string) (string, error) {
+// findRemoteDataset looks up a dataset by name, optionally narrowed to a
+// specific schema fingerprint prefix. Returns the resolved dataset metadata
+// (including schema info) or an error explaining why the match is unclear.
+func findRemoteDataset(baseURL, token, datasetName, schemaPrefix string) (datasetAPI, error) {
+	q := url.Values{}
+	if schemaPrefix != "" {
+		q.Set("schema", schemaPrefix)
+	}
 	reqURL := fmt.Sprintf("%s/v1.0/datasets", baseURL)
+	if encoded := q.Encode(); encoded != "" {
+		reqURL += "?" + encoded
+	}
 	ui.Debug("GET %s", reqURL)
 
 	req, err := http.NewRequest("GET", reqURL, nil)
 	if err != nil {
-		return "", fmt.Errorf("creating request: %v", err)
+		return datasetAPI{}, fmt.Errorf("creating request: %v", err)
 	}
 	req.Header.Set("Authorization", utils.BearerAPIToken(token))
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("making request: %v", err)
+		return datasetAPI{}, fmt.Errorf("making request: %v", err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == http.StatusUnauthorized {
-		return "", fmt.Errorf("unauthorized: please check your API token")
-	}
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("API request failed: %s - %s", resp.Status, string(body))
-	}
-
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", fmt.Errorf("reading response body: %v", err)
+		return datasetAPI{}, fmt.Errorf("reading response body: %v", err)
 	}
 
-	var dsResp datasetsResponse
+	if resp.StatusCode == http.StatusUnauthorized {
+		return datasetAPI{}, fmt.Errorf("unauthorized: please check your API token")
+	}
+	if resp.StatusCode != http.StatusOK {
+		return datasetAPI{}, fmt.Errorf("API request failed: %s - %s", resp.Status, string(body))
+	}
+
+	var dsResp datasetListResponse
 	if err := json.Unmarshal(body, &dsResp); err != nil {
-		return "", fmt.Errorf("parsing response JSON: %v", err)
+		return datasetAPI{}, fmt.Errorf("parsing response JSON: %v", err)
 	}
 
-	for _, ds := range dsResp.Datasets {
-		if ds.DatabaseName == databaseName && ds.VersionName == version {
-			return ds.ID, nil
+	var hits []datasetAPI
+	for _, d := range dsResp.Datasets {
+		if d.Name == datasetName {
+			hits = append(hits, d)
 		}
 	}
 
-	return "", fmt.Errorf("dataset not found: %s/%s\n  Run 'seedmancer list --remote' to see available datasets", databaseName, version)
+	switch len(hits) {
+	case 0:
+		if schemaPrefix != "" {
+			return datasetAPI{}, fmt.Errorf(
+				"no remote dataset named %q under schema prefix %q\n  Run 'seedmancer list --remote' to see available datasets",
+				datasetName, schemaPrefix,
+			)
+		}
+		return datasetAPI{}, fmt.Errorf(
+			"no remote dataset named %q\n  Run 'seedmancer list --remote' to see available datasets",
+			datasetName,
+		)
+	case 1:
+		return hits[0], nil
+	default:
+		var fps []string
+		for _, h := range hits {
+			if h.Schema != nil {
+				fps = append(fps, h.Schema.FingerprintShort)
+			}
+		}
+		return datasetAPI{}, fmt.Errorf(
+			"dataset name %q exists under multiple schemas (%s) — pass --schema <fp-prefix> to pick one",
+			datasetName, strings.Join(fps, ", "),
+		)
+	}
+}
+
+// resolveFetchOutput picks the destination directory for extracted CSVs.
+//
+// Priority:
+//  1. --output <dir>            -> used verbatim (no config needed)
+//  2. seedmancer.yaml present   -> <storagePath>/schemas/<fp-short>/datasets/<name>
+//  3. no config, no --output    -> error with actionable hint
+func resolveFetchOutput(outputFlag string, match datasetAPI, datasetName string) (string, error) {
+	if outputFlag != "" {
+		abs, err := filepath.Abs(outputFlag)
+		if err != nil {
+			return "", fmt.Errorf("resolving output path: %v", err)
+		}
+		return abs, nil
+	}
+
+	configPath, err := utils.FindConfigFile()
+	if err != nil {
+		return "", fmt.Errorf(
+			"no seedmancer.yaml found and --output not specified.\n" +
+				"  Use --output <dir> to set the destination directly,\n" +
+				"  or run 'seedmancer init' to create a seedmancer.yaml",
+		)
+	}
+	projectRoot := filepath.Dir(configPath)
+	cfg, err := utils.LoadConfig(configPath)
+	if err != nil {
+		return "", fmt.Errorf("reading config: %v", err)
+	}
+
+	if match.Schema == nil {
+		return "", fmt.Errorf(
+			"remote dataset %q has no attached schema — pass --output <dir> to write CSVs somewhere explicit",
+			datasetName,
+		)
+	}
+
+	return utils.DatasetPath(projectRoot, cfg.StoragePath, match.Schema.FingerprintShort, datasetName), nil
+}
+
+func displayLabelForSchema(s *schemaRefShort) string {
+	if s == nil {
+		return "(orphan)"
+	}
+	if s.DisplayName != nil && *s.DisplayName != "" {
+		return fmt.Sprintf("%s [%s]", *s.DisplayName, s.FingerprintShort)
+	}
+	return s.FingerprintShort
 }
 
 func getDownloadURL(baseURL, token, datasetID string) (string, error) {
@@ -258,30 +382,4 @@ func downloadAndExtractZip(downloadURL, outputDir string) ([]string, error) {
 	}
 
 	return extracted, nil
-}
-
-func resolveFetchOutputDir(outputFlag, databaseName, version string) (string, error) {
-	if outputFlag != "" {
-		abs, err := filepath.Abs(outputFlag)
-		if err != nil {
-			return "", fmt.Errorf("resolving output path: %v", err)
-		}
-		return abs, nil
-	}
-
-	configPath, err := utils.FindConfigFile()
-	if err != nil {
-		return "", fmt.Errorf(
-			"no config file found and --output not specified.\n" +
-				"  Use --output <dir> to set the destination directly (no config needed),\n" +
-				"  or run 'seedmancer init' to create a seedmancer.yaml",
-		)
-	}
-
-	projectRoot := filepath.Dir(configPath)
-	storagePath, err := utils.ReadConfig(configPath)
-	if err != nil {
-		return "", fmt.Errorf("reading config: %v", err)
-	}
-	return filepath.Join(projectRoot, storagePath, "databases", databaseName, version), nil
 }

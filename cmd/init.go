@@ -13,6 +13,12 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// InitCommand writes a minimal seedmancer.yaml for a project.
+//
+// In the pure schema-first model seedmancer.yaml no longer pins the project
+// to a named schema — the schema is derived from the fingerprint of the
+// dumped schema.json every time. The config only stores the plumbing bits:
+// where to keep local dumps and (optionally) the default database URL.
 func InitCommand() *cli.Command {
 	return &cli.Command{
 		Name:  "init",
@@ -20,11 +26,7 @@ func InitCommand() *cli.Command {
 		Flags: []cli.Flag{
 			&cli.StringFlag{
 				Name:  "storage-path",
-				Usage: "Path to store seedmancer files",
-			},
-			&cli.StringFlag{
-				Name:  "database-name",
-				Usage: "Default database name",
+				Usage: "Path to store local schema folders (default: .seedmancer)",
 			},
 			&cli.StringFlag{
 				Name:  "database-url",
@@ -33,19 +35,19 @@ func InitCommand() *cli.Command {
 		},
 		Action: func(c *cli.Context) error {
 			storagePath := c.String("storage-path")
-			databaseName := c.String("database-name")
 			databaseURL := c.String("database-url")
 
 			if existing, err := loadExistingConfig(); err == nil {
 				if !c.IsSet("storage-path") && existing.StoragePath != "" {
 					storagePath = existing.StoragePath
 				}
-				if !c.IsSet("database-name") && existing.DatabaseName != "" {
-					databaseName = existing.DatabaseName
-				}
 				if !c.IsSet("database-url") && existing.DatabaseURL != "" {
 					databaseURL = existing.DatabaseURL
 				}
+			}
+
+			if storagePath == "" {
+				storagePath = ".seedmancer"
 			}
 
 			if term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd())) {
@@ -54,12 +56,6 @@ func InitCommand() *cli.Command {
 
 				if !c.IsSet("storage-path") {
 					storagePath, err = prompt(in, "Storage path", storagePath)
-					if err != nil {
-						return err
-					}
-				}
-				if !c.IsSet("database-name") {
-					databaseName, err = prompt(in, "Database name", databaseName)
 					if err != nil {
 						return err
 					}
@@ -77,9 +73,8 @@ func InitCommand() *cli.Command {
 			}
 
 			cfg := utils.Config{
-				StoragePath:  storagePath,
-				DatabaseName: databaseName,
-				DatabaseURL:  databaseURL,
+				StoragePath: storagePath,
+				DatabaseURL: strings.TrimSpace(databaseURL),
 			}
 
 			yamlData, err := yaml.Marshal(cfg)
@@ -97,12 +92,12 @@ func InitCommand() *cli.Command {
 
 			ui.Success("Created seedmancer.yaml")
 			ui.KeyValue("storage_path: ", storagePath)
-			if databaseName != "" {
-				ui.KeyValue("database_name:", databaseName)
+			if cfg.DatabaseURL != "" {
+				ui.KeyValue("database_url: ", cfg.DatabaseURL)
 			}
-			if databaseURL != "" {
-				ui.KeyValue("database_url: ", databaseURL)
-			}
+			fmt.Println()
+			ui.Info("Next step: run `seedmancer export --name baseline` to dump your database.")
+			ui.Info("The schema folder name is derived from the schema fingerprint — no setup needed.")
 			return nil
 		},
 	}

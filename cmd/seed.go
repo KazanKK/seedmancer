@@ -2,7 +2,8 @@ package cmd
 
 import (
 	"fmt"
-	"net/url"
+	"io"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -13,98 +14,141 @@ import (
 	"github.com/urfave/cli/v2"
 )
 
+// SeedCommand restores a local dataset into the target database.
+//
+// `RestoreFromCSV` expects `schema.json` (plus any `*_func.sql` / `*_trigger.sql`
+// sidecars) to sit next to the CSV files, but our on-disk layout keeps them
+// one level up (in the schema folder) so multiple datasets can share a
+// schema. We bridge that by materializing a temp directory that merges
+// schema files + CSVs, then point `RestoreFromCSV` at it.
 func SeedCommand() *cli.Command {
 	return &cli.Command{
 		Name:  "seed",
-		Usage: "Import test data into database",
+		Usage: "Restore a dataset into the database",
 		Flags: []cli.Flag{
 			&cli.StringFlag{
-				Name:     "database-name",
-				Required: false,
-				Usage:    "Database name (overrides database_name in seedmancer.yaml)",
+				Name:     "name",
+				Required: true,
+				Usage:    "Dataset name to seed",
 			},
 			&cli.StringFlag{
-				Name:     "version-name",
-				Required: false,
-				Usage:    "Test data version directory (optional; if omitted, uses latest YYYYMMDDHHMMSS_(...) folder, else unversioned, else sole folder)",
+				Name:  "schema",
+				Usage: "Fingerprint prefix (only required when multiple local schemas have a dataset with --name)",
 			},
 			&cli.StringFlag{
-				Name:     "db-url",
-				Required: false,
-				Usage:    "Database connection URL (overrides database_url in seedmancer.yaml and SEEDMANCER_DATABASE_URL)",
-				EnvVars:  []string{"SEEDMANCER_DATABASE_URL"},
+				Name:    "db-url",
+				Usage:   "Database connection URL (overrides `database_url:` in seedmancer.yaml)",
+				EnvVars: []string{"SEEDMANCER_DATABASE_URL"},
 			},
 		},
 		Action: func(c *cli.Context) error {
 			configPath, err := utils.FindConfigFile()
 			if err != nil {
-				return fmt.Errorf("finding config file: %v", err)
+				return err
 			}
-
 			projectRoot := filepath.Dir(configPath)
-
 			cfg, err := utils.LoadConfig(configPath)
 			if err != nil {
 				return err
 			}
 
-			databaseName := c.String("database-name")
-			if databaseName == "" {
-				databaseName = cfg.DatabaseName
-			}
-			if databaseName == "" {
-				return fmt.Errorf("database name required: set database_name in seedmancer.yaml, or use --database-name")
-			}
-			dbURL := c.String("db-url")
+			dbURL := resolveDatabaseURL(c.String("db-url"), cfg.DatabaseURL)
 			if dbURL == "" {
-				dbURL = cfg.DatabaseURL
-			}
-			if dbURL == "" {
-				return fmt.Errorf("database URL required: set database_url in seedmancer.yaml, or use --db-url / SEEDMANCER_DATABASE_URL")
+				return fmt.Errorf("database URL required: set `database_url:` in seedmancer.yaml, or use --db-url / SEEDMANCER_DATABASE_URL")
 			}
 
-			versionName, versionPath, err := utils.ResolveSeedVersion(projectRoot, cfg.StoragePath, databaseName, c.String("version-name"))
+			datasetName := strings.TrimSpace(c.String("name"))
+			schemaPrefix := strings.TrimSpace(c.String("schema"))
+
+			schema, datasetDir, err := utils.FindLocalDataset(projectRoot, cfg.StoragePath, schemaPrefix, datasetName)
 			if err != nil {
 				return err
 			}
-			ui.Step("Using version: %s", versionName)
 
-			u, err := url.Parse(dbURL)
+			ui.Step("Seeding %s  (schema %s)", datasetName, schema.FingerprintShort)
+
+			dbURL, scheme, err := normalizePostgresDSN(dbURL)
 			if err != nil {
-				return fmt.Errorf("parsing database URL: %v", err)
+				return err
 			}
-
-			if u.Scheme == "postgresql" {
-				dbURL = "postgres" + dbURL[len("postgresql"):]
-				u.Scheme = "postgres"
-			}
-
-			if u.Scheme == "postgres" && !strings.Contains(dbURL, "sslmode=") {
-				if strings.Contains(dbURL, "?") {
-					dbURL += "&sslmode=disable"
-				} else {
-					dbURL += "?sslmode=disable"
-				}
-			}
-
-			if u.Scheme != "postgres" {
-				return fmt.Errorf("unsupported database type: %s (only postgres is supported)", u.Scheme)
+			if scheme != "postgres" {
+				return fmt.Errorf("unsupported database type: %s (only postgres is supported)", scheme)
 			}
 
 			pg := &db.PostgresManager{}
 			if err := pg.ConnectWithDSN(dbURL); err != nil {
 				return fmt.Errorf("connecting to database: %v", err)
 			}
-			var dbManager db.DatabaseManager = pg
 
-			ui.Debug("Source path: %s", versionPath)
-			sp := ui.StartSpinner("Importing test data...")
-			if err := dbManager.RestoreFromCSV(versionPath); err != nil {
-				sp.Stop(false, "Import failed")
-				return fmt.Errorf("importing test data: %v", err)
+			merged, cleanup, err := materializeRestoreDir(schema.Path, datasetDir)
+			if err != nil {
+				return err
 			}
-			sp.Stop(true, fmt.Sprintf("Imported version '%s'", versionName))
+			defer cleanup()
+
+			ui.Debug("Merged restore dir: %s", merged)
+
+			sp := ui.StartSpinner("Importing dataset...")
+			if err := pg.RestoreFromCSV(merged); err != nil {
+				sp.Stop(false, "Import failed")
+				return fmt.Errorf("importing dataset: %v", err)
+			}
+			sp.Stop(true, fmt.Sprintf("Imported %s", datasetName))
 			return nil
 		},
 	}
+}
+
+// materializeRestoreDir builds a single flat temp directory containing the
+// schema sidecars (schema.json + *.sql) symlinked in from `schemaDir` and the
+// CSV/JSON files from `datasetDir`. The returned cleanup removes the temp dir.
+// When symlinks fail (Windows, exotic filesystems) we fall back to copying.
+func materializeRestoreDir(schemaDir, datasetDir string) (string, func(), error) {
+	tmp, err := os.MkdirTemp("", "seedmancer-restore-*")
+	if err != nil {
+		return "", func() {}, fmt.Errorf("creating temp dir: %v", err)
+	}
+	cleanup := func() { _ = os.RemoveAll(tmp) }
+
+	schemaFiles, err := utils.SchemaFiles(schemaDir)
+	if err != nil {
+		cleanup()
+		return "", func() {}, err
+	}
+	dataFiles, err := utils.DatasetFiles(datasetDir)
+	if err != nil {
+		cleanup()
+		return "", func() {}, err
+	}
+	if len(dataFiles) == 0 {
+		cleanup()
+		return "", func() {}, fmt.Errorf("no CSV or JSON files in %s", datasetDir)
+	}
+
+	for _, src := range append(append([]string{}, schemaFiles...), dataFiles...) {
+		dst := filepath.Join(tmp, filepath.Base(src))
+		if err := linkOrCopy(src, dst); err != nil {
+			cleanup()
+			return "", func() {}, fmt.Errorf("staging %s: %v", src, err)
+		}
+	}
+	return tmp, cleanup, nil
+}
+
+func linkOrCopy(src, dst string) error {
+	if err := os.Symlink(src, dst); err == nil {
+		return nil
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	_, err = io.Copy(out, in)
+	return err
 }
