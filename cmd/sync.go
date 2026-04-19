@@ -29,19 +29,26 @@ func SyncCommand() *cli.Command {
 	return &cli.Command{
 		Name:  "sync",
 		Usage: "Upload a single local dataset to the cloud",
+		Description: "Zips the schema sidecars + CSVs for one local dataset and uploads\n" +
+			"them to your Seedmancer cloud account. The target schema is derived\n" +
+			"from schema.json's fingerprint — no need to pass a schema id.\n\n" +
+			"When the same dataset id exists under multiple local schemas,\n" +
+			"pass --schema / -s <fp-prefix> to disambiguate.",
+		ArgsUsage: " ",
 		Flags: []cli.Flag{
 			&cli.StringFlag{
-				Name:     "name",
-				Usage:    "Dataset name to sync",
+				Name:     "id",
 				Required: true,
+				Usage:    "(required) Dataset id to upload (the name given at export/generate time)",
 			},
 			&cli.StringFlag{
-				Name:  "schema",
-				Usage: "Fingerprint prefix (only required when multiple local schemas have a dataset with --name)",
+				Name:    "schema",
+				Aliases: []string{"s"},
+				Usage:   "Schema fingerprint prefix — only needed when the same dataset id exists under multiple local schemas",
 			},
 			&cli.StringFlag{
 				Name:    "token",
-				Usage:   "API token (or set SEEDMANCER_API_TOKEN env var)",
+				Usage:   "API token (falls back to SEEDMANCER_API_TOKEN)",
 				EnvVars: []string{"SEEDMANCER_API_TOKEN"},
 			},
 		},
@@ -61,10 +68,7 @@ func SyncCommand() *cli.Command {
 				return err
 			}
 
-			datasetName := strings.TrimSpace(c.String("name"))
-			if datasetName == "" {
-				return fmt.Errorf("--name is required")
-			}
+			datasetName := strings.TrimSpace(c.String("id"))
 			schemaPrefix := strings.TrimSpace(c.String("schema"))
 
 			schema, datasetDir, err := utils.FindLocalDataset(projectRoot, cfg.StoragePath, schemaPrefix, datasetName)

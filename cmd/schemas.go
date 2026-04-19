@@ -7,7 +7,9 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
+	"time"
 
 	"github.com/KazanKK/seedmancer/internal/ui"
 	utils "github.com/KazanKK/seedmancer/internal/utils"
@@ -40,21 +42,30 @@ type schemasResponse struct {
 
 func SchemasCommand() *cli.Command {
 	return &cli.Command{
-		Name:  "schemas",
-		Usage: "Manage server-side schemas",
+		Name:            "schemas",
+		Aliases:         []string{"schema"},
+		Usage:           "Inspect and manage server-side schemas",
+		HideHelpCommand: true,
+		Description: "Schemas are auto-created every time you `seedmancer sync` a fresh\n" +
+			"schema.json. This command group lets you inspect them, give them\n" +
+			"human-friendly display names, or delete ones you no longer need.",
 		Subcommands: []*cli.Command{
 			{
 				Name:  "list",
 				Usage: "List all schemas in your Seedmancer account",
+				Description: "Shows every schema the server knows about, sorted by last-synced\n" +
+					"time (newest first). The LABEL column is the custom display name\n" +
+					"if set via `seedmancer schemas rename`, otherwise the fingerprint.",
+				ArgsUsage: " ",
 				Flags: []cli.Flag{
 					&cli.StringFlag{
 						Name:    "token",
-						Usage:   "API token (or set SEEDMANCER_API_TOKEN env var)",
+						Usage:   "API token (falls back to SEEDMANCER_API_TOKEN)",
 						EnvVars: []string{"SEEDMANCER_API_TOKEN"},
 					},
 					&cli.BoolFlag{
 						Name:  "json",
-						Usage: "Output as JSON",
+						Usage: "Emit result as JSON for CI/CD pipelines",
 						Value: false,
 					},
 				},
@@ -64,12 +75,13 @@ func SchemasCommand() *cli.Command {
 				Name:      "rename",
 				Usage:     "Set or clear the display name for a schema",
 				ArgsUsage: "<fp-prefix-or-id> <new-name>",
-				Description: "Pass an empty string (\"\") or --clear to remove the custom name " +
-					"and let the dashboard fall back to the fingerprint short id.",
+				Description: "Gives a schema a human-friendly label (shown in the dashboard and\n" +
+					"`seedmancer schemas list`). Pass an empty string (\"\") or --clear\n" +
+					"to remove the custom name and fall back to the fingerprint short id.",
 				Flags: []cli.Flag{
 					&cli.StringFlag{
 						Name:    "token",
-						Usage:   "API token (or set SEEDMANCER_API_TOKEN env var)",
+						Usage:   "API token (falls back to SEEDMANCER_API_TOKEN)",
 						EnvVars: []string{"SEEDMANCER_API_TOKEN"},
 					},
 					&cli.BoolFlag{
@@ -84,16 +96,19 @@ func SchemasCommand() *cli.Command {
 				Name:      "rm",
 				Usage:     "Delete a schema (orphans any attached datasets)",
 				ArgsUsage: "<fp-prefix-or-id>",
+				Description: "Permanently deletes a schema from the server. Any datasets attached\n" +
+					"to it become orphans — they remain downloadable by id but lose their\n" +
+					"schema grouping. Prompts for confirmation unless --force is passed.",
 				Flags: []cli.Flag{
 					&cli.StringFlag{
 						Name:    "token",
-						Usage:   "API token (or set SEEDMANCER_API_TOKEN env var)",
+						Usage:   "API token (falls back to SEEDMANCER_API_TOKEN)",
 						EnvVars: []string{"SEEDMANCER_API_TOKEN"},
 					},
 					&cli.BoolFlag{
 						Name:    "force",
 						Aliases: []string{"y"},
-						Usage:   "Skip the confirmation prompt (for CI/CD)",
+						Usage:   "Skip the confirmation prompt",
 						Value:   false,
 					},
 				},
@@ -142,6 +157,18 @@ func runSchemasList(c *cli.Context) error {
 		return fmt.Errorf("parsing response JSON: %v", err)
 	}
 
+	// Sort newest first — the schema you most recently synced is the one
+	// you care about. Prefer lastSyncedAt (actual activity), fall back to
+	// updatedAt for never-synced schemas.
+	sort.SliceStable(sr.Schemas, func(i, j int) bool {
+		ti := schemaRecency(sr.Schemas[i])
+		tj := schemaRecency(sr.Schemas[j])
+		if ti.Equal(tj) {
+			return sr.Schemas[i].FingerprintShort < sr.Schemas[j].FingerprintShort
+		}
+		return ti.After(tj)
+	})
+
 	if c.Bool("json") {
 		return outputJSON(sr)
 	}
@@ -152,7 +179,7 @@ func runSchemasList(c *cli.Context) error {
 	}
 
 	table := tablewriter.NewWriter(os.Stdout)
-	table.SetHeader([]string{"Label", "Fingerprint", "Tables", "Datasets", "Size"})
+	table.SetHeader([]string{"Label", "Fingerprint", "Tables", "Datasets", "Size", "Last synced"})
 	table.SetBorder(false)
 	table.SetColumnSeparator("  ")
 	table.SetHeaderAlignment(tablewriter.ALIGN_LEFT)
@@ -171,10 +198,27 @@ func runSchemasList(c *cli.Context) error {
 			fmt.Sprintf("%d", s.TableCount),
 			fmt.Sprintf("%d", s.DatasetCount),
 			formatBytes(s.TotalSize),
+			utils.HumanizeAgo(schemaRecency(s)),
 		})
 	}
 	table.Render()
 	return nil
+}
+
+// schemaRecency returns the best timestamp for "last activity": lastSyncedAt
+// when present (real user-driven activity), else updatedAt (includes pure
+// metadata edits like `schemas rename`). Unparseable strings return the zero
+// time, which sorts to the bottom.
+func schemaRecency(s schemaSummary) time.Time {
+	if s.LastSyncedAt != nil && *s.LastSyncedAt != "" {
+		if t, err := time.Parse(time.RFC3339, *s.LastSyncedAt); err == nil {
+			return t
+		}
+	}
+	if t, err := time.Parse(time.RFC3339, s.UpdatedAt); err == nil {
+		return t
+	}
+	return time.Time{}
 }
 
 // resolveRemoteSchemaID turns a user-supplied reference (UUID or fingerprint

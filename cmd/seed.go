@@ -25,19 +25,26 @@ func SeedCommand() *cli.Command {
 	return &cli.Command{
 		Name:  "seed",
 		Usage: "Restore a dataset into the database",
+		Description: "Loads a local dataset's CSVs + schema sidecars back into the target\n" +
+			"Postgres database. Tables are truncated and reloaded; functions and\n" +
+			"triggers are replayed from their SQL sidecars.\n\n" +
+			"The target database can come from --db-url, $SEEDMANCER_DATABASE_URL,\n" +
+			"or the `database_url:` key in seedmancer.yaml.",
+		ArgsUsage: " ",
 		Flags: []cli.Flag{
 			&cli.StringFlag{
-				Name:     "name",
+				Name:     "id",
 				Required: true,
-				Usage:    "Dataset name to seed",
+				Usage:    "(required) Dataset id to restore (the name given at export/generate time)",
 			},
 			&cli.StringFlag{
-				Name:  "schema",
-				Usage: "Fingerprint prefix (only required when multiple local schemas have a dataset with --name)",
+				Name:    "schema",
+				Aliases: []string{"s"},
+				Usage:   "Schema fingerprint prefix — only needed when the same dataset id exists under multiple local schemas",
 			},
 			&cli.StringFlag{
 				Name:    "db-url",
-				Usage:   "Database connection URL (overrides `database_url:` in seedmancer.yaml)",
+				Usage:   "Target database URL (overrides seedmancer.yaml)",
 				EnvVars: []string{"SEEDMANCER_DATABASE_URL"},
 			},
 		},
@@ -57,7 +64,7 @@ func SeedCommand() *cli.Command {
 				return fmt.Errorf("database URL required: set `database_url:` in seedmancer.yaml, or use --db-url / SEEDMANCER_DATABASE_URL")
 			}
 
-			datasetName := strings.TrimSpace(c.String("name"))
+			datasetName := strings.TrimSpace(c.String("id"))
 			schemaPrefix := strings.TrimSpace(c.String("schema"))
 
 			schema, datasetDir, err := utils.FindLocalDataset(projectRoot, cfg.StoragePath, schemaPrefix, datasetName)

@@ -84,33 +84,42 @@ type generateStatusResponse struct {
 //  2. --schema <fp-prefix>         → pick a schema folder directly by fingerprint
 //  3. (neither)                    → auto-select if exactly one local schema exists
 //
-// The resulting CSVs land under the schema's `datasets/<--name>/` folder so the
+// The resulting CSVs land under the schema's `datasets/<--id>/` folder so the
 // layout stays consistent with `export` output.
 func GenerateCommand() *cli.Command {
 	return &cli.Command{
 		Name:  "generate",
 		Usage: "Generate realistic CSV data via AI into a new dataset",
+		Description: "Sends a local schema + a natural-language prompt to Seedmancer's\n" +
+			"AI generation service, then streams the resulting CSVs into a new\n" +
+			"dataset folder that sits alongside `seedmancer export` output.\n\n" +
+			"Schema source resolution:\n" +
+			"  1. --from <dataset>    use the schema folder containing that dataset\n" +
+			"  2. --schema <fp-prefix> pick a schema folder by fingerprint\n" +
+			"  3. (neither)           auto-select if exactly one local schema exists",
+		ArgsUsage: " ",
 		Flags: []cli.Flag{
 			&cli.StringFlag{
 				Name:     "prompt",
 				Required: true,
-				Usage:    "Natural language description of the data to generate",
+				Usage:    "(required) Natural-language description of the data to generate",
 			},
 			&cli.StringFlag{
-				Name:  "schema",
-				Usage: "Fingerprint prefix of the local schema to use (defaults to the sole local schema)",
+				Name:    "schema",
+				Aliases: []string{"s"},
+				Usage:   "Schema fingerprint prefix to generate against (defaults to the sole local schema)",
 			},
 			&cli.StringFlag{
 				Name:  "from",
-				Usage: "Existing dataset name to derive the schema from (wins over --schema)",
+				Usage: "Existing dataset id to derive the schema from (wins over --schema)",
 			},
 			&cli.StringFlag{
-				Name:  "name",
-				Usage: "Dataset name to create (optional; defaults to YYYYMMDDHHMMSS)",
+				Name:  "id",
+				Usage: "New dataset id (defaults to a YYYYMMDDHHMMSS timestamp)",
 			},
 			&cli.StringFlag{
 				Name:    "token",
-				Usage:   "Seedmancer API token (saved locally for future use)",
+				Usage:   "API token (falls back to SEEDMANCER_API_TOKEN; cached after first use)",
 				EnvVars: []string{"SEEDMANCER_API_TOKEN"},
 			},
 			&cli.StringFlag{
@@ -168,10 +177,10 @@ func runGenerate(c *cli.Context) error {
 	}
 	ui.Info("Using schema: %s  (%s)", sourceSchema.FingerprintShort, sourceSchema.SchemaJSONPath)
 
-	datasetName := strings.TrimSpace(c.String("name"))
+	datasetName := strings.TrimSpace(c.String("id"))
 	if datasetName == "" {
 		datasetName = time.Now().UTC().Format("20060102150405")
-		ui.Info("Auto-generated dataset name: %s", datasetName)
+		ui.Info("Auto-generated dataset id: %s", datasetName)
 	}
 	datasetName = utils.SanitizeDatasetSegment(datasetName)
 
@@ -220,8 +229,8 @@ func runGenerate(c *cli.Context) error {
 	fmt.Println()
 	ui.Success("Generated dataset → %s", outputDir)
 	ui.Info("%d CSV file(s): %s", len(csvNames), strings.Join(csvNames, ", "))
-	ui.Info("Run 'seedmancer seed --name %s' to import locally,", datasetName)
-	ui.Info("or 'seedmancer sync --name %s' to upload.", datasetName)
+	ui.Info("Run 'seedmancer seed --id %s' to import locally,", datasetName)
+	ui.Info("or 'seedmancer sync --id %s' to upload.", datasetName)
 	return nil
 }
 

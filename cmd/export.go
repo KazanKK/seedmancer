@@ -32,20 +32,30 @@ func ExportCommand() *cli.Command {
 	return &cli.Command{
 		Name:  "export",
 		Usage: "Export current database schema and data as a dataset",
+		Description: "Dumps the current database into a content-addressed folder under\n" +
+			"<storagePath>/schemas/<fp-short>/. The folder name is derived from\n" +
+			"the SHA-256 fingerprint of schema.json, so two exports with the\n" +
+			"same shape always land in the same schema folder.\n\n" +
+			"Layout after a successful export:\n" +
+			"  <storagePath>/schemas/<fp-short>/\n" +
+			"    schema.json                         (source of truth)\n" +
+			"    *_func.sql / *_trigger.sql         (sidecars)\n" +
+			"    datasets/<name>/*.csv               (per-dataset rows)",
+		ArgsUsage: " ",
 		Flags: []cli.Flag{
 			&cli.StringFlag{
-				Name:  "name",
-				Usage: "Dataset name (optional; defaults to YYYYMMDDHHMMSS)",
+				Name:  "id",
+				Usage: "Dataset id for the new dump (defaults to a YYYYMMDDHHMMSS timestamp)",
 			},
 			&cli.StringFlag{
 				Name:    "db-url",
-				Usage:   "Database connection URL (overrides `database_url:` in seedmancer.yaml)",
+				Usage:   "Source database URL (overrides seedmancer.yaml)",
 				EnvVars: []string{"SEEDMANCER_DATABASE_URL"},
 			},
 			&cli.BoolFlag{
 				Name:    "force",
 				Aliases: []string{"y"},
-				Usage:   "Overwrite an existing dataset without confirmation (for CI/CD)",
+				Usage:   "Overwrite an existing dataset without confirmation",
 				Value:   false,
 			},
 		},
@@ -66,10 +76,10 @@ func ExportCommand() *cli.Command {
 				return fmt.Errorf("database URL required: set `database_url:` in seedmancer.yaml, or use --db-url / SEEDMANCER_DATABASE_URL")
 			}
 
-			datasetName := strings.TrimSpace(c.String("name"))
+			datasetName := strings.TrimSpace(c.String("id"))
 			if datasetName == "" {
 				datasetName = time.Now().UTC().Format("20060102150405")
-				ui.Info("Auto-generated dataset name: %s", datasetName)
+				ui.Info("Auto-generated dataset id: %s", datasetName)
 			}
 			datasetName = utils.SanitizeDatasetSegment(datasetName)
 
@@ -151,7 +161,7 @@ func ExportCommand() *cli.Command {
 			ui.KeyValue("Dataset: ", datasetName)
 			ui.KeyValue("Path: ", datasetDir)
 			fmt.Println()
-			ui.Info("Next: `seedmancer sync --name %s`", datasetName)
+			ui.Info("Next: `seedmancer sync --id %s`", datasetName)
 			return nil
 		},
 	}

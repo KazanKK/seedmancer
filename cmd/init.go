@@ -22,15 +22,19 @@ import (
 func InitCommand() *cli.Command {
 	return &cli.Command{
 		Name:  "init",
-		Usage: "Initialize seedmancer configuration file",
+		Usage: "Initialize a seedmancer.yaml configuration file",
+		Description: "Writes a minimal seedmancer.yaml in the current directory and creates\n" +
+			"the local storage folder. When run in an interactive TTY it prompts\n" +
+			"for missing values; in CI/CD pass --storage-path and --database-url.",
+		ArgsUsage: " ",
 		Flags: []cli.Flag{
 			&cli.StringFlag{
 				Name:  "storage-path",
-				Usage: "Path to store local schema folders (default: .seedmancer)",
+				Usage: "Directory for local schema folders (default: .seedmancer)",
 			},
 			&cli.StringFlag{
 				Name:  "database-url",
-				Usage: "Default database connection URL",
+				Usage: "Default database connection URL saved into seedmancer.yaml",
 			},
 		},
 		Action: func(c *cli.Context) error {
@@ -96,7 +100,7 @@ func InitCommand() *cli.Command {
 				ui.KeyValue("database_url: ", cfg.DatabaseURL)
 			}
 			fmt.Println()
-			ui.Info("Next step: run `seedmancer export --name baseline` to dump your database.")
+			ui.Info("Next step: run `seedmancer export --id baseline` to dump your database.")
 			ui.Info("The schema folder name is derived from the schema fingerprint — no setup needed.")
 			return nil
 		},

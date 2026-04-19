@@ -390,20 +390,35 @@ func (p *PostgresManager) RestoreFromCSV(directory string) error {
 		}
 	}
 
-	// Restore functions — prefer SQL files, fall back to schema.json entries
-	var fnCount int
-	functionsDir := filepath.Join(directory, "functions")
-	if entries, err := os.ReadDir(functionsDir); err == nil {
+	// Walk the top-level once and split into function/trigger sidecars. The
+	// flat layout (<dir>/<name>_func.sql, <dir>/<table>_<name>_trigger.sql)
+	// matches what ExportSchema writes and what sync/seed stage into the
+	// restore dir.
+	var functionFiles, triggerFiles []string
+	if entries, err := os.ReadDir(directory); err == nil {
 		for _, entry := range entries {
-			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") {
+			if entry.IsDir() {
 				continue
 			}
-			sqlPath := filepath.Join(functionsDir, entry.Name())
+			name := entry.Name()
+			switch {
+			case strings.HasSuffix(name, "_func.sql"):
+				functionFiles = append(functionFiles, filepath.Join(directory, name))
+			case strings.HasSuffix(name, "_trigger.sql"):
+				triggerFiles = append(triggerFiles, filepath.Join(directory, name))
+			}
+		}
+	}
+
+	// Restore functions — prefer SQL sidecars, fall back to schema.json entries.
+	var fnCount int
+	if len(functionFiles) > 0 {
+		for _, sqlPath := range functionFiles {
 			content, err := os.ReadFile(sqlPath)
 			if err != nil {
-				return fmt.Errorf("reading function file %s: %v", entry.Name(), err)
+				return fmt.Errorf("reading function file %s: %v", filepath.Base(sqlPath), err)
 			}
-			fnName := strings.TrimSuffix(entry.Name(), ".sql")
+			fnName := strings.TrimSuffix(filepath.Base(sqlPath), "_func.sql")
 			p.logSQL(fmt.Sprintf("Restore Function %s", fnName), string(content))
 			if _, err := p.DB.Exec(string(content)); err != nil {
 				return fmt.Errorf("restoring function %s: %v", fnName, err)
@@ -425,23 +440,18 @@ func (p *PostgresManager) RestoreFromCSV(directory string) error {
 		ui.Step("Restored %d function(s)", fnCount)
 	}
 
-	// Restore triggers — prefer SQL files, fall back to schema.json entries.
+	// Restore triggers — prefer SQL sidecars, fall back to schema.json entries.
 	// DROP before CREATE because CREATE OR REPLACE TRIGGER requires PG14+.
 	var trigCount int
-	triggersDir := filepath.Join(directory, "triggers")
-	if entries, err := os.ReadDir(triggersDir); err == nil {
-		for _, entry := range entries {
-			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") {
-				continue
-			}
-			sqlPath := filepath.Join(triggersDir, entry.Name())
+	if len(triggerFiles) > 0 {
+		for _, sqlPath := range triggerFiles {
 			content, err := os.ReadFile(sqlPath)
 			if err != nil {
-				return fmt.Errorf("reading trigger file %s: %v", entry.Name(), err)
+				return fmt.Errorf("reading trigger file %s: %v", filepath.Base(sqlPath), err)
 			}
 			name, tableSchema, tableName, definition, parseErr := parseTriggerSQL(string(content))
 			if parseErr != nil {
-				return fmt.Errorf("parsing trigger file %s: %v", entry.Name(), parseErr)
+				return fmt.Errorf("parsing trigger file %s: %v", filepath.Base(sqlPath), parseErr)
 			}
 			tableRef := pq.QuoteIdentifier(tableName)
 			if tableSchema != "" && tableSchema != "public" {
@@ -1173,9 +1183,16 @@ func (p *PostgresManager) exportTableToCSV(tableName, outputDir string) error {
 }
 
 // ExportSchema exports the database schema to outputDir.
-// Tables/enums are written to schema.json; functions and triggers are each
-// written as individual .sql files under outputDir/functions/ and
-// outputDir/triggers/ respectively.
+//
+// Layout:
+//
+//	<outputDir>/schema.json                       # tables + enums
+//	<outputDir>/<fn>_func.sql                     # one per function
+//	<outputDir>/<table>_<name>_trigger.sql        # one per trigger (+ header)
+//
+// Everything is written flat at the top level so the files pass cleanly
+// through refreshSchemaFolder → SchemaFiles → sync/zip → server, and back
+// through seed/RestoreFromCSV.
 func (p *PostgresManager) ExportSchema(outputDir string) error {
 	if p.DB == nil {
 		return errors.New("no database connection")
@@ -1186,41 +1203,37 @@ func (p *PostgresManager) ExportSchema(outputDir string) error {
 		return fmt.Errorf("extracting schema: %v", err)
 	}
 
-	// --- Export functions as individual SQL files ---
+	// --- Export functions as flat `<name>_func.sql` sidecars ---
+	// The flat layout is what refreshSchemaFolder / SchemaFiles / sync / seed
+	// all expect — functions and triggers live alongside schema.json, not in
+	// subdirectories, so they ride along cleanly when the schema folder is
+	// copied, zipped, or staged for restore.
+	for _, fn := range schema.Functions {
+		sqlPath := filepath.Join(outputDir, fn.Name+"_func.sql")
+		if err := os.WriteFile(sqlPath, []byte(fn.Definition), 0644); err != nil {
+			return fmt.Errorf("writing function %s: %v", fn.Name, err)
+		}
+		ui.Debug("Exported function: %s", fn.Name)
+	}
 	if len(schema.Functions) > 0 {
-		functionsDir := filepath.Join(outputDir, "functions")
-		if err := os.MkdirAll(functionsDir, 0755); err != nil {
-			return fmt.Errorf("creating functions directory: %v", err)
-		}
-		for _, fn := range schema.Functions {
-			sqlPath := filepath.Join(functionsDir, fn.Name+".sql")
-			if err := os.WriteFile(sqlPath, []byte(fn.Definition), 0644); err != nil {
-				return fmt.Errorf("writing function %s: %v", fn.Name, err)
-			}
-			ui.Debug("Exported function: %s", fn.Name)
-		}
 		ui.Success("Exported %d function(s)", len(schema.Functions))
 	}
 
-	// --- Export triggers as individual SQL files ---
-	// Each file includes a metadata header so it can be restored without
-	// parsing the CREATE TRIGGER statement.
+	// --- Export triggers as flat `<table>_<name>_trigger.sql` sidecars ---
+	// Each file gets a metadata header so RestoreFromCSV can rebuild the
+	// (name, schema, table) tuple without re-parsing CREATE TRIGGER.
+	for _, trigger := range schema.Triggers {
+		header := fmt.Sprintf("-- seedmancer:trigger\n-- name: %s\n-- table_schema: %s\n-- table_name: %s\n",
+			trigger.Name, trigger.TableSchema, trigger.TableName)
+		content := header + trigger.Definition
+		fileName := fmt.Sprintf("%s_%s_trigger.sql", trigger.TableName, trigger.Name)
+		sqlPath := filepath.Join(outputDir, fileName)
+		if err := os.WriteFile(sqlPath, []byte(content), 0644); err != nil {
+			return fmt.Errorf("writing trigger %s: %v", trigger.Name, err)
+		}
+		ui.Debug("Exported trigger: %s on %s.%s", trigger.Name, trigger.TableSchema, trigger.TableName)
+	}
 	if len(schema.Triggers) > 0 {
-		triggersDir := filepath.Join(outputDir, "triggers")
-		if err := os.MkdirAll(triggersDir, 0755); err != nil {
-			return fmt.Errorf("creating triggers directory: %v", err)
-		}
-		for _, trigger := range schema.Triggers {
-			header := fmt.Sprintf("-- seedmancer:trigger\n-- name: %s\n-- table_schema: %s\n-- table_name: %s\n",
-				trigger.Name, trigger.TableSchema, trigger.TableName)
-			content := header + trigger.Definition
-			fileName := fmt.Sprintf("%s_%s.sql", trigger.TableName, trigger.Name)
-			sqlPath := filepath.Join(triggersDir, fileName)
-			if err := os.WriteFile(sqlPath, []byte(content), 0644); err != nil {
-				return fmt.Errorf("writing trigger %s: %v", trigger.Name, err)
-			}
-			ui.Debug("Exported trigger: %s on %s.%s", trigger.Name, trigger.TableSchema, trigger.TableName)
-		}
 		ui.Success("Exported %d trigger(s)", len(schema.Triggers))
 	}
 

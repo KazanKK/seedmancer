@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
 // FindConfigFile locates seedmancer.yaml in the current or parent directories,
@@ -79,6 +80,14 @@ func DatasetPath(projectRoot, storagePath, fpShort, datasetName string) string {
 
 // ─── Schema discovery ───────────────────────────────────────────────────────
 
+// LocalDataset is one dataset folder under a schema, with its latest mtime so
+// callers can sort by recency. A dataset can be written by `export`,
+// `generate`, or `fetch` — all three land at `<schemaDir>/datasets/<name>/`.
+type LocalDataset struct {
+	Name      string
+	UpdatedAt time.Time
+}
+
 // LocalSchema describes an on-disk schema folder.
 type LocalSchema struct {
 	// Full SHA-256 hex fingerprint computed from the folder's schema.json.
@@ -89,15 +98,21 @@ type LocalSchema struct {
 	Path string
 	// Path to schema.json inside the folder.
 	SchemaJSONPath string
-	// Dataset folder names sorted ascending.
-	Datasets []string
+	// Datasets inside `<schemaDir>/datasets/`, sorted by UpdatedAt DESC
+	// (newest first).
+	Datasets []LocalDataset
+	// max(schema.json mtime, newest dataset mtime). Drives sort order in
+	// `seedmancer list` so the most-recently-touched schema bubbles to the
+	// top, regardless of whether it was touched by export / generate / fetch.
+	UpdatedAt time.Time
 }
 
 // ListLocalSchemas walks <storagePath>/schemas and returns every folder that
-// contains a schema.json. The fingerprint is recomputed from the file — if
-// the recomputed prefix doesn't match the folder name, the folder is still
-// returned but the FingerprintShort reflects the real fingerprint (folder
-// rename follow-up is done by the caller / `seedmancer export`).
+// contains a schema.json, sorted by UpdatedAt DESC (newest first). The
+// fingerprint is recomputed from the file — if the recomputed prefix doesn't
+// match the folder name, the folder is still returned but the
+// FingerprintShort reflects the real fingerprint (folder rename follow-up is
+// done by the caller / `seedmancer export`).
 func ListLocalSchemas(projectRoot, storagePath string) ([]LocalSchema, error) {
 	root := SchemasDir(projectRoot, storagePath)
 	entries, err := os.ReadDir(root)
@@ -115,7 +130,8 @@ func ListLocalSchemas(projectRoot, storagePath string) ([]LocalSchema, error) {
 		}
 		schemaDir := filepath.Join(root, e.Name())
 		schemaJSON := filepath.Join(schemaDir, "schema.json")
-		if _, err := os.Stat(schemaJSON); err != nil {
+		schemaInfo, err := os.Stat(schemaJSON)
+		if err != nil {
 			// Skip folders without a schema.json — they're not valid schema dirs.
 			continue
 		}
@@ -127,21 +143,33 @@ func ListLocalSchemas(projectRoot, storagePath string) ([]LocalSchema, error) {
 		if err != nil {
 			return nil, err
 		}
+		// Schema is as "recent" as its schema.json or its newest dataset.
+		updatedAt := schemaInfo.ModTime()
+		if len(datasets) > 0 && datasets[0].UpdatedAt.After(updatedAt) {
+			updatedAt = datasets[0].UpdatedAt
+		}
 		schemas = append(schemas, LocalSchema{
 			Fingerprint:      fp,
 			FingerprintShort: FingerprintShort(fp),
 			Path:             schemaDir,
 			SchemaJSONPath:   schemaJSON,
 			Datasets:         datasets,
+			UpdatedAt:        updatedAt,
 		})
 	}
-	sort.Slice(schemas, func(i, j int) bool {
-		return schemas[i].FingerprintShort < schemas[j].FingerprintShort
+	sort.SliceStable(schemas, func(i, j int) bool {
+		if schemas[i].UpdatedAt.Equal(schemas[j].UpdatedAt) {
+			return schemas[i].FingerprintShort < schemas[j].FingerprintShort
+		}
+		return schemas[i].UpdatedAt.After(schemas[j].UpdatedAt)
 	})
 	return schemas, nil
 }
 
-func listDatasetDirs(dir string) ([]string, error) {
+// listDatasetDirs returns the dataset folders inside `dir`, sorted by mtime
+// DESC (newest first). Missing `dir` is not an error — schemas without any
+// datasets return an empty slice.
+func listDatasetDirs(dir string) ([]LocalDataset, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -149,14 +177,68 @@ func listDatasetDirs(dir string) ([]string, error) {
 		}
 		return nil, fmt.Errorf("reading %s: %w", dir, err)
 	}
-	var names []string
+	var datasets []LocalDataset
 	for _, e := range entries {
-		if e.IsDir() {
-			names = append(names, e.Name())
+		if !e.IsDir() {
+			continue
 		}
+		info, err := e.Info()
+		if err != nil {
+			return nil, fmt.Errorf("stat %s: %w", filepath.Join(dir, e.Name()), err)
+		}
+		datasets = append(datasets, LocalDataset{
+			Name:      e.Name(),
+			UpdatedAt: info.ModTime(),
+		})
 	}
-	sort.Strings(names)
-	return names, nil
+	sort.SliceStable(datasets, func(i, j int) bool {
+		if datasets[i].UpdatedAt.Equal(datasets[j].UpdatedAt) {
+			return datasets[i].Name < datasets[j].Name
+		}
+		return datasets[i].UpdatedAt.After(datasets[j].UpdatedAt)
+	})
+	return datasets, nil
+}
+
+// HumanizeAgo renders a time as a human-friendly relative string:
+//   - zero / future / very recent → "just now"
+//   - < 1 min                     → "just now"
+//   - < 1 hour                    → "N minutes ago"
+//   - < 24 hours                  → "N hours ago"
+//   - < 48 hours                  → "yesterday"
+//   - < 30 days                   → "N days ago"
+//   - otherwise                   → "YYYY-MM-DD"
+//
+// Dependency-free on purpose — we don't want to pull in go-humanize for this.
+func HumanizeAgo(t time.Time) string {
+	if t.IsZero() {
+		return "—"
+	}
+	d := time.Since(t)
+	if d < time.Minute {
+		return "just now"
+	}
+	if d < time.Hour {
+		m := int(d / time.Minute)
+		if m == 1 {
+			return "1 minute ago"
+		}
+		return fmt.Sprintf("%d minutes ago", m)
+	}
+	if d < 24*time.Hour {
+		h := int(d / time.Hour)
+		if h == 1 {
+			return "1 hour ago"
+		}
+		return fmt.Sprintf("%d hours ago", h)
+	}
+	if d < 48*time.Hour {
+		return "yesterday"
+	}
+	if d < 30*24*time.Hour {
+		return fmt.Sprintf("%d days ago", int(d/(24*time.Hour)))
+	}
+	return t.Format("2006-01-02")
 }
 
 // ResolveLocalSchema picks exactly one on-disk schema for a command to
@@ -237,7 +319,7 @@ func FindLocalDataset(projectRoot, storagePath, schemaPrefix, datasetName string
 	var hits []LocalSchema
 	for _, s := range schemas {
 		for _, d := range s.Datasets {
-			if d == datasetName {
+			if d.Name == datasetName {
 				hits = append(hits, s)
 				break
 			}

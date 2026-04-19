@@ -56,37 +56,40 @@ func FetchCommand() *cli.Command {
 	return &cli.Command{
 		Name:  "fetch",
 		Usage: "Download a dataset from the cloud into local storage",
+		Description: "Downloads one previously-synced dataset and unpacks it under\n" +
+			"<storagePath>/schemas/<fp-short>/datasets/<name>/, matching the\n" +
+			"layout used by `seedmancer export` so `seedmancer seed` can load\n" +
+			"it straight away. Pass --output to drop the files elsewhere.",
+		ArgsUsage: " ",
 		Flags: []cli.Flag{
 			&cli.StringFlag{
-				Name:     "name",
+				Name:     "id",
 				Required: true,
-				Usage:    "Dataset name to fetch",
+				Usage:    "(required) Dataset id to download",
 			},
 			&cli.StringFlag{
-				Name:  "schema",
-				Usage: "Fingerprint prefix (required if the dataset name exists under multiple schemas)",
+				Name:    "schema",
+				Aliases: []string{"s"},
+				Usage:   "Schema fingerprint prefix — only needed when the same dataset id exists under multiple remote schemas",
 			},
 			&cli.StringFlag{
 				Name:    "token",
-				Usage:   "API token (or set SEEDMANCER_API_TOKEN env var)",
+				Usage:   "API token (falls back to SEEDMANCER_API_TOKEN)",
 				EnvVars: []string{"SEEDMANCER_API_TOKEN"},
 			},
 			&cli.StringFlag{
 				Name:    "output",
 				Aliases: []string{"o"},
-				Usage:   "Output directory (overrides the default <storagePath>/schemas/<fp-short>/datasets/<name> layout)",
+				Usage:   "Custom output directory (defaults to the schema-first layout)",
 			},
 			&cli.BoolFlag{
 				Name:  "json",
-				Usage: "Output result as JSON (for CI/CD and scripting)",
+				Usage: "Emit result as JSON for CI/CD pipelines",
 				Value: false,
 			},
 		},
 		Action: func(c *cli.Context) error {
-			datasetName := strings.TrimSpace(c.String("name"))
-			if datasetName == "" {
-				return fmt.Errorf("--name is required")
-			}
+			datasetName := strings.TrimSpace(c.String("id"))
 			schemaPrefix := strings.TrimSpace(c.String("schema"))
 			outputFlag := strings.TrimSpace(c.String("output"))
 			jsonMode := c.Bool("json")
