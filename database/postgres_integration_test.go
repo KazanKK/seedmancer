@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	_ "github.com/lib/pq"
@@ -13,9 +12,14 @@ import (
 // TestPostgresIntegration_ExportSeedRoundtrip exercises the full
 // Export → Truncate → Restore cycle against a real Postgres database.
 //
-// It is gated on SEEDMANCER_INTEGRATION_DATABASE_URL so it never runs
-// in default `go test ./...` invocations. In CI, the workflow sets that
-// variable against a temporary Postgres service container.
+// The PostgresManager hardcodes `nspname = 'public'` in its schema probes,
+// so this test creates its tables directly in `public` and cleans up
+// afterwards with DROP TABLE … CASCADE. Any other user-defined tables in
+// `public` on the target database will show up in the export too — the
+// intended usage is a throwaway Postgres service container.
+//
+// Gated on SEEDMANCER_INTEGRATION_DATABASE_URL so default `go test ./...`
+// runs don't hit the network or wipe anyone's local data.
 //
 // Usage:
 //
@@ -27,38 +31,44 @@ func TestPostgresIntegration_ExportSeedRoundtrip(t *testing.T) {
 		t.Skip("SEEDMANCER_INTEGRATION_DATABASE_URL not set; skipping integration test")
 	}
 
-	// Clean slate on the public schema so we can run against any Postgres.
 	raw, err := sql.Open("postgres", dsn)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
 	t.Cleanup(func() { _ = raw.Close() })
 
-	ddl := `
-DROP SCHEMA IF EXISTS seedmancer_it CASCADE;
-CREATE SCHEMA seedmancer_it;
-SET search_path TO seedmancer_it;
+	// Tear down any leftover state from a previous failed run before we
+	// start, and again when the test finishes — DROP CASCADE covers the FK.
+	dropAll := `
+DROP TABLE IF EXISTS public.seedmancer_it_books   CASCADE;
+DROP TABLE IF EXISTS public.seedmancer_it_authors CASCADE;
+`
+	if _, err := raw.Exec(dropAll); err != nil {
+		t.Fatalf("pre-clean: %v", err)
+	}
+	t.Cleanup(func() { _, _ = raw.Exec(dropAll) })
 
-CREATE TABLE authors (
+	ddl := `
+CREATE TABLE public.seedmancer_it_authors (
     id          INTEGER PRIMARY KEY,
     name        TEXT NOT NULL,
     active      BOOLEAN DEFAULT TRUE,
     created_at  TIMESTAMP DEFAULT NOW()
 );
 
-CREATE TABLE books (
+CREATE TABLE public.seedmancer_it_books (
     id          INTEGER PRIMARY KEY,
-    author_id   INTEGER NOT NULL REFERENCES authors(id),
+    author_id   INTEGER NOT NULL REFERENCES public.seedmancer_it_authors(id),
     title       TEXT NOT NULL,
     rating      NUMERIC(3,2)
 );
 
-INSERT INTO authors (id, name, active) VALUES
-    (1, 'Alice',   TRUE),
-    (2, 'Bob',     FALSE),
+INSERT INTO public.seedmancer_it_authors (id, name, active) VALUES
+    (1, 'Alice',    TRUE),
+    (2, 'Bob',      FALSE),
     (3, 'Carol''s', TRUE);
 
-INSERT INTO books (id, author_id, title, rating) VALUES
+INSERT INTO public.seedmancer_it_books (id, author_id, title, rating) VALUES
     (10, 1, 'First Book',  4.50),
     (11, 1, 'Second Book', NULL),
     (12, 2, 'Quiet Night', 3.25);
@@ -67,16 +77,8 @@ INSERT INTO books (id, author_id, title, rating) VALUES
 		t.Fatalf("ddl: %v", err)
 	}
 
-	// Run everything against the `seedmancer_it` schema.
-	dsnIT := dsn
-	if strings.Contains(dsnIT, "?") {
-		dsnIT += "&options=-csearch_path%3Dseedmancer_it"
-	} else {
-		dsnIT += "?options=-csearch_path%3Dseedmancer_it"
-	}
-
 	pg := &PostgresManager{}
-	if err := pg.ConnectWithDSN(dsnIT); err != nil {
+	if err := pg.ConnectWithDSN(dsn); err != nil {
 		t.Fatalf("connect: %v", err)
 	}
 
@@ -100,9 +102,10 @@ INSERT INTO books (id, author_id, title, rating) VALUES
 		t.Fatalf("export csv: %v", err)
 	}
 
-	// Wipe the data — seed must put it all back.
-	if _, err := raw.Exec(`TRUNCATE seedmancer_it.books, seedmancer_it.authors RESTART IDENTITY CASCADE`); err != nil {
-		t.Fatalf("truncate: %v", err)
+	// Drop the tables so RestoreFromCSV has to recreate + repopulate them.
+	// TRUNCATE alone wouldn't prove much because the schema would still exist.
+	if _, err := raw.Exec(dropAll); err != nil {
+		t.Fatalf("mid-clean: %v", err)
 	}
 
 	// Flatten schema+data into one directory as RestoreFromCSV expects.
@@ -118,19 +121,19 @@ INSERT INTO books (id, author_id, title, rating) VALUES
 	}
 
 	var authorsN, booksN int
-	if err := raw.QueryRow(`SELECT COUNT(*) FROM seedmancer_it.authors`).Scan(&authorsN); err != nil {
+	if err := raw.QueryRow(`SELECT COUNT(*) FROM public.seedmancer_it_authors`).Scan(&authorsN); err != nil {
 		t.Fatalf("count authors: %v", err)
 	}
-	if err := raw.QueryRow(`SELECT COUNT(*) FROM seedmancer_it.books`).Scan(&booksN); err != nil {
+	if err := raw.QueryRow(`SELECT COUNT(*) FROM public.seedmancer_it_books`).Scan(&booksN); err != nil {
 		t.Fatalf("count books: %v", err)
 	}
 	if authorsN != 3 || booksN != 3 {
 		t.Fatalf("row counts after restore: authors=%d books=%d, want 3/3", authorsN, booksN)
 	}
 
-	// Also check that a row with a single-quote in it survived escaping.
+	// Single-quote in a value must survive CSV round-trip (no double-escape).
 	var name string
-	if err := raw.QueryRow(`SELECT name FROM seedmancer_it.authors WHERE id = 3`).Scan(&name); err != nil {
+	if err := raw.QueryRow(`SELECT name FROM public.seedmancer_it_authors WHERE id = 3`).Scan(&name); err != nil {
 		t.Fatalf("scan name: %v", err)
 	}
 	if name != "Carol's" {
