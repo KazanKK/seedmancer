@@ -79,13 +79,11 @@ type generateStatusResponse struct {
 
 // GenerateCommand runs an AI generation job against an existing local schema.
 //
-// Schema source resolution:
-//  1. --from <dataset>             → use the schema folder containing that dataset
-//  2. --schema <fp-prefix>         → pick a schema folder directly by fingerprint
-//  3. (neither)                    → auto-select if exactly one local schema exists
-//
-// The resulting CSVs land under the schema's `datasets/<--id>/` folder so the
-// layout stays consistent with `export` output.
+// --schema-id picks the target schema by its fingerprint short (same value
+// shown by `seedmancer list` / `seedmancer schemas list`). When omitted and
+// exactly one local schema exists, that one is used. The resulting CSVs land
+// under the schema's `datasets/<timestamp>/` folder so the layout stays
+// consistent with `export` output.
 func GenerateCommand() *cli.Command {
 	return &cli.Command{
 		Name:  "generate",
@@ -93,10 +91,9 @@ func GenerateCommand() *cli.Command {
 		Description: "Sends a local schema + a natural-language prompt to Seedmancer's\n" +
 			"AI generation service, then streams the resulting CSVs into a new\n" +
 			"dataset folder that sits alongside `seedmancer export` output.\n\n" +
-			"Schema source resolution:\n" +
-			"  1. --from <dataset>    use the schema folder containing that dataset\n" +
-			"  2. --schema <fp-prefix> pick a schema folder by fingerprint\n" +
-			"  3. (neither)           auto-select if exactly one local schema exists",
+			"Pass --schema-id to pick which local schema to generate for. It\n" +
+			"accepts the fingerprint short id from `seedmancer list`. Omit it\n" +
+			"when the project has exactly one local schema.",
 		ArgsUsage: " ",
 		Flags: []cli.Flag{
 			&cli.StringFlag{
@@ -105,27 +102,12 @@ func GenerateCommand() *cli.Command {
 				Usage:    "(required) Natural-language description of the data to generate",
 			},
 			&cli.StringFlag{
-				Name:    "schema",
-				Aliases: []string{"s"},
-				Usage:   "Schema fingerprint prefix to generate against (defaults to the sole local schema)",
+				Name:  "schema-id",
+				Usage: "Schema fingerprint short id to generate against (defaults to the sole local schema)",
 			},
 			&cli.StringFlag{
-				Name:  "from",
-				Usage: "Existing dataset id to derive the schema from (wins over --schema)",
-			},
-			&cli.StringFlag{
-				Name:  "id",
-				Usage: "New dataset id (defaults to a YYYYMMDDHHMMSS timestamp)",
-			},
-			&cli.StringFlag{
-				Name:    "token",
-				Usage:   "API token (falls back to SEEDMANCER_API_TOKEN; cached after first use)",
-				EnvVars: []string{"SEEDMANCER_API_TOKEN"},
-			},
-			&cli.StringFlag{
-				Name:    "api-url",
-				Usage:   "Seedmancer API base URL (overrides SEEDMANCER_API_URL and api_url in config)",
-				EnvVars: []string{"SEEDMANCER_API_URL"},
+				Name:  "token",
+				Usage: "API token (falls back to ~/.seedmancer/credentials, then SEEDMANCER_API_TOKEN)",
 			},
 		},
 		Action: func(c *cli.Context) error {
@@ -137,7 +119,7 @@ func GenerateCommand() *cli.Command {
 func runGenerate(c *cli.Context) error {
 	prompt := c.String("prompt")
 
-	apiToken, err := resolveAndStoreAPIToken(c.String("token"))
+	apiToken, err := utils.ResolveAPIToken(c.String("token"))
 	if err != nil {
 		return err
 	}
@@ -153,22 +135,11 @@ func runGenerate(c *cli.Context) error {
 		return fmt.Errorf("reading config: %v", err)
 	}
 
-	schemaPrefix := strings.TrimSpace(c.String("schema"))
-	fromDataset := strings.TrimSpace(c.String("from"))
+	schemaID := strings.TrimSpace(c.String("schema-id"))
 
-	var sourceSchema utils.LocalSchema
-	if fromDataset != "" {
-		s, _, err := utils.FindLocalDataset(projectRoot, cfg.StoragePath, schemaPrefix, fromDataset)
-		if err != nil {
-			return fmt.Errorf("locating source schema from --from %q: %v", fromDataset, err)
-		}
-		sourceSchema = s
-	} else {
-		s, err := utils.ResolveLocalSchema(projectRoot, cfg.StoragePath, schemaPrefix)
-		if err != nil {
-			return err
-		}
-		sourceSchema = s
+	sourceSchema, err := utils.ResolveLocalSchema(projectRoot, cfg.StoragePath, schemaID)
+	if err != nil {
+		return err
 	}
 
 	schemaBytes, err := os.ReadFile(sourceSchema.SchemaJSONPath)
@@ -177,11 +148,8 @@ func runGenerate(c *cli.Context) error {
 	}
 	ui.Info("Using schema: %s  (%s)", sourceSchema.FingerprintShort, sourceSchema.SchemaJSONPath)
 
-	datasetName := strings.TrimSpace(c.String("id"))
-	if datasetName == "" {
-		datasetName = time.Now().UTC().Format("20060102150405")
-		ui.Info("Auto-generated dataset id: %s", datasetName)
-	}
+	datasetName := time.Now().UTC().Format("20060102150405")
+	ui.Info("Dataset id: %s", datasetName)
 	datasetName = utils.SanitizeDatasetSegment(datasetName)
 
 	outputDir := utils.DatasetPath(projectRoot, cfg.StoragePath, sourceSchema.FingerprintShort, datasetName)
@@ -196,17 +164,14 @@ func runGenerate(c *cli.Context) error {
 		return fmt.Errorf("building API schema: %v", err)
 	}
 
-	baseURL := c.String("api-url")
-	if baseURL == "" {
-		baseURL = utils.GetBaseURL()
-	}
+	baseURL := utils.GetBaseURL()
 	baseURL = strings.TrimRight(baseURL, "/")
 	ui.Debug("API endpoint: %s", baseURL)
 
 	jobID, err := submitGenerateJob(baseURL, apiToken, apiSchema, prompt, datasetName)
 	if err != nil {
 		sp.Stop(false, "Job submission failed")
-		return fmt.Errorf("submitting generation job: %v", err)
+		return fmt.Errorf("submitting generation job: %w", err)
 	}
 	sp.Stop(true, fmt.Sprintf("Job submitted: %s", jobID))
 
@@ -229,8 +194,8 @@ func runGenerate(c *cli.Context) error {
 	fmt.Println()
 	ui.Success("Generated dataset → %s", outputDir)
 	ui.Info("%d CSV file(s): %s", len(csvNames), strings.Join(csvNames, ", "))
-	ui.Info("Run 'seedmancer seed --id %s' to import locally,", datasetName)
-	ui.Info("or 'seedmancer sync --id %s' to upload.", datasetName)
+	ui.Info("Run 'seedmancer seed --dataset-id %s' to import locally,", datasetName)
+	ui.Info("or 'seedmancer sync --dataset-id %s' to upload.", datasetName)
 	return nil
 }
 
@@ -312,7 +277,10 @@ func submitGenerateJob(baseURL, token string, schema generateSchema, prompt, dat
 	}
 
 	if resp.StatusCode == http.StatusUnauthorized {
-		return "", fmt.Errorf("authentication failed — check your API token (--token / SEEDMANCER_API_TOKEN)")
+		return "", utils.ErrInvalidAPIToken
+	}
+	if resp.StatusCode == http.StatusPaymentRequired {
+		return "", formatLimitError(respBytes)
 	}
 	if resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("API error (HTTP %d): %s", resp.StatusCode, string(respBytes))
@@ -443,33 +411,3 @@ func downloadFile(fileURL, destPath string) error {
 	return nil
 }
 
-// ─── Token helpers ────────────────────────────────────────────────────────────
-
-func resolveAndStoreAPIToken(flagValue string) (string, error) {
-	if flagValue != "" {
-		if err := utils.SaveAPIToken(flagValue); err != nil {
-			ui.Warn("Could not persist API token: %v", err)
-		}
-		return flagValue, nil
-	}
-
-	homeDir, err := os.UserHomeDir()
-	if err == nil {
-		globalCfg, cfgErr := utils.LoadConfig(filepath.Join(homeDir, ".seedmancer", "config.yaml"))
-		if cfgErr == nil && globalCfg.APIToken != "" {
-			return globalCfg.APIToken, nil
-		}
-	}
-
-	if configPath, cfgErr := utils.FindConfigFile(); cfgErr == nil {
-		if cfg, loadErr := utils.LoadConfig(configPath); loadErr == nil && cfg.APIToken != "" {
-			return cfg.APIToken, nil
-		}
-	}
-
-	return "", fmt.Errorf(
-		"Seedmancer API token required.\n" +
-			"  Use --token flag or set SEEDMANCER_API_TOKEN environment variable.\n" +
-			"  Get your token at: https://seedmancer.dev/dashboard/settings",
-	)
-}

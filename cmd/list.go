@@ -52,9 +52,8 @@ func ListCommand() *cli.Command {
 		ArgsUsage: " ",
 		Flags: []cli.Flag{
 			&cli.StringFlag{
-				Name:    "token",
-				Usage:   "API token (falls back to SEEDMANCER_API_TOKEN)",
-				EnvVars: []string{"SEEDMANCER_API_TOKEN"},
+				Name:  "token",
+				Usage: "API token (falls back to ~/.seedmancer/credentials, then SEEDMANCER_API_TOKEN)",
 			},
 			&cli.BoolFlag{
 				Name:  "local",
@@ -111,15 +110,15 @@ func ListCommand() *cli.Command {
 			if remoteOnly {
 				token, tokenErr := utils.ResolveAPIToken(c.String("token"))
 				if tokenErr != nil {
-					if !jsonMode {
-						ui.Title("Remote")
-						ui.Warn("API token required to list remote schemas.")
-						ui.Info("Use --token flag or set SEEDMANCER_API_TOKEN environment variable.")
-					}
 					if jsonMode {
 						return outputJSON(out)
 					}
+					// "seedmancer list" (no flags) runs both sides; show local
+					// results + an inline login hint so the user keeps working
+					// offline instead of a hard failure.
 					if localOnly {
+						ui.Title("Remote")
+						ui.PrintLoginHint()
 						return nil
 					}
 					return tokenErr
@@ -215,7 +214,7 @@ func listRemoteEntries(token string) ([]listEntry, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusUnauthorized {
-		return nil, fmt.Errorf("unauthorized: please check your API token")
+		return nil, utils.ErrInvalidAPIToken
 	}
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)

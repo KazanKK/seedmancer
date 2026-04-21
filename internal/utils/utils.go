@@ -1,6 +1,7 @@
 package utils
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -8,6 +9,17 @@ import (
 	"strings"
 	"time"
 )
+
+// ErrMissingAPIToken is returned when no API token could be resolved from the
+// flag, env var, project config, or global config. Commands and the top-level
+// error handler use errors.Is to detect it so they can render the interactive
+// login guide (see ui.PrintLoginHint) instead of a plain error line.
+var ErrMissingAPIToken = errors.New("API token required")
+
+// ErrInvalidAPIToken is returned when the API rejects the configured token
+// (HTTP 401). It shares the login guide with ErrMissingAPIToken because the
+// remediation is identical from the user's perspective: sign in again.
+var ErrInvalidAPIToken = errors.New("API token invalid or expired")
 
 // FindConfigFile locates seedmancer.yaml in the current or parent directories,
 // falling back to ~/.seedmancer/config.yaml for global defaults.
@@ -78,6 +90,14 @@ func DatasetPath(projectRoot, storagePath, fpShort, datasetName string) string {
 	return filepath.Join(DatasetsDir(projectRoot, storagePath, fpShort), datasetName)
 }
 
+// SchemaMetaPath returns the on-disk path for a schema's local metadata file.
+// The file stores editable, user-facing metadata (e.g. display name) so the
+// fingerprint-derived folder name can remain stable while users attach a
+// human-friendly label. Missing file == no custom metadata.
+func SchemaMetaPath(schemaDir string) string {
+	return filepath.Join(schemaDir, "meta.yaml")
+}
+
 // ─── Schema discovery ───────────────────────────────────────────────────────
 
 // LocalDataset is one dataset folder under a schema, with its latest mtime so
@@ -94,6 +114,8 @@ type LocalSchema struct {
 	Fingerprint string
 	// 12-char prefix — always the folder name on disk.
 	FingerprintShort string
+	// Optional user-facing name from meta.yaml (empty when unset).
+	DisplayName string
 	// Path to the schema folder (…/schemas/<fp-short>).
 	Path string
 	// Path to schema.json inside the folder.
@@ -148,9 +170,11 @@ func ListLocalSchemas(projectRoot, storagePath string) ([]LocalSchema, error) {
 		if len(datasets) > 0 && datasets[0].UpdatedAt.After(updatedAt) {
 			updatedAt = datasets[0].UpdatedAt
 		}
+		meta, _ := LoadLocalSchemaMeta(schemaDir)
 		schemas = append(schemas, LocalSchema{
 			Fingerprint:      fp,
 			FingerprintShort: FingerprintShort(fp),
+			DisplayName:      strings.TrimSpace(meta.DisplayName),
 			Path:             schemaDir,
 			SchemaJSONPath:   schemaJSON,
 			Datasets:         datasets,
@@ -242,11 +266,12 @@ func HumanizeAgo(t time.Time) string {
 }
 
 // ResolveLocalSchema picks exactly one on-disk schema for a command to
-// operate on. Pass prefix == "" when the caller wants auto-detection; the
-// call errors if there is more than one schema folder. When prefix is
-// non-empty it's matched (case-insensitively) as a prefix of the folder
-// name (== fingerprint prefix). Ambiguity → error listing candidates.
-func ResolveLocalSchema(projectRoot, storagePath, prefix string) (LocalSchema, error) {
+// operate on. Pass ref == "" when the caller wants auto-detection; the
+// call errors if there is more than one schema folder. When ref is
+// non-empty it's matched (case-insensitively) as (a) a prefix of the
+// fingerprint / fingerprint-short, or (b) an exact match of the optional
+// meta.yaml display name. Ambiguity → error listing candidates.
+func ResolveLocalSchema(projectRoot, storagePath, ref string) (LocalSchema, error) {
 	schemas, err := ListLocalSchemas(projectRoot, storagePath)
 	if err != nil {
 		return LocalSchema{}, err
@@ -258,8 +283,8 @@ func ResolveLocalSchema(projectRoot, storagePath, prefix string) (LocalSchema, e
 		)
 	}
 
-	prefix = strings.ToLower(strings.TrimSpace(prefix))
-	if prefix == "" {
+	ref = strings.ToLower(strings.TrimSpace(ref))
+	if ref == "" {
 		if len(schemas) == 1 {
 			return schemas[0], nil
 		}
@@ -268,18 +293,19 @@ func ResolveLocalSchema(projectRoot, storagePath, prefix string) (LocalSchema, e
 
 	var hits []LocalSchema
 	for _, s := range schemas {
-		if strings.HasPrefix(strings.ToLower(s.FingerprintShort), prefix) ||
-			strings.HasPrefix(strings.ToLower(s.Fingerprint), prefix) {
+		if strings.HasPrefix(strings.ToLower(s.FingerprintShort), ref) ||
+			strings.HasPrefix(strings.ToLower(s.Fingerprint), ref) ||
+			(s.DisplayName != "" && strings.EqualFold(s.DisplayName, ref)) {
 			hits = append(hits, s)
 		}
 	}
 	switch len(hits) {
 	case 0:
-		return LocalSchema{}, fmt.Errorf("no schema matching prefix %q (available: %s)", prefix, formatSchemaList(schemas))
+		return LocalSchema{}, fmt.Errorf("no schema matching %q (available: %s)", ref, formatSchemaList(schemas))
 	case 1:
 		return hits[0], nil
 	default:
-		return LocalSchema{}, ambiguousSchemaError(hits, prefix)
+		return LocalSchema{}, ambiguousSchemaError(hits, ref)
 	}
 }
 
@@ -341,7 +367,7 @@ func FindLocalDataset(projectRoot, storagePath, schemaPrefix, datasetName string
 		return hits[0], filepath.Join(hits[0].Path, "datasets", datasetName), nil
 	default:
 		return LocalSchema{}, "", fmt.Errorf(
-			"dataset name %q exists under multiple schemas (%s) — pass --schema <fp-prefix> to pick one",
+			"dataset name %q exists under multiple schemas (%s) — rename one so the dataset ids are unique",
 			datasetName, formatSchemaList(hits),
 		)
 	}
@@ -377,6 +403,17 @@ func SchemaFiles(schemaDir string) ([]string, error) {
 	return files, nil
 }
 
+// IsSchemaSidecarName reports whether the given filename is a schema-level
+// file (the per-schema JSON or a function / trigger SQL sidecar) rather than
+// a dataset payload. The same rule is shared by export, fetch, and sync so
+// files end up in the right folder regardless of entry point.
+func IsSchemaSidecarName(name string) bool {
+	if name == "schema.json" {
+		return true
+	}
+	return strings.HasSuffix(name, "_func.sql") || strings.HasSuffix(name, "_trigger.sql")
+}
+
 // DatasetFiles returns the CSV/JSON payload files inside a dataset folder.
 // Subdirectories are skipped; the caller doesn't care about them.
 func DatasetFiles(datasetDir string) ([]string, error) {
@@ -398,16 +435,16 @@ func DatasetFiles(datasetDir string) ([]string, error) {
 	return files, nil
 }
 
-func ambiguousSchemaError(schemas []LocalSchema, prefix string) error {
-	if prefix == "" {
+func ambiguousSchemaError(schemas []LocalSchema, ref string) error {
+	if ref == "" {
 		return fmt.Errorf(
-			"multiple schemas found — pass --schema <fp-prefix> to pick one (available: %s)",
+			"multiple schemas found — pass --schema-id <fp-short-or-name> to pick one (available: %s)",
 			formatSchemaList(schemas),
 		)
 	}
 	return fmt.Errorf(
-		"prefix %q matches multiple schemas — use a longer prefix (matches: %s)",
-		prefix, formatSchemaList(schemas),
+		"%q matches multiple schemas — use a longer fingerprint prefix (matches: %s)",
+		ref, formatSchemaList(schemas),
 	)
 }
 
@@ -441,9 +478,34 @@ func BearerAPIToken(token string) string {
 }
 
 // ResolveAPIToken returns a token from the first available source.
+//
+// Resolution order (highest priority first):
+//  1. explicit --token CLI flag          (always wins)
+//  2. ~/.seedmancer/credentials          (written by `seedmancer login`)
+//  3. SEEDMANCER_API_TOKEN env var       (for CI and ad-hoc use)
+//  4. legacy api_token: in seedmancer.yaml / ~/.seedmancer/config.yaml
+//     (read-only fallback so pre-credentials-file installs keep working)
+//
+// The credentials file intentionally ranks above the env var: otherwise a
+// stale `export SEEDMANCER_API_TOKEN=...` silently shadows every
+// `seedmancer login`, which is confusing and was the source of a real
+// support report. CI pipelines are unaffected because they don't have
+// a credentials file to begin with.
+//
+// Note: callers must NOT wire SEEDMANCER_API_TOKEN through urfave/cli's
+// flag EnvVars — that would let the env var sneak in as a "flag value"
+// ahead of the credentials file and defeat the whole ordering.
 func ResolveAPIToken(flagValue string) (string, error) {
 	if flagValue != "" {
 		return flagValue, nil
+	}
+
+	if tok, err := LoadAPICredentials(); err == nil && tok != "" {
+		return tok, nil
+	}
+
+	if tok := strings.TrimSpace(os.Getenv("SEEDMANCER_API_TOKEN")); tok != "" {
+		return tok, nil
 	}
 
 	if configPath, err := FindConfigFile(); err == nil {
@@ -452,17 +514,5 @@ func ResolveAPIToken(flagValue string) (string, error) {
 		}
 	}
 
-	homeDir, err := os.UserHomeDir()
-	if err == nil {
-		globalCfg, cfgErr := LoadConfig(filepath.Join(homeDir, ".seedmancer", "config.yaml"))
-		if cfgErr == nil && globalCfg.APIToken != "" {
-			return globalCfg.APIToken, nil
-		}
-	}
-
-	return "", fmt.Errorf(
-		"API token required.\n" +
-			"  Use --token flag or set SEEDMANCER_API_TOKEN environment variable.\n" +
-			"  Get your token at: https://seedmancer.dev/dashboard/settings",
-	)
+	return "", ErrMissingAPIToken
 }

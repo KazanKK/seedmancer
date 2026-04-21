@@ -22,34 +22,27 @@ import (
 //
 // The server identifies the target schema from the fingerprint of the
 // zip's `schema.json`, so we never send a schema name — it's fully
-// derived. When the user's local `.seedmancer/` holds multiple schemas
-// each with a dataset of the same name, `--schema <fp-prefix>` is
-// required to disambiguate.
+// derived. Dataset ids must be unique across local schemas; if the same
+// dataset id exists under two schemas, rename one via `seedmancer schemas
+// rename` first.
 func SyncCommand() *cli.Command {
 	return &cli.Command{
 		Name:  "sync",
 		Usage: "Upload a single local dataset to the cloud",
 		Description: "Zips the schema sidecars + CSVs for one local dataset and uploads\n" +
 			"them to your Seedmancer cloud account. The target schema is derived\n" +
-			"from schema.json's fingerprint — no need to pass a schema id.\n\n" +
-			"When the same dataset id exists under multiple local schemas,\n" +
-			"pass --schema / -s <fp-prefix> to disambiguate.",
+			"from schema.json's fingerprint — no need to pass a schema id.",
 		ArgsUsage: " ",
 		Flags: []cli.Flag{
 			&cli.StringFlag{
-				Name:     "id",
+				Name:     "dataset-id",
+				Aliases:  []string{"d", "id"},
 				Required: true,
 				Usage:    "(required) Dataset id to upload (the name given at export/generate time)",
 			},
 			&cli.StringFlag{
-				Name:    "schema",
-				Aliases: []string{"s"},
-				Usage:   "Schema fingerprint prefix — only needed when the same dataset id exists under multiple local schemas",
-			},
-			&cli.StringFlag{
-				Name:    "token",
-				Usage:   "API token (falls back to SEEDMANCER_API_TOKEN)",
-				EnvVars: []string{"SEEDMANCER_API_TOKEN"},
+				Name:  "token",
+				Usage: "API token (falls back to ~/.seedmancer/credentials, then SEEDMANCER_API_TOKEN)",
 			},
 		},
 		Action: func(c *cli.Context) error {
@@ -68,10 +61,9 @@ func SyncCommand() *cli.Command {
 				return err
 			}
 
-			datasetName := strings.TrimSpace(c.String("id"))
-			schemaPrefix := strings.TrimSpace(c.String("schema"))
+			datasetName := strings.TrimSpace(c.String("dataset-id"))
 
-			schema, datasetDir, err := utils.FindLocalDataset(projectRoot, cfg.StoragePath, schemaPrefix, datasetName)
+			schema, datasetDir, err := utils.FindLocalDataset(projectRoot, cfg.StoragePath, "", datasetName)
 			if err != nil {
 				return err
 			}
@@ -134,6 +126,14 @@ func syncOne(schema utils.LocalSchema, datasetDir, datasetName, baseURL, token s
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == http.StatusUnauthorized {
+		sp.Stop(false, "Upload failed")
+		return utils.ErrInvalidAPIToken
+	}
+	if resp.StatusCode == http.StatusPaymentRequired {
+		sp.Stop(false, "Upload blocked")
+		return formatLimitError(body)
+	}
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		sp.Stop(false, "Upload failed")
 		return fmt.Errorf("server responded %s: %s", resp.Status, string(body))

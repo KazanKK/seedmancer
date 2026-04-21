@@ -3,9 +3,7 @@ package utils
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 
-	"github.com/KazanKK/seedmancer/internal/ui"
 	"gopkg.in/yaml.v3"
 )
 
@@ -14,6 +12,11 @@ import (
 // In the pure schema-first model a project no longer pins itself to a named
 // schema — the schema is derived from the fingerprint of the dumped
 // schema.json every time. All we persist is storage/API plumbing.
+//
+// APIToken is kept on the struct for read-only backward compatibility: older
+// versions wrote `api_token:` here, and we still accept it so existing
+// installs don't get signed out. New writes go to ~/.seedmancer/credentials
+// (see credentials.go); `seedmancer login` no longer touches config files.
 type Config struct {
 	StoragePath string `yaml:"storage_path"`
 	DatabaseURL string `yaml:"database_url,omitempty"`
@@ -34,29 +37,51 @@ func LoadConfig(configPath string) (Config, error) {
 	return cfg, nil
 }
 
-// SaveAPIToken persists the Seedmancer dashboard API token to ~/.seedmancer/config.yaml.
-func SaveAPIToken(token string) error {
-	homeDir, err := os.UserHomeDir()
+// LocalSchemaMeta is the user-editable sidecar that sits next to schema.json.
+// We intentionally keep it tiny so it can grow over time (description, tags,
+// etc.) without breaking readers: any unknown field is ignored by
+// yaml.Unmarshal.
+type LocalSchemaMeta struct {
+	DisplayName string `yaml:"display_name,omitempty"`
+}
+
+// LoadLocalSchemaMeta reads a schema's meta.yaml sidecar. A missing file is
+// not an error — callers get a zero-value LocalSchemaMeta so they can render
+// a sensible default (usually the fingerprint short id).
+func LoadLocalSchemaMeta(schemaDir string) (LocalSchemaMeta, error) {
+	path := SchemaMetaPath(schemaDir)
+	data, err := os.ReadFile(path)
 	if err != nil {
-		return fmt.Errorf("getting home directory: %v", err)
+		if os.IsNotExist(err) {
+			return LocalSchemaMeta{}, nil
+		}
+		return LocalSchemaMeta{}, fmt.Errorf("reading %s: %v", path, err)
 	}
-	configDir := filepath.Join(homeDir, ".seedmancer")
-	if err := os.MkdirAll(configDir, 0700); err != nil {
-		return fmt.Errorf("creating config directory: %v", err)
+	var meta LocalSchemaMeta
+	if err := yaml.Unmarshal(data, &meta); err != nil {
+		return LocalSchemaMeta{}, fmt.Errorf("parsing %s: %v", path, err)
 	}
-	configPath := filepath.Join(configDir, "config.yaml")
-	var cfg Config
-	if data, readErr := os.ReadFile(configPath); readErr == nil {
-		_ = yaml.Unmarshal(data, &cfg)
+	return meta, nil
+}
+
+// SaveLocalSchemaMeta writes meta.yaml next to schema.json. When meta is the
+// zero value, the sidecar is deleted so the on-disk layout stays tidy for
+// users who clear a display name.
+func SaveLocalSchemaMeta(schemaDir string, meta LocalSchemaMeta) error {
+	path := SchemaMetaPath(schemaDir)
+	if meta == (LocalSchemaMeta{}) {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("removing %s: %v", path, err)
+		}
+		return nil
 	}
-	cfg.APIToken = token
-	data, err := yaml.Marshal(&cfg)
+	data, err := yaml.Marshal(&meta)
 	if err != nil {
-		return fmt.Errorf("marshalling config: %v", err)
+		return fmt.Errorf("marshalling meta: %v", err)
 	}
-	if err := os.WriteFile(configPath, data, 0600); err != nil {
-		return fmt.Errorf("writing config: %v", err)
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		return fmt.Errorf("writing %s: %v", path, err)
 	}
-	ui.Debug("API token saved to %s", configPath)
 	return nil
 }
+

@@ -206,8 +206,8 @@ func FingerprintSchemaFile(path string) (string, error) {
 }
 
 // FingerprintShortLen is the number of hex chars used as a short, human-facing
-// id for a schema — folder names on disk, dashboard fallback label, CLI
-// --schema disambiguator prefix.
+// id for a schema — folder names on disk, dashboard fallback label, and the
+// value accepted by `--schema-id` in the CLI.
 const FingerprintShortLen = 12
 
 // FingerprintShort returns the first FingerprintShortLen hex characters of a

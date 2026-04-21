@@ -81,6 +81,25 @@ func KeyValue(key, value string) {
 	fmt.Fprintf(os.Stderr, "  %s %s\n", color(dim, key), value)
 }
 
+// PrintLoginHint renders the "how to sign in" guide shown whenever a command
+// cannot resolve an API token. Keeping this in one place guarantees every
+// command (generate, sync, fetch, list, schemas) shows the exact same copy
+// and highlights `seedmancer login` as the recommended path.
+func PrintLoginHint() {
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintf(os.Stderr, "%s %s\n", color(red, "✗"), color(bold, "You're not signed in to Seedmancer."))
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintf(os.Stderr, "  %s\n", color(dim, "Sign in with your browser (recommended):"))
+	fmt.Fprintf(os.Stderr, "    %s\n", color(green, "seedmancer login"))
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintf(os.Stderr, "  %s\n", color(dim, "Or provide a token manually:"))
+	fmt.Fprintf(os.Stderr, "    %s\n", color(cyan, "--token <API_TOKEN>"))
+	fmt.Fprintf(os.Stderr, "    %s\n", color(cyan, "export SEEDMANCER_API_TOKEN=<API_TOKEN>"))
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintf(os.Stderr, "  %s %s\n", color(dim, "Manage tokens:"), "https://seedmancer.dev/dashboard/settings")
+	fmt.Fprintln(os.Stderr)
+}
+
 // IsTerminal returns true when stderr is a TTY (interactive session).
 func IsTerminal() bool { return !noColor }
 

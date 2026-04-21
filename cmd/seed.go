@@ -33,14 +33,10 @@ func SeedCommand() *cli.Command {
 		ArgsUsage: " ",
 		Flags: []cli.Flag{
 			&cli.StringFlag{
-				Name:     "id",
+				Name:     "dataset-id",
+				Aliases:  []string{"d", "id"},
 				Required: true,
 				Usage:    "(required) Dataset id to restore (the name given at export/generate time)",
-			},
-			&cli.StringFlag{
-				Name:    "schema",
-				Aliases: []string{"s"},
-				Usage:   "Schema fingerprint prefix — only needed when the same dataset id exists under multiple local schemas",
 			},
 			&cli.StringFlag{
 				Name:    "db-url",
@@ -64,10 +60,9 @@ func SeedCommand() *cli.Command {
 				return fmt.Errorf("database URL required: set `database_url:` in seedmancer.yaml, or use --db-url / SEEDMANCER_DATABASE_URL")
 			}
 
-			datasetName := strings.TrimSpace(c.String("id"))
-			schemaPrefix := strings.TrimSpace(c.String("schema"))
+			datasetName := strings.TrimSpace(c.String("dataset-id"))
 
-			schema, datasetDir, err := utils.FindLocalDataset(projectRoot, cfg.StoragePath, schemaPrefix, datasetName)
+			schema, datasetDir, err := utils.FindLocalDataset(projectRoot, cfg.StoragePath, "", datasetName)
 			if err != nil {
 				return err
 			}

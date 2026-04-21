@@ -1,6 +1,7 @@
 package utils
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -112,6 +113,9 @@ func TestResolveAPIToken_fromProjectConfig(t *testing.T) {
 		t.Fatalf("chdir: %v", err)
 	}
 	t.Setenv("HOME", dir)
+	// Unset any inherited SEEDMANCER_API_TOKEN so the project config is
+	// actually the lowest-priority source that contains a value.
+	t.Setenv("SEEDMANCER_API_TOKEN", "")
 	writeFile(t, filepath.Join(dir, "seedmancer.yaml"), "storage_path: .seedmancer\napi_token: cfg-tok\n")
 
 	got, err := ResolveAPIToken("")
@@ -131,10 +135,11 @@ func TestResolveAPIToken_errorWhenMissing(t *testing.T) {
 		t.Fatalf("chdir: %v", err)
 	}
 	t.Setenv("HOME", dir)
+	t.Setenv("SEEDMANCER_API_TOKEN", "")
 
 	_, err := ResolveAPIToken("")
-	if err == nil || !strings.Contains(err.Error(), "API token required") {
-		t.Fatalf("want API-token-required error, got: %v", err)
+	if err == nil || !errors.Is(err, ErrMissingAPIToken) {
+		t.Fatalf("want ErrMissingAPIToken, got: %v", err)
 	}
 }
 
@@ -221,6 +226,60 @@ func TestResolveLocalSchema_prefixMatchesFolderByFingerprint(t *testing.T) {
 	}
 	if got.FingerprintShort != schema.FingerprintShort {
 		t.Fatalf("got %q want %q", got.FingerprintShort, schema.FingerprintShort)
+	}
+}
+
+func TestResolveLocalSchema_matchesByDisplayName(t *testing.T) {
+	dir := t.TempDir()
+	makeSchema(t, dir, "aaaa")
+	schema, err := ResolveLocalSchema(dir, ".seedmancer", "")
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if err := SaveLocalSchemaMeta(schema.Path, LocalSchemaMeta{DisplayName: "MyNice"}); err != nil {
+		t.Fatalf("SaveLocalSchemaMeta: %v", err)
+	}
+
+	got, err := ResolveLocalSchema(dir, ".seedmancer", "mynice")
+	if err != nil {
+		t.Fatalf("resolve by display name: %v", err)
+	}
+	if got.FingerprintShort != schema.FingerprintShort {
+		t.Fatalf("got %q want %q", got.FingerprintShort, schema.FingerprintShort)
+	}
+}
+
+func TestLocalSchemaMeta_saveReadDelete(t *testing.T) {
+	dir := t.TempDir()
+	makeSchema(t, dir, "aaaa")
+	schemas, err := ListLocalSchemas(dir, ".seedmancer")
+	if err != nil || len(schemas) != 1 {
+		t.Fatalf("ListLocalSchemas: len=%d err=%v", len(schemas), err)
+	}
+	schemaDir := schemas[0].Path
+
+	if err := SaveLocalSchemaMeta(schemaDir, LocalSchemaMeta{DisplayName: "stage"}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	meta, err := LoadLocalSchemaMeta(schemaDir)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if meta.DisplayName != "stage" {
+		t.Fatalf("display_name = %q, want %q", meta.DisplayName, "stage")
+	}
+
+	// Saving the zero value should delete the sidecar so the folder stays
+	// tidy for users that clear a label.
+	if err := SaveLocalSchemaMeta(schemaDir, LocalSchemaMeta{}); err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	if _, err := os.Stat(SchemaMetaPath(schemaDir)); !os.IsNotExist(err) {
+		t.Fatalf("meta.yaml should have been removed, stat err=%v", err)
+	}
+	meta, err = LoadLocalSchemaMeta(schemaDir)
+	if err != nil || meta.DisplayName != "" {
+		t.Fatalf("after clear: meta=%+v err=%v", meta, err)
 	}
 }
 

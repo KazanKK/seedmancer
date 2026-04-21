@@ -1,10 +1,12 @@
 package main
 
 import (
+	"errors"
 	"os"
 
 	"github.com/KazanKK/seedmancer/cmd"
 	"github.com/KazanKK/seedmancer/internal/ui"
+	utils "github.com/KazanKK/seedmancer/internal/utils"
 	"github.com/urfave/cli/v2"
 )
 
@@ -40,6 +42,10 @@ func main() {
 	// order:  "Get started" (G)  <  "Local"  (L)  <  "Remote"  (R).
 	initCmd := cmd.InitCommand()
 	initCmd.Category = "Get started"
+	loginCmd := cmd.LoginCommand()
+	loginCmd.Category = "Get started"
+	statusCmd := cmd.StatusCommand()
+	statusCmd.Category = "Get started"
 
 	exportCmd := cmd.ExportCommand()
 	exportCmd.Category = "Local"
@@ -84,6 +90,8 @@ func main() {
 		},
 		Commands: []*cli.Command{
 			initCmd,
+			loginCmd,
+			statusCmd,
 			exportCmd,
 			generateCmd,
 			seedCmd,
@@ -95,7 +103,15 @@ func main() {
 	}
 
 	if err := app.Run(os.Args); err != nil {
-		ui.Error("%v", err)
+		switch {
+		case errors.Is(err, utils.ErrMissingAPIToken):
+			ui.PrintLoginHint()
+		case errors.Is(err, utils.ErrInvalidAPIToken):
+			ui.Error("%v — sign in again.", err)
+			ui.PrintLoginHint()
+		default:
+			ui.Error("%v", err)
+		}
 		os.Exit(1)
 	}
 }

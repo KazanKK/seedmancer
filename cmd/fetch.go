@@ -63,19 +63,14 @@ func FetchCommand() *cli.Command {
 		ArgsUsage: " ",
 		Flags: []cli.Flag{
 			&cli.StringFlag{
-				Name:     "id",
+				Name:     "dataset-id",
+				Aliases:  []string{"d", "id"},
 				Required: true,
 				Usage:    "(required) Dataset id to download",
 			},
 			&cli.StringFlag{
-				Name:    "schema",
-				Aliases: []string{"s"},
-				Usage:   "Schema fingerprint prefix — only needed when the same dataset id exists under multiple remote schemas",
-			},
-			&cli.StringFlag{
-				Name:    "token",
-				Usage:   "API token (falls back to SEEDMANCER_API_TOKEN)",
-				EnvVars: []string{"SEEDMANCER_API_TOKEN"},
+				Name:  "token",
+				Usage: "API token (falls back to ~/.seedmancer/credentials, then SEEDMANCER_API_TOKEN)",
 			},
 			&cli.StringFlag{
 				Name:    "output",
@@ -89,8 +84,7 @@ func FetchCommand() *cli.Command {
 			},
 		},
 		Action: func(c *cli.Context) error {
-			datasetName := strings.TrimSpace(c.String("id"))
-			schemaPrefix := strings.TrimSpace(c.String("schema"))
+			datasetName := strings.TrimSpace(c.String("dataset-id"))
 			outputFlag := strings.TrimSpace(c.String("output"))
 			jsonMode := c.Bool("json")
 
@@ -100,10 +94,10 @@ func FetchCommand() *cli.Command {
 			}
 			baseURL := utils.GetBaseURL()
 
-			// Ask the server for every dataset matching the name (and optional
-			// schema prefix filter). This gives us both the dataset id for
-			// downloading and the schema fingerprint for the local folder.
-			match, err := findRemoteDataset(baseURL, token, datasetName, schemaPrefix)
+			// Ask the server for every dataset matching the name. This gives
+			// us both the dataset id for downloading and the schema
+			// fingerprint for the local folder.
+			match, err := findRemoteDataset(baseURL, token, datasetName, "")
 			if err != nil {
 				return err
 			}
@@ -135,6 +129,24 @@ func FetchCommand() *cli.Command {
 			if err != nil {
 				sp.Stop(false, "Fetch failed")
 				return err
+			}
+
+			// The server zips schema sidecars (schema.json + *_func.sql +
+			// *_trigger.sql) alongside dataset CSVs, but our on-disk layout
+			// keeps sidecars one level up so multiple datasets share one
+			// schema folder. When using the default layout, split them now
+			// so `list --local` recognises the schema and `seed` can find
+			// the sidecars without rebuilding a merge-dir every time.
+			// Custom --output keeps everything flat; the user asked for
+			// literally that directory.
+			if outputFlag == "" {
+				schemaDir := filepath.Dir(filepath.Dir(outputDir))
+				lifted, err := liftSchemaSidecars(outputDir, schemaDir)
+				if err != nil {
+					sp.Stop(false, "Fetch failed")
+					return fmt.Errorf("placing schema files: %v", err)
+				}
+				ui.Debug("Lifted %d schema sidecar(s) into %s", lifted, schemaDir)
 			}
 			sp.Stop(true, fmt.Sprintf("Fetched %s → %s (%d files)", datasetName, outputDir, len(extracted)))
 
@@ -190,7 +202,7 @@ func findRemoteDataset(baseURL, token, datasetName, schemaPrefix string) (datase
 	}
 
 	if resp.StatusCode == http.StatusUnauthorized {
-		return datasetAPI{}, fmt.Errorf("unauthorized: please check your API token")
+		return datasetAPI{}, utils.ErrInvalidAPIToken
 	}
 	if resp.StatusCode != http.StatusOK {
 		return datasetAPI{}, fmt.Errorf("API request failed: %s - %s", resp.Status, string(body))
@@ -230,7 +242,7 @@ func findRemoteDataset(baseURL, token, datasetName, schemaPrefix string) (datase
 			}
 		}
 		return datasetAPI{}, fmt.Errorf(
-			"dataset name %q exists under multiple schemas (%s) — pass --schema <fp-prefix> to pick one",
+			"dataset name %q exists under multiple schemas (%s) — rename the duplicates in the dashboard so ids are unique",
 			datasetName, strings.Join(fps, ", "),
 		)
 	}
@@ -316,6 +328,46 @@ func getDownloadURL(baseURL, token, datasetID string) (string, error) {
 		return "", fmt.Errorf("server returned empty download URL")
 	}
 	return result.URL, nil
+}
+
+// liftSchemaSidecars moves schema-level files (schema.json plus any
+// *_func.sql / *_trigger.sql SQL sidecars) from a freshly-extracted dataset
+// folder up into the shared schema folder. Two datasets that share a schema
+// produce byte-identical sidecars (fingerprint is derived from schema.json),
+// so we overwrite unconditionally rather than sniffing for changes.
+// Returns the number of files moved.
+func liftSchemaSidecars(datasetDir, schemaDir string) (int, error) {
+	entries, err := os.ReadDir(datasetDir)
+	if err != nil {
+		return 0, fmt.Errorf("reading %s: %v", datasetDir, err)
+	}
+	if err := os.MkdirAll(schemaDir, 0755); err != nil {
+		return 0, fmt.Errorf("creating %s: %v", schemaDir, err)
+	}
+	var moved int
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if !utils.IsSchemaSidecarName(name) {
+			continue
+		}
+		src := filepath.Join(datasetDir, name)
+		dst := filepath.Join(schemaDir, name)
+		// os.Rename is atomic on the same FS; fall back to copy+remove for
+		// cross-device (e.g. tmpfs vs. ext4) edge cases.
+		if err := os.Rename(src, dst); err != nil {
+			if err := copyFile(src, dst); err != nil {
+				return moved, err
+			}
+			if err := os.Remove(src); err != nil {
+				return moved, err
+			}
+		}
+		moved++
+	}
+	return moved, nil
 }
 
 func downloadAndExtractZip(downloadURL, outputDir string) ([]string, error) {

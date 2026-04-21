@@ -3,6 +3,7 @@ package cmd
 import (
 	"archive/zip"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -147,8 +148,62 @@ func TestFindRemoteDataset_unauthorizedError(t *testing.T) {
 	defer srv.Close()
 
 	_, err := findRemoteDataset(srv.URL, "bad", "ds", "")
-	if err == nil || !strings.Contains(err.Error(), "unauthorized") {
-		t.Fatalf("want unauthorized error, got: %v", err)
+	if err == nil || !errors.Is(err, utils.ErrInvalidAPIToken) {
+		t.Fatalf("want ErrInvalidAPIToken, got: %v", err)
+	}
+}
+
+func TestLiftSchemaSidecars_movesSchemaAndSQLOnly(t *testing.T) {
+	root := t.TempDir()
+	schemaDir := filepath.Join(root, "schemas", "abcd")
+	datasetDir := filepath.Join(schemaDir, "datasets", "basic")
+
+	writeFile(t, filepath.Join(datasetDir, "schema.json"), `{"tables":[]}`)
+	writeFile(t, filepath.Join(datasetDir, "users_updated_at_trigger.sql"), "-- trigger")
+	writeFile(t, filepath.Join(datasetDir, "do_stuff_func.sql"), "-- func")
+	writeFile(t, filepath.Join(datasetDir, "users.csv"), "id\n1\n")
+	writeFile(t, filepath.Join(datasetDir, "orders.json"), `[]`)
+
+	moved, err := liftSchemaSidecars(datasetDir, schemaDir)
+	if err != nil {
+		t.Fatalf("liftSchemaSidecars: %v", err)
+	}
+	if moved != 3 {
+		t.Fatalf("moved = %d, want 3", moved)
+	}
+
+	for _, n := range []string{"schema.json", "users_updated_at_trigger.sql", "do_stuff_func.sql"} {
+		if _, err := os.Stat(filepath.Join(schemaDir, n)); err != nil {
+			t.Errorf("expected %s in schemaDir: %v", n, err)
+		}
+		if _, err := os.Stat(filepath.Join(datasetDir, n)); !os.IsNotExist(err) {
+			t.Errorf("%s should be gone from datasetDir (stat err=%v)", n, err)
+		}
+	}
+	for _, n := range []string{"users.csv", "orders.json"} {
+		if _, err := os.Stat(filepath.Join(datasetDir, n)); err != nil {
+			t.Errorf("dataset payload %s should stay put: %v", n, err)
+		}
+	}
+}
+
+func TestLiftSchemaSidecars_overwritesExistingSidecar(t *testing.T) {
+	root := t.TempDir()
+	schemaDir := filepath.Join(root, "schemas", "abcd")
+	datasetDir := filepath.Join(schemaDir, "datasets", "basic")
+
+	writeFile(t, filepath.Join(schemaDir, "schema.json"), `{"stale":true}`)
+	writeFile(t, filepath.Join(datasetDir, "schema.json"), `{"fresh":true}`)
+
+	if _, err := liftSchemaSidecars(datasetDir, schemaDir); err != nil {
+		t.Fatalf("liftSchemaSidecars: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(schemaDir, "schema.json"))
+	if err != nil {
+		t.Fatalf("read schema.json: %v", err)
+	}
+	if !strings.Contains(string(got), "fresh") {
+		t.Fatalf("schema.json not overwritten: %q", got)
 	}
 }
 
