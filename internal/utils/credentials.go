@@ -59,8 +59,8 @@ func SaveAPICredentials(token string) error {
 }
 
 // ClearAPICredentials removes the credentials file if it exists. Used by
-// `seedmancer logout` (and test cleanup). Silently succeeds when the file is
-// already absent so callers can treat logout as idempotent.
+// `seedmancer logout`. Silently succeeds when the file is already absent so
+// callers can treat logout as idempotent.
 func ClearAPICredentials() error {
 	path, err := CredentialsPath()
 	if err != nil {

@@ -144,7 +144,7 @@ func runGenerate(c *cli.Context) error {
 
 	schemaBytes, err := os.ReadFile(sourceSchema.SchemaJSONPath)
 	if err != nil {
-		return fmt.Errorf("reading %s: %v\nRun 'seedmancer export' first to create schema.json.", sourceSchema.SchemaJSONPath, err)
+		return fmt.Errorf("reading %s: %v — run 'seedmancer export' first to create schema.json", sourceSchema.SchemaJSONPath, err)
 	}
 	ui.Info("Using schema: %s  (%s)", sourceSchema.FingerprintShort, sourceSchema.SchemaJSONPath)
 

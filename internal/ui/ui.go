@@ -38,7 +38,6 @@ func color(code, text string) string {
 }
 
 func SetDebug(enabled bool) { debugMode = enabled }
-func IsDebug() bool         { return debugMode }
 
 func Step(format string, args ...interface{}) {
 	msg := fmt.Sprintf(format, args...)
@@ -99,9 +98,6 @@ func PrintLoginHint() {
 	fmt.Fprintf(os.Stderr, "  %s %s\n", color(dim, "Manage tokens:"), "https://seedmancer.dev/dashboard/settings")
 	fmt.Fprintln(os.Stderr)
 }
-
-// IsTerminal returns true when stderr is a TTY (interactive session).
-func IsTerminal() bool { return !noColor }
 
 // Confirm prompts the user with a yes/no question. Returns true for y/Y/yes.
 // In non-TTY environments, returns the defaultVal without prompting.

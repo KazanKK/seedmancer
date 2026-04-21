@@ -44,6 +44,8 @@ func main() {
 	initCmd.Category = "Get started"
 	loginCmd := cmd.LoginCommand()
 	loginCmd.Category = "Get started"
+	logoutCmd := cmd.LogoutCommand()
+	logoutCmd.Category = "Get started"
 	statusCmd := cmd.StatusCommand()
 	statusCmd.Category = "Get started"
 
@@ -91,6 +93,7 @@ func main() {
 		Commands: []*cli.Command{
 			initCmd,
 			loginCmd,
+			logoutCmd,
 			statusCmd,
 			exportCmd,
 			generateCmd,
