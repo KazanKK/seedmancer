@@ -240,6 +240,137 @@ Written by `seedmancer login` (mode 0600, 0700 on the parent directory). Contain
 
 The credentials file intentionally wins over the env var so `seedmancer login` always "sticks" even when a stale `SEEDMANCER_API_TOKEN` is exported in your shell.
 
+## Use with Playwright (reset your DB before tests)
+
+Seedmancer fits naturally into a Playwright API/e2e suite: every run starts from a deterministic, version-controlled snapshot, no hand-written fixtures.
+
+**Prerequisites**
+
+- `seedmancer` on `PATH` ([install](#installation))
+- A `seedmancer.yaml` with a local env pointing at your test DB (`seedmancer init`)
+- At least one dataset committed to the repo — typically created with `seedmancer export --id api-test` after hand-seeding whatever rows your tests need (e.g. a test user + API token)
+
+**1. Playwright config**
+
+```ts
+// playwright.config.ts
+import { defineConfig } from "@playwright/test"
+import * as path from "node:path"
+
+export default defineConfig({
+  globalSetup: path.resolve(__dirname, "tests/global-setup.ts"),
+  // ...
+})
+```
+
+**2. Global setup — call `seedmancer seed` once per run**
+
+```ts
+// tests/global-setup.ts
+import { spawnSync } from "node:child_process"
+import * as path from "node:path"
+
+export default async function globalSetup() {
+  if (process.env.SEEDMANCER_RESET_DATABASE === "0") {
+    console.log("[playwright] skipping DB reset")
+    return
+  }
+
+  // Preflight — surface a readable error if the CLI isn't installed.
+  const probe = spawnSync("seedmancer", ["--help"], { stdio: "ignore" })
+  if (probe.error && (probe.error as NodeJS.ErrnoException).code === "ENOENT") {
+    throw new Error("`seedmancer` CLI not found on PATH — see README for install")
+  }
+
+  const result = spawnSync(
+    "seedmancer",
+    ["seed", "--id", "api-test", "--yes"],
+    {
+      cwd: path.resolve(__dirname, ".."), // wherever seedmancer.yaml lives
+      stdio: "inherit",
+    },
+  )
+  if (result.status !== 0) {
+    throw new Error(`seedmancer seed exited with status ${result.status}`)
+  }
+}
+```
+
+**3. `package.json` scripts**
+
+```json
+{
+  "scripts": {
+    "test": "playwright test",
+    "test:no-reset": "SEEDMANCER_RESET_DATABASE=0 playwright test"
+  }
+}
+```
+
+Now `npm test` resets the DB to the `api-test` dataset and runs the whole suite. When iterating locally and you trust the DB state, `npm run test:no-reset` skips the reset for a ~40ms speedup.
+
+For a full working example, see [Seedmancer-web/next](https://github.com/KazanKK/Seedmancer-web/tree/main/next) — specifically `playwright.config.ts`, `tests/global-setup.ts`, and the `.seedmancer/schemas/.../datasets/api-test/` CSVs.
+
+## Use with AI agents (MCP server)
+
+Seedmancer ships a built-in [Model Context Protocol](https://modelcontextprotocol.io) server so AI coding tools (Cursor, Claude Desktop, Continue, Zed, …) can drive it through typed tool calls instead of shelling out and parsing stdout.
+
+Run it stand-alone:
+
+```sh
+# stdio (default) — how Cursor / Claude Desktop spawn local MCP servers
+seedmancer mcp
+
+# streamable-HTTP, for hosted/multi-tenant setups
+seedmancer mcp --transport http --addr :7801
+
+# stdio owns stdout for JSON-RPC; use --log-file to see runtime logs
+seedmancer mcp --log-file /tmp/seedmancer-mcp.log
+```
+
+### What the server exposes
+
+Agents get the full Seedmancer surface, typed and schema-validated:
+
+| Category | Tools |
+|----------|-------|
+| Introspection (read-only) | `list_datasets`, `describe_dataset`, `list_schemas`, `describe_schema`, `get_status`, `list_envs`, `login_info` |
+| Config (non-destructive) | `add_env`, `use_env`, `init_project` |
+| Data plane (destructive) | `seed_database`, `fetch_dataset`, `export_database`, `generate_dataset`, `sync_dataset`, `remove_env`, `logout` |
+
+Plus structured resources:
+
+- `seedmancer://config` — raw `seedmancer.yaml`
+- `seedmancer://status` / `seedmancer://datasets` / `seedmancer://schemas` — JSON views
+- `seedmancer://dataset/{id}` — files + row counts + CSV preview for one dataset
+- `seedmancer://docs/{quickstart,playwright-recipe}` — agent-oriented primers
+
+And two ready-made prompt templates: `reset_db_for_tests` and `generate_test_data`.
+
+Destructive tools carry the MCP `destructiveHint` annotation and `seed_database` refuses to touch prod-like env names (`prod`, `production`, `live`, `main`, `master`) unless the caller passes `yes: true` — agents can't answer interactive prompts, so the safety rail is explicit.
+
+### Cursor / Claude Desktop config
+
+Add Seedmancer to your MCP host config. The shape differs slightly per host; here's Cursor's `~/.cursor/mcp.json` (or the project-level `.cursor/mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "seedmancer": {
+      "command": "seedmancer",
+      "args": ["mcp", "--log-file", "/tmp/seedmancer-mcp.log"],
+      "env": {
+        "SEEDMANCER_API_TOKEN": "<optional; falls back to ~/.seedmancer/credentials>"
+      }
+    }
+  }
+}
+```
+
+Claude Desktop's `claude_desktop_config.json` takes the same `mcpServers` block. Restart the host, then ask the agent something like:
+
+> Use the Seedmancer MCP to reset my database to the `api-test` dataset before running Playwright.
+
 ## Development
 
 ```sh

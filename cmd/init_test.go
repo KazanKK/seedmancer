@@ -10,7 +10,7 @@ import (
 	"github.com/urfave/cli/v2"
 )
 
-// runInInTempDir runs the init Action inside a fresh temp directory with the
+// runInitInTempDir runs the init Action inside a fresh temp directory with the
 // supplied flag values. It returns the absolute path of the temp dir so the
 // caller can assert on the produced files.
 func runInitInTempDir(t *testing.T, flags map[string]string) string {
@@ -28,6 +28,7 @@ func runInitInTempDir(t *testing.T, flags map[string]string) string {
 
 	fs := flag.NewFlagSet("init", flag.ContinueOnError)
 	fs.String("storage-path", "", "")
+	fs.String("env", "", "")
 	fs.String("database-url", "", "")
 
 	var args []string
@@ -51,6 +52,7 @@ func runInitInTempDir(t *testing.T, flags map[string]string) string {
 func TestInit_writesConfigFile(t *testing.T) {
 	dir := runInitInTempDir(t, map[string]string{
 		"storage-path": ".seedmancer",
+		"env":          "local",
 		"database-url": "postgres://u:p@localhost:5432/db",
 	})
 
@@ -66,8 +68,14 @@ func TestInit_writesConfigFile(t *testing.T) {
 	if cfg.StoragePath != ".seedmancer" {
 		t.Errorf("StoragePath = %q, want %q", cfg.StoragePath, ".seedmancer")
 	}
-	if cfg.DatabaseURL != "postgres://u:p@localhost:5432/db" {
-		t.Errorf("DatabaseURL = %q", cfg.DatabaseURL)
+	if cfg.DefaultEnv != "local" {
+		t.Errorf("DefaultEnv = %q, want local", cfg.DefaultEnv)
+	}
+	if cfg.Environments["local"].DatabaseURL != "postgres://u:p@localhost:5432/db" {
+		t.Errorf("environments.local.database_url = %q", cfg.Environments["local"].DatabaseURL)
+	}
+	if cfg.DatabaseURL != "" {
+		t.Errorf("legacy DatabaseURL should be empty, got %q", cfg.DatabaseURL)
 	}
 
 	storageDir := filepath.Join(dir, ".seedmancer")
@@ -90,6 +98,7 @@ func TestInit_rejectsEmptyStoragePath(t *testing.T) {
 
 	fs := flag.NewFlagSet("init", flag.ContinueOnError)
 	fs.String("storage-path", "", "")
+	fs.String("env", "", "")
 	fs.String("database-url", "", "")
 	// Explicitly pass an empty storage-path so the interactive prompt is skipped
 	// via c.IsSet but the value is empty.

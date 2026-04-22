@@ -22,10 +22,11 @@ import (
 // "maybe populated" fields where possible.
 type statusReport struct {
 	Project struct {
-		ConfigPath  string `json:"configPath,omitempty"`
-		ConfigScope string `json:"configScope"`
-		StoragePath string `json:"storagePath,omitempty"`
-		DatabaseURL string `json:"databaseUrl,omitempty"`
+		ConfigPath   string           `json:"configPath,omitempty"`
+		ConfigScope  string           `json:"configScope"`
+		StoragePath  string           `json:"storagePath,omitempty"`
+		DefaultEnv   string           `json:"defaultEnv,omitempty"`
+		Environments []statusEnvEntry `json:"environments,omitempty"`
 	} `json:"project"`
 	API struct {
 		URL    string `json:"url"`
@@ -43,6 +44,15 @@ type statusReport struct {
 	Schemas struct {
 		LocalCount int `json:"localCount"`
 	} `json:"schemas"`
+}
+
+// statusEnvEntry is one row in the `environments:` block printed by
+// `status` and emitted by `status --json`. Keeping URLs masked by default
+// means copy-pasting CLI output never leaks credentials.
+type statusEnvEntry struct {
+	Name        string `json:"name"`
+	DatabaseURL string `json:"databaseUrl,omitempty"`
+	IsDefault   bool   `json:"isDefault,omitempty"`
 }
 
 // tokenSource captures both where the active token came from and the raw
@@ -78,7 +88,7 @@ func StatusCommand() *cli.Command {
 			},
 			&cli.BoolFlag{
 				Name:  "show-db-url",
-				Usage: "Show database_url with credentials (default masks the password)",
+				Usage: "Show database URLs with credentials (default masks the password)",
 			},
 			&cli.BoolFlag{
 				Name:  "json",
@@ -123,12 +133,18 @@ func buildStatusReport(showDBURL bool) statusReport {
 		report.Project.ConfigScope = classifyConfigScope(configPath)
 		if cfg, err := utils.LoadConfig(configPath); err == nil {
 			report.Project.StoragePath = cfg.StoragePath
-			if cfg.DatabaseURL != "" {
-				if showDBURL {
-					report.Project.DatabaseURL = cfg.DatabaseURL
-				} else {
-					report.Project.DatabaseURL = maskDatabaseURL(cfg.DatabaseURL)
+			report.Project.DefaultEnv = cfg.ActiveEnvName()
+			envs := cfg.EffectiveEnvs()
+			for _, name := range cfg.SortedEnvNames() {
+				url := envs[name].DatabaseURL
+				if !showDBURL {
+					url = maskDatabaseURL(url)
 				}
+				report.Project.Environments = append(report.Project.Environments, statusEnvEntry{
+					Name:        name,
+					DatabaseURL: url,
+					IsDefault:   name == report.Project.DefaultEnv,
+				})
 			}
 		}
 	} else {
@@ -181,10 +197,22 @@ func renderStatus(r statusReport) {
 	if r.Project.StoragePath != "" {
 		ui.KeyValue("storage_path: ", r.Project.StoragePath)
 	}
-	if r.Project.DatabaseURL != "" {
-		ui.KeyValue("database_url: ", r.Project.DatabaseURL)
+	if r.Project.DefaultEnv != "" {
+		ui.KeyValue("default_env:  ", r.Project.DefaultEnv)
 	} else {
-		ui.KeyValue("database_url: ", "(unset — pass --db-url or set SEEDMANCER_DATABASE_URL)")
+		ui.KeyValue("default_env:  ", "(unset — run `seedmancer env use <name>`)")
+	}
+	if len(r.Project.Environments) > 0 {
+		ui.KeyValue("environments: ", fmt.Sprintf("%d", len(r.Project.Environments)))
+		for _, e := range r.Project.Environments {
+			marker := "    "
+			if e.IsDefault {
+				marker = "  * "
+			}
+			ui.Info("%s%-12s  %s", marker, e.Name, e.DatabaseURL)
+		}
+	} else {
+		ui.KeyValue("environments: ", "(none — run `seedmancer env add <name> --db-url <url>`)")
 	}
 	ui.KeyValue("local schemas:", fmt.Sprintf("%d", r.Schemas.LocalCount))
 

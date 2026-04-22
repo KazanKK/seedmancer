@@ -10,7 +10,6 @@ import (
 	utils "github.com/KazanKK/seedmancer/internal/utils"
 	"github.com/urfave/cli/v2"
 	"golang.org/x/term"
-	"gopkg.in/yaml.v3"
 )
 
 // InitCommand writes a minimal seedmancer.yaml for a project.
@@ -33,25 +32,43 @@ func InitCommand() *cli.Command {
 				Usage: "Directory for local schema folders (default: .seedmancer)",
 			},
 			&cli.StringFlag{
+				Name:  "env",
+				Usage: "Name for the initial environment (default: local)",
+			},
+			&cli.StringFlag{
 				Name:  "database-url",
-				Usage: "Default database connection URL saved into seedmancer.yaml",
+				Usage: "Database connection URL for the initial environment",
 			},
 		},
 		Action: func(c *cli.Context) error {
 			storagePath := c.String("storage-path")
+			envName := c.String("env")
 			databaseURL := c.String("database-url")
 
+			// Carry forward any values already in seedmancer.yaml so `init`
+			// doubles as a safe way to re-run the flow without losing an
+			// existing db url. We inspect the new env map first and fall
+			// back to the legacy top-level field so old projects are
+			// migrated into the modern shape on their next `init`.
 			if existing, err := loadExistingConfig(); err == nil {
 				if !c.IsSet("storage-path") && existing.StoragePath != "" {
 					storagePath = existing.StoragePath
 				}
-				if !c.IsSet("database-url") && existing.DatabaseURL != "" {
-					databaseURL = existing.DatabaseURL
+				if !c.IsSet("env") && existing.ActiveEnvName() != "" {
+					envName = existing.ActiveEnvName()
+				}
+				if !c.IsSet("database-url") {
+					if ne, err := existing.ResolveEnv(""); err == nil {
+						databaseURL = ne.DatabaseURL
+					}
 				}
 			}
 
 			if storagePath == "" {
 				storagePath = ".seedmancer"
+			}
+			if strings.TrimSpace(envName) == "" {
+				envName = "local"
 			}
 
 			if term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd())) {
@@ -64,6 +81,12 @@ func InitCommand() *cli.Command {
 						return err
 					}
 				}
+				if !c.IsSet("env") {
+					envName, err = prompt(in, "Environment name", envName)
+					if err != nil {
+						return err
+					}
+				}
 				if !c.IsSet("database-url") {
 					databaseURL, err = prompt(in, "Database URL", databaseURL)
 					if err != nil {
@@ -72,22 +95,27 @@ func InitCommand() *cli.Command {
 				}
 			}
 
-			if strings.TrimSpace(storagePath) == "" {
+			storagePath = strings.TrimSpace(storagePath)
+			envName = strings.TrimSpace(envName)
+			databaseURL = strings.TrimSpace(databaseURL)
+
+			if storagePath == "" {
 				return fmt.Errorf("storage path cannot be empty")
+			}
+			if envName == "" {
+				return fmt.Errorf("environment name cannot be empty")
 			}
 
 			cfg := utils.Config{
 				StoragePath: storagePath,
-				DatabaseURL: strings.TrimSpace(databaseURL),
+				DefaultEnv:  envName,
+				Environments: map[string]utils.EnvConfig{
+					envName: {DatabaseURL: databaseURL},
+				},
 			}
 
-			yamlData, err := yaml.Marshal(cfg)
-			if err != nil {
-				return fmt.Errorf("creating yaml: %v", err)
-			}
-
-			if err := os.WriteFile("seedmancer.yaml", yamlData, 0644); err != nil {
-				return fmt.Errorf("writing config file: %v", err)
+			if err := utils.SaveConfig("seedmancer.yaml", cfg); err != nil {
+				return err
 			}
 
 			if err := os.MkdirAll(storagePath, 0755); err != nil {
@@ -96,12 +124,13 @@ func InitCommand() *cli.Command {
 
 			ui.Success("Created seedmancer.yaml")
 			ui.KeyValue("storage_path: ", storagePath)
-			if cfg.DatabaseURL != "" {
-				ui.KeyValue("database_url: ", cfg.DatabaseURL)
+			ui.KeyValue("default_env:  ", envName)
+			if databaseURL != "" {
+				ui.KeyValue(fmt.Sprintf("environments.%s.database_url: ", envName), databaseURL)
 			}
 			fmt.Println()
-			ui.Info("Next step: run `seedmancer export --id baseline` to dump your database.")
-			ui.Info("The schema folder name is derived from the schema fingerprint — no setup needed.")
+			ui.Info("Add more environments with: seedmancer env add <name> --db-url <url>")
+			ui.Info("Then push the same dataset to many: seedmancer seed -d <id> --env %s,<other>", envName)
 			return nil
 		},
 	}

@@ -48,9 +48,13 @@ func ExportCommand() *cli.Command {
 				Usage: "Dataset id for the new dump (defaults to a YYYYMMDDHHMMSS timestamp)",
 			},
 			&cli.StringFlag{
-				Name:    "db-url",
-				Usage:   "Source database URL (overrides seedmancer.yaml)",
-				EnvVars: []string{"SEEDMANCER_DATABASE_URL"},
+				Name:    "env",
+				Aliases: []string{"e"},
+				Usage:   "Named environment to export from (defaults to default_env in seedmancer.yaml)",
+			},
+			&cli.StringFlag{
+				Name:  "db-url",
+				Usage: "Source database URL (ad-hoc override; takes precedence over --env)",
 			},
 			&cli.BoolFlag{
 				Name:    "force",
@@ -71,10 +75,12 @@ func ExportCommand() *cli.Command {
 				return err
 			}
 
-			dbURL := resolveDatabaseURL(c.String("db-url"), cfg.DatabaseURL)
-			if dbURL == "" {
-				return fmt.Errorf("database URL required: set `database_url:` in seedmancer.yaml, or use --db-url / SEEDMANCER_DATABASE_URL")
+			target, err := resolveSingleDB(c, cfg)
+			if err != nil {
+				return err
 			}
+			dbURL := target.DatabaseURL
+			ui.Step("using env: %s", target.Name)
 
 			datasetName := strings.TrimSpace(c.String("id"))
 			if datasetName == "" {
@@ -207,13 +213,6 @@ func copyFile(src, dst string) error {
 		return err
 	}
 	return nil
-}
-
-func resolveDatabaseURL(flagValue, cfgValue string) string {
-	if v := strings.TrimSpace(flagValue); v != "" {
-		return v
-	}
-	return strings.TrimSpace(cfgValue)
 }
 
 // normalizePostgresDSN applies the fixups that every command needs:
