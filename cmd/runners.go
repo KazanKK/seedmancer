@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -1033,6 +1034,125 @@ func RunGenerate(ctx context.Context, in GenerateInput) (GenerateOutput, error) 
 		}
 	}
 	return GenerateOutput{}, fmt.Errorf("generate job did not finish within %ds", timeout)
+}
+
+// ─── generate local ───────────────────────────────────────────────────────────
+
+// GenerateLocalInput is the input for RunGenerateLocal. The agent writes a
+// Go program (package main, stdlib only) that creates <table>.csv files in the
+// directory passed as os.Args[1]. The CLI writes the script to a temp dir and
+// executes it with `go run` — no cloud API, no quota, no internet needed.
+type GenerateLocalInput struct {
+	Script    string `json:"script"             jsonschema:"Go source code (package main) that writes <table>.csv files to os.Args[1]. Stdlib only; no go.mod needed."`
+	SchemaRef string `json:"schemaRef"          jsonschema:"Fingerprint prefix (≥4 chars) or display name of the target schema folder"`
+	DatasetID string `json:"datasetId,omitempty" jsonschema:"Dataset id for the result; auto-generated timestamp when empty"`
+	Force     bool   `json:"force,omitempty"    jsonschema:"Overwrite an existing dataset folder with the same id"`
+}
+
+type GenerateLocalOutput struct {
+	Dataset string   `json:"dataset"`
+	Schema  string   `json:"schema"`
+	Path    string   `json:"path"`
+	Tables  []string `json:"tables"`
+}
+
+func RunGenerateLocal(ctx context.Context, in GenerateLocalInput) (GenerateLocalOutput, error) {
+	if strings.TrimSpace(in.Script) == "" {
+		return GenerateLocalOutput{}, fmt.Errorf("script cannot be empty")
+	}
+	if len(strings.TrimSpace(in.SchemaRef)) < 4 {
+		return GenerateLocalOutput{}, fmt.Errorf("schemaRef must be at least 4 characters")
+	}
+
+	configPath, err := utils.FindConfigFile()
+	if err != nil {
+		return GenerateLocalOutput{}, err
+	}
+	projectRoot := filepath.Dir(configPath)
+	cfg, err := utils.LoadConfig(configPath)
+	if err != nil {
+		return GenerateLocalOutput{}, err
+	}
+
+	schema, err := utils.ResolveLocalSchema(projectRoot, cfg.StoragePath, in.SchemaRef)
+	if err != nil {
+		return GenerateLocalOutput{}, err
+	}
+
+	datasetName := strings.TrimSpace(in.DatasetID)
+	if datasetName == "" {
+		datasetName = time.Now().UTC().Format("20060102150405")
+	}
+	datasetName = utils.SanitizeDatasetSegment(datasetName)
+
+	datasetDir := utils.DatasetPath(projectRoot, cfg.StoragePath, schema.FingerprintShort, datasetName)
+	if info, statErr := os.Stat(datasetDir); statErr == nil && info.IsDir() {
+		if !in.Force {
+			return GenerateLocalOutput{}, fmt.Errorf(
+				"dataset %q already exists at %s — set force:true to overwrite", datasetName, datasetDir,
+			)
+		}
+		if err := os.RemoveAll(datasetDir); err != nil {
+			return GenerateLocalOutput{}, fmt.Errorf("removing existing dataset: %w", err)
+		}
+	}
+	if err := os.MkdirAll(datasetDir, 0755); err != nil {
+		return GenerateLocalOutput{}, fmt.Errorf("creating dataset dir: %w", err)
+	}
+
+	// Write script to a temporary directory and run it via `go run`.
+	tmpDir, err := os.MkdirTemp("", "seedmancer-gen-*")
+	if err != nil {
+		_ = os.RemoveAll(datasetDir)
+		return GenerateLocalOutput{}, fmt.Errorf("creating temp dir: %w", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	scriptPath := filepath.Join(tmpDir, "main.go")
+	if err := os.WriteFile(scriptPath, []byte(in.Script), 0644); err != nil {
+		_ = os.RemoveAll(datasetDir)
+		return GenerateLocalOutput{}, fmt.Errorf("writing script: %w", err)
+	}
+
+	runCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+
+	var stderr bytes.Buffer
+	goCmd := exec.CommandContext(runCtx, "go", "run", scriptPath, datasetDir)
+	goCmd.Stderr = &stderr
+	goCmd.Stdout = io.Discard
+
+	if err := goCmd.Run(); err != nil {
+		_ = os.RemoveAll(datasetDir)
+		msg := strings.TrimSpace(stderr.String())
+		if msg == "" {
+			msg = err.Error()
+		}
+		return GenerateLocalOutput{}, fmt.Errorf("script execution failed: %s", msg)
+	}
+
+	// Collect the CSV files the script produced.
+	entries, err := os.ReadDir(datasetDir)
+	if err != nil {
+		return GenerateLocalOutput{}, fmt.Errorf("reading dataset dir: %w", err)
+	}
+	var tables []string
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(strings.ToLower(e.Name()), ".csv") {
+			tables = append(tables, strings.TrimSuffix(e.Name(), ".csv"))
+		}
+	}
+	if len(tables) == 0 {
+		_ = os.RemoveAll(datasetDir)
+		return GenerateLocalOutput{}, fmt.Errorf("script produced no CSV files in %s", datasetDir)
+	}
+
+	return GenerateLocalOutput{
+		Dataset: datasetName,
+		Schema:  schema.FingerprintShort,
+		Path:    datasetDir,
+		Tables:  tables,
+	}, nil
 }
 
 // ─── sync ─────────────────────────────────────────────────────────────────────

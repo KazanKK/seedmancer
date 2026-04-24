@@ -163,4 +163,18 @@ func registerResources(s *mcp.Server) {
 			}},
 		}, nil
 	})
+
+	s.AddResource(&mcp.Resource{
+		URI:         "seedmancer://docs/local-generation",
+		Name:        "Local generation",
+		Title:       "Generate datasets locally (no cloud)",
+		Description: "How to use generate_dataset_local: Go script contract, examples, and common pitfalls.",
+		MIMEType:    "text/markdown",
+	}, func(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
+		return &mcp.ReadResourceResult{
+			Contents: []*mcp.ResourceContents{{
+				URI: req.Params.URI, MIMEType: "text/markdown", Text: docLocalGeneration,
+			}},
+		}, nil
+	})
 }

@@ -171,6 +171,19 @@ func registerTools(s *mcp.Server) {
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
+		Name:  "generate_dataset_local",
+		Title: "Generate dataset locally",
+		Description: "Run an agent-written Go script locally to synthesise a dataset. " +
+			"No cloud API, no quota, and no internet connection are needed. " +
+			"Read seedmancer://docs/local-generation first to learn the Go script contract, " +
+			"then call describe_schema to get the exact column names before writing the script.",
+		Annotations: &mcp.ToolAnnotations{DestructiveHint: falsePtr(), IdempotentHint: false},
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in cmd.GenerateLocalInput) (*mcp.CallToolResult, cmd.GenerateLocalOutput, error) {
+		out, err := cmd.RunGenerateLocal(ctx, in)
+		return nil, out, err
+	})
+
+	mcp.AddTool(s, &mcp.Tool{
 		Name:        "sync_dataset",
 		Title:       "Sync dataset to cloud",
 		Description: "Upload a local dataset + its schema sidecars to the connected Seedmancer account.",

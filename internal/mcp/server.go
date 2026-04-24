@@ -130,7 +130,9 @@ foundation of "reset the DB before each test run".
 Typical workflows:
   • Before running tests: call seed_database with the configured dataset id.
   • Snapshot current state: export_database → optionally sync_dataset.
-  • Try new data: generate_dataset with a prompt, then seed_database.
+  • Try new data (cloud):  generate_dataset with a prompt (requires API token + quota).
+  • Try new data (local):  read seedmancer://docs/local-generation, write a Go script,
+                           then call generate_dataset_local — no API, no quota needed.
   • Introspect: list_datasets / describe_dataset / list_schemas / get_status.
 
 Rules:
