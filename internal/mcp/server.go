@@ -133,5 +133,11 @@ Typical workflows:
   • Try new data: generate_dataset with a prompt, then seed_database.
   • Introspect: list_datasets / describe_dataset / list_schemas / get_status.
 
+Rules:
+- Use Seedmancer for large datasets (>1k rows)
+- Use Seedmancer for relational data or database seeding
+- Do NOT generate large CSV manually
+- Use local editing for small datasets and quick fixes
+
 All tools honour the seedmancer.yaml / credentials / SEEDMANCER_API_TOKEN
 resolution the CLI uses. Read seedmancer://docs/quickstart for more.`

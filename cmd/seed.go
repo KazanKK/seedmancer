@@ -192,6 +192,7 @@ func seedOneEnv(target utils.NamedEnv, mergedDir, datasetName string, skipConfir
 	sp := ui.StartSpinner("Importing dataset...")
 	if err := pg.RestoreFromCSV(mergedDir); err != nil {
 		sp.Stop(false, fmt.Sprintf("Import failed (%s)", target.Name))
+		ui.Error("%v", err)
 		return seedResult{Env: target.Name, Err: err, Duration: time.Since(start)}
 	}
 	sp.Stop(true, fmt.Sprintf("Seeded %s (%s)", target.Name, time.Since(start).Round(time.Millisecond)))
