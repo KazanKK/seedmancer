@@ -29,6 +29,7 @@ import (
 type listEntry struct {
 	Schema        string    `json:"schema"`
 	Dataset       string    `json:"dataset"`
+	SourceEnv     string    `json:"sourceEnv,omitempty"`
 	FileCount     int       `json:"fileCount,omitempty"`
 	UpdatedAt     string    `json:"updatedAt,omitempty"`
 	Updated       string    `json:"-"`
@@ -168,11 +169,6 @@ func listLocalEntries() ([]listEntry, error) {
 
 	var entries []listEntry
 	for _, s := range schemas {
-		// `SchemaLabel` on disk is always the fp-short — display names live on
-		// the server. A schema folder with no datasets still shows up with an
-		// em-dash so users notice it exists. Datasets come pre-sorted by mtime
-		// DESC from ListLocalSchemas, so they render newest-first under each
-		// schema.
 		if len(s.Datasets) == 0 {
 			entries = append(entries, listEntry{
 				Schema:        s.FingerprintShort,
@@ -184,9 +180,11 @@ func listLocalEntries() ([]listEntry, error) {
 			continue
 		}
 		for _, d := range s.Datasets {
+			meta := utils.ReadDatasetMeta(utils.DatasetPath(filepath.Dir(configPath), cfg.StoragePath, s.FingerprintShort, d.Name))
 			entries = append(entries, listEntry{
 				Schema:        s.FingerprintShort,
 				Dataset:       d.Name,
+				SourceEnv:     meta.SourceEnv,
 				UpdatedAt:     d.UpdatedAt.Format(time.RFC3339),
 				Updated:       utils.HumanizeAgo(d.UpdatedAt),
 				updatedAtTime: d.UpdatedAt,
@@ -263,13 +261,17 @@ func listRemoteEntries(token string) ([]listEntry, error) {
 
 func renderTable(entries []listEntry) {
 	table := tablewriter.NewWriter(os.Stdout)
-	table.SetHeader([]string{"Schema ID", "Dataset ID", "Updated"})
+	table.SetHeader([]string{"Schema ID", "Dataset ID", "Source", "Updated"})
 	table.SetBorder(false)
 	table.SetColumnSeparator("  ")
 	table.SetHeaderAlignment(tablewriter.ALIGN_LEFT)
 	table.SetAlignment(tablewriter.ALIGN_LEFT)
 	for _, e := range entries {
-		table.Append([]string{e.Schema, e.Dataset, e.Updated})
+		src := e.SourceEnv
+		if src == "" {
+			src = "—"
+		}
+		table.Append([]string{e.Schema, e.Dataset, src, e.Updated})
 	}
 	table.Render()
 }

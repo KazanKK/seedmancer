@@ -82,11 +82,11 @@ func ExportCommand() *cli.Command {
 			dbURL := target.DatabaseURL
 			ui.Step("using env: %s", target.Name)
 
-			datasetName := strings.TrimSpace(c.String("id"))
-			if datasetName == "" {
-				datasetName = time.Now().UTC().Format("20060102150405")
-				ui.Info("Auto-generated dataset id: %s", datasetName)
-			}
+		datasetName := strings.TrimSpace(c.String("id"))
+		if datasetName == "" {
+			datasetName = time.Now().UTC().Format("20060102150405")
+			ui.Info("Auto-generated dataset id: %s", datasetName)
+		}
 			datasetName = utils.SanitizeDatasetSegment(datasetName)
 
 			dbURL, scheme, err := normalizePostgresDSN(dbURL)
@@ -154,15 +154,20 @@ func ExportCommand() *cli.Command {
 				return fmt.Errorf("creating dataset directory: %v", err)
 			}
 
-			sp = ui.StartSpinner("Exporting table data...")
-			if err := pg.ExportToCSV(datasetDir); err != nil {
-				sp.Stop(false, "Data export failed")
-				return fmt.Errorf("exporting data: %v", err)
-			}
-			sp.Stop(true, "Data exported")
+		sp = ui.StartSpinner("Exporting table data...")
+		if err := pg.ExportToCSV(datasetDir); err != nil {
+			sp.Stop(false, "Data export failed")
+			return fmt.Errorf("exporting data: %v", err)
+		}
+		sp.Stop(true, "Data exported")
 
-			fmt.Println()
+		if err := utils.WriteDatasetMeta(datasetDir, utils.DatasetMeta{SourceEnv: target.Name}); err != nil {
+			ui.Warn("could not write dataset metadata: %v", err)
+		}
+
+		fmt.Println()
 			ui.Success("Export complete")
+			ui.KeyValue("Env: ", target.Name)
 			ui.KeyValue("Schema: ", fpShort)
 			ui.KeyValue("Dataset: ", datasetName)
 			ui.KeyValue("Path: ", datasetDir)

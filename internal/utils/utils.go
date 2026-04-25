@@ -90,6 +90,53 @@ func DatasetPath(projectRoot, storagePath, fpShort, datasetName string) string {
 	return filepath.Join(DatasetsDir(projectRoot, storagePath, fpShort), datasetName)
 }
 
+// DatasetMetaName is the filename of the per-dataset metadata sidecar.
+const DatasetMetaName = "_meta.yaml"
+
+// DatasetMeta holds lightweight, user-visible metadata for a single dataset
+// folder. It is written by `export` and read by `list` / `describe_dataset`
+// so callers always know which environment a dataset was captured from.
+type DatasetMeta struct {
+	SourceEnv string
+}
+
+// DatasetMetaPath returns the full path to the _meta.yaml sidecar for a
+// dataset folder.
+func DatasetMetaPath(datasetDir string) string {
+	return filepath.Join(datasetDir, DatasetMetaName)
+}
+
+// WriteDatasetMeta writes m into <datasetDir>/_meta.yaml. Errors are
+// non-fatal from the caller's perspective (the export still succeeded),
+// but are returned so callers can log a warning.
+func WriteDatasetMeta(datasetDir string, m DatasetMeta) error {
+	lines := ""
+	if m.SourceEnv != "" {
+		lines += "source_env: " + m.SourceEnv + "\n"
+	}
+	if lines == "" {
+		return nil
+	}
+	return os.WriteFile(DatasetMetaPath(datasetDir), []byte(lines), 0644)
+}
+
+// ReadDatasetMeta loads <datasetDir>/_meta.yaml. Missing file is not an
+// error — older datasets written before this feature return a zero value.
+func ReadDatasetMeta(datasetDir string) DatasetMeta {
+	data, err := os.ReadFile(DatasetMetaPath(datasetDir))
+	if err != nil {
+		return DatasetMeta{}
+	}
+	var m DatasetMeta
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "source_env:") {
+			m.SourceEnv = strings.TrimSpace(strings.TrimPrefix(line, "source_env:"))
+		}
+	}
+	return m
+}
+
 // SchemaMetaPath returns the on-disk path for a schema's local metadata file.
 // The file stores editable, user-facing metadata (e.g. display name) so the
 // fingerprint-derived folder name can remain stable while users attach a

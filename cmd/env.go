@@ -82,7 +82,7 @@ func envListCommand() *cli.Command {
 				if display == "" {
 					display = "(unset)"
 				}
-				fmt.Fprintf(os.Stderr, "%s %-12s %s %s\n",
+				fmt.Fprintf(os.Stderr, "%s %-12s %s  %s\n",
 					marker,
 					name,
 					envColorBadge(name),

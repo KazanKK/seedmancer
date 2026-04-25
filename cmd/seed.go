@@ -60,8 +60,8 @@ func SeedCommand() *cli.Command {
 			},
 			&cli.BoolFlag{
 				Name:    "yes",
-				Aliases: []string{"y"},
-				Usage:   "Skip confirmation prompts (including prod safety check)",
+				Aliases: []string{"y", "f"},
+				Usage:   "Skip confirmation prompt",
 			},
 			&cli.BoolFlag{
 				Name:  "continue-on-error",
@@ -88,17 +88,22 @@ func SeedCommand() *cli.Command {
 				return err
 			}
 
-			datasetName := strings.TrimSpace(c.String("dataset-id"))
-			schema, datasetDir, err := utils.FindLocalDataset(projectRoot, cfg.StoragePath, "", datasetName)
-			if err != nil {
-				return err
-			}
+		datasetName := strings.TrimSpace(c.String("dataset-id"))
+		schema, datasetDir, err := utils.FindLocalDataset(projectRoot, cfg.StoragePath, "", datasetName)
+		if err != nil {
+			return err
+		}
 
-			targetNames := make([]string, len(targets))
-			for i, t := range targets {
-				targetNames[i] = t.Name
-			}
-			ui.Step("seed %s (schema %s) → %s", datasetName, schema.FingerprintShort, strings.Join(targetNames, ", "))
+		meta := utils.ReadDatasetMeta(datasetDir)
+
+		targetNames := make([]string, len(targets))
+		for i, t := range targets {
+			targetNames[i] = t.Name
+		}
+		ui.Step("seed %s (schema %s) → %s", datasetName, schema.FingerprintShort, strings.Join(targetNames, ", "))
+		if meta.SourceEnv != "" {
+			ui.Info("source: %s", meta.SourceEnv)
+		}
 
 			if c.Bool("dry-run") {
 				ui.Info("dry-run: no databases will be modified")
@@ -119,13 +124,13 @@ func SeedCommand() *cli.Command {
 			defer cleanup()
 			ui.Debug("Merged restore dir: %s", merged)
 
-			results := make([]seedResult, 0, len(targets))
-			for i, t := range targets {
-				if i > 0 {
-					fmt.Fprintln(os.Stderr)
-				}
-				res := seedOneEnv(t, merged, datasetName, c.Bool("yes"))
-				results = append(results, res)
+		results := make([]seedResult, 0, len(targets))
+		for i, t := range targets {
+			if i > 0 {
+				fmt.Fprintln(os.Stderr)
+			}
+			res := seedOneEnv(t, merged, datasetName, meta.SourceEnv, c.Bool("yes"))
+			results = append(results, res)
 				if res.Err != nil && !c.Bool("continue-on-error") {
 					// Fill remaining targets as "skipped" so the summary
 					// tells the whole story instead of pretending the rest
@@ -161,13 +166,17 @@ type seedResult struct {
 // Extracted so the Action loop stays readable and so tests can exercise
 // the per-target orchestration (prompts, duration timing, error shaping)
 // independent of the CLI framework.
-func seedOneEnv(target utils.NamedEnv, mergedDir, datasetName string, skipConfirm bool) seedResult {
+func seedOneEnv(target utils.NamedEnv, mergedDir, datasetName, sourceEnv string, skipConfirm bool) seedResult {
 	start := time.Now()
 
 	ui.Title(fmt.Sprintf("→ %s", target.Name))
 
-	if isProdLike(target.Name) && !skipConfirm {
-		if !ui.Confirm(fmt.Sprintf("Seed %q into %q?", datasetName, target.Name), false) {
+	if !skipConfirm {
+		msg := fmt.Sprintf("Seed %q into %q?", datasetName, target.Name)
+		if sourceEnv != "" {
+			msg = fmt.Sprintf("Seed %q (exported from %q) into %q?", datasetName, sourceEnv, target.Name)
+		}
+		if !ui.Confirm(msg, false) {
 			return seedResult{Env: target.Name, Skipped: true, Duration: time.Since(start)}
 		}
 	}

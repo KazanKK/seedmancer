@@ -107,12 +107,13 @@ type DescribeDatasetInput struct {
 // contains, their row counts, and a small preview — so agents don't
 // need shell access to understand what's in it.
 type DescribeDatasetOutput struct {
-	Dataset           string             `json:"dataset"`
-	Path              string             `json:"path"`
-	SchemaFingerprint string             `json:"schemaFingerprint"`
-	SchemaShort       string             `json:"schemaShort"`
-	SchemaDisplayName string             `json:"schemaDisplayName,omitempty"`
-	UpdatedAt         string             `json:"updatedAt"`
+	Dataset           string               `json:"dataset"`
+	Path              string               `json:"path"`
+	SchemaFingerprint string               `json:"schemaFingerprint"`
+	SchemaShort       string               `json:"schemaShort"`
+	SchemaDisplayName string               `json:"schemaDisplayName,omitempty"`
+	SourceEnv         string               `json:"sourceEnv,omitempty"`
+	UpdatedAt         string               `json:"updatedAt"`
 	Files             []DatasetFilePreview `json:"files"`
 }
 
@@ -164,6 +165,7 @@ func RunDescribeDataset(_ context.Context, in DescribeDatasetInput) (DescribeDat
 		SchemaFingerprint: schema.Fingerprint,
 		SchemaShort:       schema.FingerprintShort,
 		SchemaDisplayName: schema.DisplayName,
+		SourceEnv:         utils.ReadDatasetMeta(datasetDir).SourceEnv,
 		Files:             make([]DatasetFilePreview, 0, len(files)),
 	}
 	if info, err := os.Stat(datasetDir); err == nil {
@@ -685,6 +687,8 @@ func RunSeed(_ context.Context, in SeedInput) (SeedOutput, error) {
 		return SeedOutput{}, err
 	}
 
+	sourceEnv := utils.ReadDatasetMeta(datasetDir).SourceEnv
+
 	out := SeedOutput{
 		Dataset: datasetName,
 		Schema:  schema.FingerprintShort,
@@ -706,7 +710,7 @@ func RunSeed(_ context.Context, in SeedInput) (SeedOutput, error) {
 	defer cleanup()
 
 	for i, t := range targets {
-		res := seedOneEnvQuiet(t, merged, in.Yes)
+		res := seedOneEnvQuiet(t, merged, in.Yes, sourceEnv, datasetName)
 		r := SeedTargetResult{
 			Env:        res.Env,
 			DurationMS: res.Duration.Milliseconds(),
@@ -757,15 +761,14 @@ func resolveSeedTargetsFromOpts(dbURL, envCSV string, cfg utils.Config) ([]utils
 // same prod guard (opt-out via `yes`), but without the spinner and
 // titles. MCP clients surface progress + errors from the structured
 // result; the CLI still has its pretty path via seedOneEnv.
-func seedOneEnvQuiet(target utils.NamedEnv, mergedDir string, yes bool) seedResult {
+func seedOneEnvQuiet(target utils.NamedEnv, mergedDir string, yes bool, sourceEnv, datasetName string) seedResult {
 	start := time.Now()
-	if isProdLike(target.Name) && !yes {
-		// Agents can't prompt — refuse rather than silently seeding prod.
-		return seedResult{
-			Env:      target.Name,
-			Err:      fmt.Errorf("refusing to seed prod-like env %q without yes:true", target.Name),
-			Duration: time.Since(start),
+	if !yes {
+		msg := fmt.Sprintf("confirmation required to seed %q into %q — set yes:true to confirm", datasetName, target.Name)
+		if sourceEnv != "" {
+			msg = fmt.Sprintf("confirmation required to seed %q (from %q) into %q — set yes:true to confirm", datasetName, sourceEnv, target.Name)
 		}
+		return seedResult{Env: target.Name, Err: fmt.Errorf("%s", msg), Duration: time.Since(start)}
 	}
 	dbURL, scheme, err := normalizePostgresDSN(target.DatabaseURL)
 	if err != nil {
@@ -884,6 +887,7 @@ func RunExport(_ context.Context, in ExportInput) (ExportOutput, error) {
 	if err := pg.ExportToCSV(datasetDir); err != nil {
 		return ExportOutput{}, fmt.Errorf("exporting data: %v", err)
 	}
+	_ = utils.WriteDatasetMeta(datasetDir, utils.DatasetMeta{SourceEnv: target.Name})
 	return ExportOutput{
 		Dataset:           datasetName,
 		SchemaFingerprint: fingerprint,
