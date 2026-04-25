@@ -129,9 +129,15 @@ foundation of "reset the DB before each test run".
 
 IMPORTANT: When a user asks you to "create test data", "generate seed data",
 "set up database fixtures", or anything similar — use Seedmancer MCP tools.
-Never write .seedmancer/ files or CSV files by hand.
 Run install_agent_rules once per project so this guidance persists across all
 future conversations in that project.
+
+Workflow when the user wants test data:
+  1. list_schemas — if no schemas exist, call export_database first.
+     The DB is already running (configured in seedmancer.yaml) so export always works.
+  2. describe_schema — get the exact table and column names.
+  3. generate_dataset_local — write a Go script, run it locally, no cloud needed.
+  4. seed_database — load the new dataset into the database.
 
 Typical workflows:
   • Before running tests: call seed_database with the configured dataset id.

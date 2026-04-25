@@ -662,18 +662,24 @@ alwaysApply: true
 This project uses **Seedmancer** for test data management.
 
 **Never** write CSV files to ` + "`.seedmancer/`" + ` by hand.
+**Never** create seed.sql or similar workarounds.
 **Always** use the Seedmancer MCP tools.
 
-## If seedmancer.yaml already exists:
-1. ` + "`get_status`" + ` — confirm project config and default env.
-2. ` + "`describe_schema`" + ` — get exact table and column names.
-3. ` + "`generate_dataset_local`" + ` — write a Go script that produces CSVs (no cloud needed).
-4. ` + "`seed_database`" + ` — load the dataset into the database.
+## Standard workflow for generating test data:
+
+1. ` + "`get_status`" + ` — confirm project config and default env are set.
+2. ` + "`list_schemas`" + ` — check whether a schema has been exported yet.
+   - **If no schemas exist**: call ` + "`export_database`" + ` first. The DB is already
+     running (it is configured in seedmancer.yaml), so this always works.
+     export_database captures the schema + current data and creates the
+     ` + "`.seedmancer/schemas/<fp>/schema.json`" + ` file that all other tools need.
+3. ` + "`describe_schema`" + ` — get the exact table and column names.
+4. ` + "`generate_dataset_local`" + ` — write a Go script that produces CSVs (no cloud needed).
+5. ` + "`seed_database`" + ` — load the new dataset into the database.
 
 ## If this is a brand-new project (no seedmancer.yaml):
 1. ` + "`init_project`" + ` — creates seedmancer.yaml and .seedmancer/.
-2. ` + "`export_database`" + ` — captures the current schema + data as a baseline.
-3. Then follow the steps above from step 2.
+2. Then follow the standard workflow above from step 1.
 
 Prefer ` + "`generate_dataset_local`" + ` (no cloud, no quota).
 Only use ` + "`generate_dataset`" + ` when the user explicitly asks for AI-generated data.
@@ -693,9 +699,11 @@ const claudeMdBlock = `<!-- seedmancer:start -->
 This project uses Seedmancer (MCP) for test data. When asked to create,
 generate, or seed test/fixture data:
 
-- **Never** write files to ` + "`.seedmancer/`" + ` manually.
-- Call ` + "`get_status`" + ` → ` + "`describe_schema`" + ` → ` + "`generate_dataset_local`" + ` → ` + "`seed_database`" + `.
-- For a new project: ` + "`init_project`" + ` → ` + "`export_database`" + ` first.
+- **Never** write files to ` + "`.seedmancer/`" + ` manually. Never create seed.sql workarounds.
+- Call ` + "`list_schemas`" + ` first. If no schemas exist, call ` + "`export_database`" + ` — the DB
+  is already running (configured in seedmancer.yaml), so this always works.
+- Then: ` + "`describe_schema`" + ` → ` + "`generate_dataset_local`" + ` → ` + "`seed_database`" + `.
+- For a new project without seedmancer.yaml: ` + "`init_project`" + ` first.
 - Prefer ` + "`generate_dataset_local`" + ` (local, no quota) over ` + "`generate_dataset`" + ` (cloud).
 <!-- seedmancer:end -->`
 

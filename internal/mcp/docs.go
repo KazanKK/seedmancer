@@ -23,10 +23,15 @@ Run this sequence once to set everything up:
 
 ## Typical loop (project already set up)
 
-1. ` + "`get_status`" + ` — confirm seedmancer.yaml exists and ` + "`default_env`" + ` is set.
-2. ` + "`list_datasets`" + ` — pick the dataset id you want to restore.
-3. ` + "`seed_database`" + ` with ` + "`yes: true`" + ` — resets the env and loads the dataset.
-4. Run the actual test command outside MCP (e.g. Playwright, pytest).
+1. ` + "`list_schemas`" + ` — check whether a schema has been exported.
+   - **If no schemas exist**: call ` + "`export_database`" + ` first. The database is already
+     running (it is in seedmancer.yaml). This creates the schema.json that all
+     other tools depend on.
+2. ` + "`describe_schema`" + ` — get the exact table and column names.
+3. ` + "`generate_dataset_local`" + ` — write a Go script that produces CSVs locally.
+   Read seedmancer://docs/local-generation for the contract.
+4. ` + "`seed_database`" + ` with ` + "`yes: true`" + ` — resets the env and loads the dataset.
+5. Run the actual test command outside MCP (e.g. Playwright, pytest).
 
 ## Need new data?
 
