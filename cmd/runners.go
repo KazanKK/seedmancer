@@ -684,6 +684,18 @@ This project uses **Seedmancer** for test data management.
 Prefer ` + "`generate_dataset_local`" + ` (no cloud, no quota).
 Only use ` + "`generate_dataset`" + ` when the user explicitly asks for AI-generated data.
 Read ` + "`seedmancer://docs/local-generation`" + ` for the Go script interface and examples.
+
+## CLI fallback (when MCP tools are unavailable):
+
+Write a Go script to a temp file, then:
+
+` + "```" + `
+seedmancer generate-local --script-file /tmp/gen.go --schema-id <fp>
+seedmancer seed --id <dataset-id>
+` + "```" + `
+
+The Go script receives the output directory as os.Args[1] and must write
+<table>.csv files there (stdlib only). Same contract as generate_dataset_local.
 `
 
 // claudeMdBlock is appended to (or used to replace an existing block in)
@@ -705,6 +717,9 @@ generate, or seed test/fixture data:
 - Then: ` + "`describe_schema`" + ` → ` + "`generate_dataset_local`" + ` → ` + "`seed_database`" + `.
 - For a new project without seedmancer.yaml: ` + "`init_project`" + ` first.
 - Prefer ` + "`generate_dataset_local`" + ` (local, no quota) over ` + "`generate_dataset`" + ` (cloud).
+- **CLI fallback** (when MCP tools are unavailable): write a Go script to a temp
+  file then run ` + "`seedmancer generate-local --script-file /tmp/gen.go --schema-id <fp>`" + `,
+  then ` + "`seedmancer seed --id <dataset-id>`" + `. The script writes <table>.csv to os.Args[1].
 <!-- seedmancer:end -->`
 
 type InstallAgentRulesInput struct {

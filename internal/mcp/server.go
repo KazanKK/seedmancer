@@ -145,6 +145,7 @@ Typical workflows:
   • Try new data (cloud):  generate_dataset with a prompt (requires API token + quota).
   • Try new data (local):  read seedmancer://docs/local-generation, write a Go script,
                            then call generate_dataset_local — no API, no quota needed.
+                           CLI fallback: seedmancer generate-local --script-file /tmp/gen.go --schema-id <fp>
   • Introspect: list_datasets / describe_dataset / list_schemas / get_status.
 
 First time in a new project:

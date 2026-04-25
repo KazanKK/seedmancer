@@ -57,6 +57,8 @@ func main() {
 	exportCmd.Category = "Local"
 	generateCmd := cmd.GenerateCommand()
 	generateCmd.Category = "Local"
+	generateLocalCmd := cmd.GenerateLocalCommand()
+	generateLocalCmd.Category = "Local"
 	seedCmd := cmd.SeedCommand()
 	seedCmd.Category = "Local"
 	listCmd := cmd.ListCommand()
@@ -106,9 +108,10 @@ func main() {
 			logoutCmd,
 			statusCmd,
 			envCmd,
-			exportCmd,
-			generateCmd,
-			seedCmd,
+		exportCmd,
+		generateCmd,
+		generateLocalCmd,
+		seedCmd,
 			listCmd,
 			syncCmd,
 			fetchCmd,

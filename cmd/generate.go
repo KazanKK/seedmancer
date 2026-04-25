@@ -156,11 +156,20 @@ func runGenerate(c *cli.Context) error {
 	if err := os.MkdirAll(outputDir, 0755); err != nil {
 		return fmt.Errorf("creating dataset directory: %v", err)
 	}
+	// cleanupDir removes the dataset directory when we created it but the job
+	// failed before writing any files, leaving an empty ghost folder.
+	cleanupDir := func() {
+		entries, readErr := os.ReadDir(outputDir)
+		if readErr == nil && len(entries) == 0 {
+			_ = os.Remove(outputDir)
+		}
+	}
 
 	sp := ui.StartSpinner("Submitting AI generation job...")
 	apiSchema, err := buildAPISchema(schemaBytes)
 	if err != nil {
 		sp.Stop(false, "Schema conversion failed")
+		cleanupDir()
 		return fmt.Errorf("building API schema: %v", err)
 	}
 
@@ -171,12 +180,14 @@ func runGenerate(c *cli.Context) error {
 	jobID, err := submitGenerateJob(baseURL, apiToken, apiSchema, prompt, datasetName)
 	if err != nil {
 		sp.Stop(false, "Job submission failed")
+		cleanupDir()
 		return fmt.Errorf("submitting generation job: %w", err)
 	}
 	sp.Stop(true, fmt.Sprintf("Job submitted: %s", jobID))
 
 	files, err := pollJobUntilDone(baseURL, apiToken, jobID)
 	if err != nil {
+		cleanupDir()
 		return fmt.Errorf("generation job failed: %v", err)
 	}
 
