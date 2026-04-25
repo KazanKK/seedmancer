@@ -598,9 +598,11 @@ type InitInput struct {
 }
 
 type InitOutput struct {
-	ConfigPath  string `json:"configPath"`
-	StoragePath string `json:"storagePath"`
-	EnvName     string `json:"envName"`
+	ConfigPath     string `json:"configPath"`
+	StoragePath    string `json:"storagePath"`
+	EnvName        string `json:"envName"`
+	CursorRulePath string `json:"cursorRulePath,omitempty"`
+	ClaudeMdPath   string `json:"claudeMdPath,omitempty"`
 }
 
 func RunInit(_ context.Context, in InitInput) (InitOutput, error) {
@@ -629,7 +631,131 @@ func RunInit(_ context.Context, in InitInput) (InitOutput, error) {
 		return InitOutput{}, fmt.Errorf("creating storage directory: %v", err)
 	}
 	abs, _ := filepath.Abs("seedmancer.yaml")
-	return InitOutput{ConfigPath: abs, StoragePath: storagePath, EnvName: envName}, nil
+
+	// Best-effort: install agent rules so AI tools (Cursor, Claude Code) know
+	// to use Seedmancer MCP tools for test data tasks. Failure is non-fatal —
+	// the user can call install_agent_rules separately at any time.
+	rulesOut, _ := RunInstallAgentRules(context.Background(), InstallAgentRulesInput{})
+
+	return InitOutput{
+		ConfigPath:     abs,
+		StoragePath:    storagePath,
+		EnvName:        envName,
+		CursorRulePath: rulesOut.CursorRulePath,
+		ClaudeMdPath:   rulesOut.ClaudeMdPath,
+	}, nil
+}
+
+// ─── install agent rules ──────────────────────────────────────────────────────
+
+// cursorRuleContent is written to .cursor/rules/seedmancer.mdc in the user's
+// project. Cursor reads every .mdc file in that directory automatically so the
+// AI agent will follow these rules in every conversation without the user having
+// to remember to mention Seedmancer.
+const cursorRuleContent = `---
+description: Use Seedmancer MCP tools for all test/seed data tasks in this project.
+alwaysApply: true
+---
+
+# Seedmancer test data rules
+
+This project uses **Seedmancer** for test data management.
+
+**Never** write CSV files to ` + "`.seedmancer/`" + ` by hand.
+**Always** use the Seedmancer MCP tools.
+
+## If seedmancer.yaml already exists:
+1. ` + "`get_status`" + ` — confirm project config and default env.
+2. ` + "`describe_schema`" + ` — get exact table and column names.
+3. ` + "`generate_dataset_local`" + ` — write a Go script that produces CSVs (no cloud needed).
+4. ` + "`seed_database`" + ` — load the dataset into the database.
+
+## If this is a brand-new project (no seedmancer.yaml):
+1. ` + "`init_project`" + ` — creates seedmancer.yaml and .seedmancer/.
+2. ` + "`export_database`" + ` — captures the current schema + data as a baseline.
+3. Then follow the steps above from step 2.
+
+Prefer ` + "`generate_dataset_local`" + ` (no cloud, no quota).
+Only use ` + "`generate_dataset`" + ` when the user explicitly asks for AI-generated data.
+Read ` + "`seedmancer://docs/local-generation`" + ` for the Go script interface and examples.
+`
+
+// claudeMdBlock is appended to (or used to replace an existing block in)
+// CLAUDE.md in the project root. Claude Code reads CLAUDE.md from the working
+// directory and all parent directories, so placing it at the project root is
+// the right level. The start/end markers allow install_agent_rules to be
+// re-run safely — only the Seedmancer section is ever touched.
+const claudeMdBlockStart = "<!-- seedmancer:start -->"
+const claudeMdBlockEnd = "<!-- seedmancer:end -->"
+const claudeMdBlock = `<!-- seedmancer:start -->
+## Seedmancer test data rules
+
+This project uses Seedmancer (MCP) for test data. When asked to create,
+generate, or seed test/fixture data:
+
+- **Never** write files to ` + "`.seedmancer/`" + ` manually.
+- Call ` + "`get_status`" + ` → ` + "`describe_schema`" + ` → ` + "`generate_dataset_local`" + ` → ` + "`seed_database`" + `.
+- For a new project: ` + "`init_project`" + ` → ` + "`export_database`" + ` first.
+- Prefer ` + "`generate_dataset_local`" + ` (local, no quota) over ` + "`generate_dataset`" + ` (cloud).
+<!-- seedmancer:end -->`
+
+type InstallAgentRulesInput struct {
+	Force bool `json:"force,omitempty" jsonschema:"Re-write files even if they already exist (default: always overwrites cursor rule, merges CLAUDE.md)"`
+}
+
+type InstallAgentRulesOutput struct {
+	CursorRulePath string `json:"cursorRulePath"`
+	ClaudeMdPath   string `json:"claudeMdPath"`
+}
+
+func RunInstallAgentRules(_ context.Context, _ InstallAgentRulesInput) (InstallAgentRulesOutput, error) {
+	configPath, err := utils.FindConfigFile()
+	if err != nil {
+		return InstallAgentRulesOutput{}, err
+	}
+	projectRoot := filepath.Dir(configPath)
+
+	// ── .cursor/rules/seedmancer.mdc ──────────────────────────────────────────
+	cursorRulesDir := filepath.Join(projectRoot, ".cursor", "rules")
+	if err := os.MkdirAll(cursorRulesDir, 0755); err != nil {
+		return InstallAgentRulesOutput{}, fmt.Errorf("creating .cursor/rules: %w", err)
+	}
+	cursorRulePath := filepath.Join(cursorRulesDir, "seedmancer.mdc")
+	if err := os.WriteFile(cursorRulePath, []byte(cursorRuleContent), 0644); err != nil {
+		return InstallAgentRulesOutput{}, fmt.Errorf("writing %s: %w", cursorRulePath, err)
+	}
+
+	// ── CLAUDE.md ─────────────────────────────────────────────────────────────
+	claudeMdPath := filepath.Join(projectRoot, "CLAUDE.md")
+	var claudeContent string
+	if raw, err := os.ReadFile(claudeMdPath); err == nil {
+		claudeContent = string(raw)
+	}
+	// Replace existing block if present, otherwise append.
+	if startIdx := strings.Index(claudeContent, claudeMdBlockStart); startIdx != -1 {
+		endIdx := strings.Index(claudeContent, claudeMdBlockEnd)
+		if endIdx != -1 {
+			claudeContent = claudeContent[:startIdx] +
+				claudeMdBlock +
+				claudeContent[endIdx+len(claudeMdBlockEnd):]
+		} else {
+			// Malformed block — replace from start marker to end of file.
+			claudeContent = claudeContent[:startIdx] + claudeMdBlock
+		}
+	} else {
+		if claudeContent != "" && !strings.HasSuffix(claudeContent, "\n") {
+			claudeContent += "\n"
+		}
+		claudeContent += "\n" + claudeMdBlock + "\n"
+	}
+	if err := os.WriteFile(claudeMdPath, []byte(claudeContent), 0644); err != nil {
+		return InstallAgentRulesOutput{}, fmt.Errorf("writing CLAUDE.md: %w", err)
+	}
+
+	return InstallAgentRulesOutput{
+		CursorRulePath: cursorRulePath,
+		ClaudeMdPath:   claudeMdPath,
+	}, nil
 }
 
 // ─── seed ─────────────────────────────────────────────────────────────────────

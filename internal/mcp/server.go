@@ -127,6 +127,12 @@ It dumps Postgres schemas + data into content-addressed folders, syncs them
 to a cloud account, and restores them back on any target environment — the
 foundation of "reset the DB before each test run".
 
+IMPORTANT: When a user asks you to "create test data", "generate seed data",
+"set up database fixtures", or anything similar — use Seedmancer MCP tools.
+Never write .seedmancer/ files or CSV files by hand.
+Run install_agent_rules once per project so this guidance persists across all
+future conversations in that project.
+
 Typical workflows:
   • Before running tests: call seed_database with the configured dataset id.
   • Snapshot current state: export_database → optionally sync_dataset.
@@ -134,6 +140,12 @@ Typical workflows:
   • Try new data (local):  read seedmancer://docs/local-generation, write a Go script,
                            then call generate_dataset_local — no API, no quota needed.
   • Introspect: list_datasets / describe_dataset / list_schemas / get_status.
+
+First time in a new project:
+  1. init_project          — creates seedmancer.yaml + .seedmancer/ + agent rule files.
+  2. export_database       — captures the current schema + data as a baseline dataset.
+  3. generate_dataset_local — create new test datasets locally from a Go script.
+  4. seed_database         — load a dataset into the target database.
 
 Rules:
 - Use Seedmancer for large datasets (>1k rows)

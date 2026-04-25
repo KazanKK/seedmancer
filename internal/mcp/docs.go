@@ -10,21 +10,34 @@ Seedmancer is a Postgres seeding tool. Its unit of reuse is a *dataset*:
 a snapshot of CSVs + a JSON schema sidecar, content-addressed by the
 schema fingerprint.
 
-Typical loop agents run:
+## First time in a new project
+
+Run this sequence once to set everything up:
+
+1. ` + "`init_project`" + ` — creates seedmancer.yaml, .seedmancer/, and writes agent
+   rule files (.cursor/rules/seedmancer.mdc + CLAUDE.md) so future AI
+   conversations in this project automatically use Seedmancer.
+2. ` + "`export_database`" + ` — captures the current schema + data as a baseline dataset.
+3. ` + "`install_agent_rules`" + ` — if adopting Seedmancer in an existing project that
+   was not created with init_project, run this to write the rule files manually.
+
+## Typical loop (project already set up)
 
 1. ` + "`get_status`" + ` — confirm seedmancer.yaml exists and ` + "`default_env`" + ` is set.
 2. ` + "`list_datasets`" + ` — pick the dataset id you want to restore.
 3. ` + "`seed_database`" + ` with ` + "`yes: true`" + ` — resets the env and loads the dataset.
 4. Run the actual test command outside MCP (e.g. Playwright, pytest).
 
-Need new data?
+## Need new data?
 
-1. ` + "`export_database`" + ` to capture current state as a dataset.
-2. ` + "`describe_schema`" + ` to understand the tables.
-3. ` + "`generate_dataset`" + ` with a prompt to synthesize more rows.
-4. ` + "`sync_dataset`" + ` to publish the result to your cloud account.
+1. ` + "`describe_schema`" + ` — get exact table and column names.
+2. ` + "`generate_dataset_local`" + ` — write a Go script that produces CSVs; no cloud API
+   or quota is consumed. Read seedmancer://docs/local-generation for the contract.
+3. OR ` + "`generate_dataset`" + ` with a prompt — uses the Seedmancer cloud service
+   (requires API token; consumes monthly quota).
+4. ` + "`sync_dataset`" + ` — optionally publish the result to your cloud account.
 
-Safety rails already enforced:
+## Safety rails already enforced
 
 - Tools never prompt. ` + "`seed_database`" + ` refuses to touch prod-like env
   names (prod, production, live, main, master) unless ` + "`yes: true`" + ` is set.

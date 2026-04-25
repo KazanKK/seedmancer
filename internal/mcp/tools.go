@@ -131,6 +131,19 @@ func registerTools(s *mcp.Server) {
 		return nil, out, err
 	})
 
+	mcp.AddTool(s, &mcp.Tool{
+		Name:  "install_agent_rules",
+		Title: "Install agent rules",
+		Description: "Write .cursor/rules/seedmancer.mdc and a CLAUDE.md block into the project " +
+			"so Cursor and Claude Code automatically use Seedmancer MCP tools whenever the user " +
+			"asks to create or manage test data. Idempotent — safe to call multiple times. " +
+			"Already called by init_project; call this manually when adopting Seedmancer in an existing project.",
+		Annotations: &mcp.ToolAnnotations{DestructiveHint: falsePtr(), IdempotentHint: true},
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in cmd.InstallAgentRulesInput) (*mcp.CallToolResult, cmd.InstallAgentRulesOutput, error) {
+		out, err := cmd.RunInstallAgentRules(ctx, in)
+		return nil, out, err
+	})
+
 	// ── Data plane (destructive by nature) ────────────────────────────
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "seed_database",
