@@ -3,60 +3,56 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
 	"github.com/urfave/cli/v2"
 )
 
-// GenerateLocalCommand runs a user-supplied Go script to produce CSV
-// files, without calling any cloud API or consuming any monthly quota.
+// GenerateLocalCommand runs a Go script to produce CSV files, without calling
+// any cloud API or consuming any monthly quota.
 //
 // The script is interpreted by an embedded Go interpreter (yaegi) bundled
-// inside the Seedmancer binary — no Go toolchain needs to be installed on
-// the client machine.
+// inside the Seedmancer binary — no Go toolchain needs to be installed.
 //
-// The script must be a self-contained Go program (package main, stdlib only)
-// that writes <table>.csv files to the directory passed as os.Args[1].
-// See `seedmancer://docs/local-generation` or the --help text for the contract.
+// Pass the script via stdin (recommended — no file written to disk):
 //
-// Typical agent workflow:
-//  1. Write the Go script to a temp file (e.g. /tmp/gen.go).
-//  2. seedmancer generate-local --script-file /tmp/gen.go --schema-id <ref>
-//  3. seedmancer seed --id <dataset-id>
+//	seedmancer generate-local --schema-id <ref> --id <id> <<'EOF'
+//	package main
+//	...
+//	EOF
+//
+// Or via a file path (use "-" for stdin explicitly):
+//
+//	seedmancer generate-local --script-file /path/to/gen.go --schema-id <ref>
 func GenerateLocalCommand() *cli.Command {
 	return &cli.Command{
 		Name:  "generate-local",
-		Usage: "Run a local Go script to generate CSV test data (no cloud, no quota, no Go toolchain needed)",
-		Description: "Executes a Go program to produce CSV files for one or more tables.\n" +
-			"The script is interpreted by an embedded Go engine inside the\n" +
-			"Seedmancer binary — no `go` command needs to be in PATH.\n\n" +
+		Usage: "Generate CSV test data from a Go script (no cloud, no quota, no Go toolchain needed)",
+		Description: "Interprets a Go program via the embedded engine inside the binary.\n" +
 			"The script receives the output directory as os.Args[1] and must\n" +
-			"write <table>.csv files there using only stdlib (encoding/csv,\n" +
-			"fmt, os, math/rand, crypto/rand, time, …).\n\n" +
-			"This is the offline / quota-free alternative to `seedmancer generate`.\n" +
-			"Use it directly or let an AI agent write the script and call this\n" +
-			"command when the Seedmancer MCP server is not available.\n\n" +
-			"Script contract:\n" +
-			"  package main\n\n" +
-			"  import (\"encoding/csv\"; \"fmt\"; \"os\")\n\n" +
+			"write <table>.csv files there using only stdlib.\n\n" +
+			"Recommended: pipe the script via stdin so nothing is written to disk:\n\n" +
+			"  seedmancer generate-local --schema-id <fp> --id mydata <<'EOF'\n" +
+			"  package main\n" +
+			"  import (\"encoding/csv\"; \"fmt\"; \"os\")\n" +
 			"  func main() {\n" +
 			"    out := os.Args[1]\n" +
 			"    f, _ := os.Create(out + \"/users.csv\")\n" +
 			"    w := csv.NewWriter(f)\n" +
-			"    w.Write([]string{\"id\", \"name\", \"email\"})\n" +
-			"    for i := 1; i <= 10; i++ {\n" +
-			"      w.Write([]string{fmt.Sprintf(\"%d\",i), fmt.Sprintf(\"User %d\",i), fmt.Sprintf(\"u%d@example.com\",i)})\n" +
-			"    }\n" +
+			"    w.Write([]string{\"id\", \"name\"})\n" +
+			"    for i := 1; i <= 5; i++ { w.Write([]string{fmt.Sprintf(\"%d\", i), fmt.Sprintf(\"User %d\", i)}) }\n" +
 			"    w.Flush(); f.Close()\n" +
-			"  }",
+			"  }\n" +
+			"  EOF\n\n" +
+			"Pass --script-file /path/to/gen.go (or --script-file - for stdin) to read from a file.",
 		ArgsUsage: " ",
 		Flags: []cli.Flag{
 			&cli.StringFlag{
-				Name:     "script-file",
-				Aliases:  []string{"f"},
-				Required: true,
-				Usage:    "(required) Path to the Go source file to execute",
+				Name:    "script-file",
+				Aliases: []string{"f"},
+				Usage:   "Path to the Go source file (use \"-\" for stdin; omit to read stdin automatically)",
 			},
 			&cli.StringFlag{
 				Name:    "schema-id",
@@ -82,16 +78,27 @@ func GenerateLocalCommand() *cli.Command {
 
 func runGenerateLocal(c *cli.Context) error {
 	scriptFile := strings.TrimSpace(c.String("script-file"))
-	if scriptFile == "" {
-		return fmt.Errorf("--script-file is required")
+
+	var script []byte
+	var err error
+
+	switch {
+	case scriptFile == "" || scriptFile == "-":
+		// Read from stdin — nothing is written to disk. This is the
+		// recommended path for agents: pipe the script via a heredoc.
+		script, err = io.ReadAll(os.Stdin)
+		if err != nil {
+			return fmt.Errorf("reading script from stdin: %w", err)
+		}
+	default:
+		script, err = os.ReadFile(scriptFile)
+		if err != nil {
+			return fmt.Errorf("reading script file %q: %w", scriptFile, err)
+		}
 	}
 
-	script, err := os.ReadFile(scriptFile)
-	if err != nil {
-		return fmt.Errorf("reading script file %q: %w", scriptFile, err)
-	}
 	if strings.TrimSpace(string(script)) == "" {
-		return fmt.Errorf("script file %q is empty", scriptFile)
+		return fmt.Errorf("script is empty (pass via stdin or --script-file)")
 	}
 
 	out, err := RunGenerateLocal(context.Background(), GenerateLocalInput{
