@@ -148,3 +148,41 @@ func trimCSVSuffix(name string) string {
 	}
 	return name[:len(name)-len(".csv")]
 }
+
+// listLocalDatasetIDs returns the dataset folder names directly under
+// <schemaDir>/datasets, sorted alphabetically. Used to surface "what
+// inherit ids are available?" in error messages and fallback resolution.
+// Errors are swallowed — an empty list is the right "no info" return.
+func listLocalDatasetIDs(schemaDir string) []string {
+	entries, err := os.ReadDir(filepath.Join(schemaDir, "datasets"))
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		out = append(out, e.Name())
+	}
+	sort.Strings(out)
+	return out
+}
+
+// singleFallbackDataset returns the only available dataset id (excluding
+// the new dataset's own id) when there's exactly one to choose from.
+// Returns "" otherwise; callers must treat the fallback as advisory and
+// surface that they used it (see InheritFallback in GenerateLocalOutput).
+func singleFallbackDataset(available []string, excludeID string) string {
+	candidates := make([]string, 0, len(available))
+	for _, d := range available {
+		if d == excludeID {
+			continue
+		}
+		candidates = append(candidates, d)
+	}
+	if len(candidates) == 1 {
+		return candidates[0]
+	}
+	return ""
+}

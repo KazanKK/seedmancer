@@ -135,7 +135,11 @@ func runGenerateLocal(c *cli.Context) error {
 	fmt.Printf("\nGenerated dataset → %s\n", out.Path)
 	fmt.Printf("Tables: %s\n", strings.Join(out.Tables, ", "))
 	if out.InheritedFrom != "" {
-		fmt.Printf("Inherited from: %s", out.InheritedFrom)
+		if out.InheritFallback {
+			fmt.Printf("Inherited from: %s (fallback — requested base not found)", out.InheritedFrom)
+		} else {
+			fmt.Printf("Inherited from: %s", out.InheritedFrom)
+		}
 		if len(out.ClearedTables) > 0 {
 			fmt.Printf(" (auto-cleared FK descendants: %s)", strings.Join(out.ClearedTables, ", "))
 		}

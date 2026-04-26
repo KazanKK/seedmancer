@@ -106,6 +106,57 @@ func TestTrimCSVSuffix(t *testing.T) {
 	}
 }
 
+func TestSingleFallbackDataset(t *testing.T) {
+	cases := []struct {
+		name      string
+		available []string
+		exclude   string
+		want      string
+	}{
+		{"empty list", nil, "", ""},
+		{"single match", []string{"baseline"}, "", "baseline"},
+		{"single match exclude self", []string{"baseline", "v2"}, "v2", "baseline"},
+		{"multiple → no fallback", []string{"a", "b"}, "", ""},
+		{"only candidate is excluded", []string{"new"}, "new", ""},
+		{"timestamp export", []string{"20260426231303"}, "", "20260426231303"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := singleFallbackDataset(tc.available, tc.exclude); got != tc.want {
+				t.Errorf("singleFallbackDataset(%v, %q) = %q; want %q",
+					tc.available, tc.exclude, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestListLocalDatasetIDs(t *testing.T) {
+	dir := t.TempDir()
+	datasetsDir := filepath.Join(dir, "datasets")
+	if err := os.MkdirAll(filepath.Join(datasetsDir, "baseline"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(datasetsDir, "products-v2"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	// Files at the same level should be ignored.
+	if err := os.WriteFile(filepath.Join(datasetsDir, "stray.csv"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := listLocalDatasetIDs(dir)
+	want := []string{"baseline", "products-v2"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("listLocalDatasetIDs = %v; want %v", got, want)
+	}
+
+	// Missing datasets dir → empty slice, no error.
+	emptyDir := t.TempDir()
+	if got := listLocalDatasetIDs(emptyDir); got != nil {
+		t.Fatalf("expected nil, got %v", got)
+	}
+}
+
 func keys(m map[string]bool) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {

@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	db "github.com/KazanKK/seedmancer/database"
 	"github.com/KazanKK/seedmancer/internal/ui"
@@ -45,7 +44,7 @@ func ExportCommand() *cli.Command {
 		Flags: []cli.Flag{
 			&cli.StringFlag{
 				Name:  "id",
-				Usage: "Dataset id for the new dump (defaults to a YYYYMMDDHHMMSS timestamp)",
+				Usage: "Dataset id for the new dump (defaults to \"baseline\" — matches the docs and `--inherit baseline`)",
 			},
 			&cli.StringFlag{
 				Name:    "env",
@@ -84,8 +83,14 @@ func ExportCommand() *cli.Command {
 
 		datasetName := strings.TrimSpace(c.String("id"))
 		if datasetName == "" {
-			datasetName = time.Now().UTC().Format("20060102150405")
-			ui.Info("Auto-generated dataset id: %s", datasetName)
+			// Default to "baseline" so the dataset id matches the documented
+			// `inherit: baseline` flow used by generate_dataset_local. Earlier
+			// versions defaulted to a YYYYMMDDHHMMSS timestamp, which forced
+			// agents to look up the timestamp before they could inherit from
+			// the export. Re-running export overwrites the existing baseline
+			// (after --force / confirmation) which is what most users want.
+			datasetName = "baseline"
+			ui.Info("Using default dataset id: baseline (override with --id)")
 		}
 			datasetName = utils.SanitizeDatasetSegment(datasetName)
 

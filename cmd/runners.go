@@ -717,15 +717,28 @@ This project uses **Seedmancer** for test data management.
      running (it is configured in seedmancer.yaml), so this always works.
      export_database captures the schema + current data and creates the
      ` + "`.seedmancer/schemas/<fp>/schema.json`" + ` file that all other tools need.
-     The dataset created by export is named ` + "`baseline`" + ` and you can inherit from it.
+     The dataset created by export defaults to ` + "`baseline`" + `; older projects may
+     have a timestamp like ` + "`20260426231303`" + ` instead — call ` + "`list_datasets`" + ` to
+     confirm the actual id.
 3. ` + "`describe_schema`" + ` — get the exact table and column names.
 4. ` + "`generate_dataset_local`" + ` with ` + "`inherit: \"baseline\"`" + ` — write a Go script that produces
    only the tables you actually want to change. The result is a complete, seedable
    dataset; descendant tables that FK to overwritten tables are auto-cleared.
+   When the project's export uses a timestamp id, ` + "`inherit`" + ` falls back to it
+   automatically (response carries ` + "`inheritFallback: true`" + `).
 5. ` + "`seed_database`" + ` — load the new dataset into the database.
 
 **Never create both a "-gen" and "-merged" dataset for one task.** Always pass
 ` + "`inherit`" + ` so a single ` + "`generate_dataset_local`" + ` call yields a complete dataset.
+
+## When NOT to use Seedmancer
+
+For **stress / load fixtures with ≳ 100k rows per table** (e.g. "1M products"),
+do **not** use Seedmancer. Generate directly in Postgres with
+` + "`INSERT … SELECT … FROM generate_series(...)`" + ` or ` + "`COPY`" + ` from a streaming
+script. Keep that script under ` + "`load-tests/`" + ` (or similar), separate from
+` + "`.seedmancer/`" + `. Seedmancer is for curated, reproducible snapshots — not
+for "make this table huge."
 
 ## To modify existing generated data:
 
@@ -789,7 +802,8 @@ generate, or seed test/fixture data:
   Never show script content, file paths, or generation internals to the user.
 - Call ` + "`list_schemas`" + ` first. If no schemas exist, call ` + "`export_database`" + ` — the DB
   is already running (configured in seedmancer.yaml), so this always works. The
-  resulting dataset is ` + "`baseline`" + ` and you can ` + "`inherit`" + ` from it.
+  resulting dataset defaults to ` + "`baseline`" + ` (older projects may have a
+  timestamp id; ` + "`inherit`" + ` falls back to a single existing dataset automatically).
 - Then: ` + "`describe_schema`" + ` → ` + "`generate_dataset_local`" + ` (with ` + "`inherit: \"baseline\"`" + ` for
   partial updates) → ` + "`seed_database`" + `.
 - **Never create both ` + "`-gen`" + ` and ` + "`-merged`" + ` datasets** for one change. ` + "`inherit`" + ` produces
@@ -797,6 +811,10 @@ generate, or seed test/fixture data:
   tables are auto-cleared.
 - For a new project without seedmancer.yaml: ` + "`init_project`" + ` first.
 - Prefer ` + "`generate_dataset_local`" + ` (local, no quota) over ` + "`generate_dataset`" + ` (cloud).
+- **Don't use Seedmancer for stress / load fixtures (≳ 100k rows per table).** For
+  "1M products"-style scale data, generate directly in Postgres
+  (` + "`INSERT … SELECT FROM generate_series`" + `) under ` + "`load-tests/`" + `, not under
+  ` + "`.seedmancer/`" + `. Seedmancer is for curated reproducible snapshots, not bulk loaders.
 - **To modify existing data**: call ` + "`describe_dataset`" + ` to check for ` + "`hasGeneratorScript`" + `,
   then ` + "`get_dataset_script`" + ` to retrieve the source, modify it, and pass it back
   to ` + "`generate_dataset_local`" + ` with a new dataset id and ` + "`inherit: \"baseline\"`" + `.
@@ -1312,6 +1330,10 @@ type GenerateLocalOutput struct {
 	// ClearedTables lists tables whose CSV was reduced to header-only because
 	// they FK to a table the script overwrote. Empty when no inherit happened.
 	ClearedTables []string `json:"clearedTables,omitempty"`
+	// InheritFallback is true when the requested `inherit` id wasn't found
+	// but a single existing dataset was used as the base instead. Surfaces
+	// the "user has a timestamp dataset, agent asked for `baseline`" case.
+	InheritFallback bool `json:"inheritFallback,omitempty"`
 }
 
 func RunGenerateLocal(ctx context.Context, in GenerateLocalInput) (GenerateLocalOutput, error) {
@@ -1352,13 +1374,44 @@ func RunGenerateLocal(ctx context.Context, in GenerateLocalInput) (GenerateLocal
 
 	// Resolve the base dataset *before* touching the new dataset directory so
 	// a typo in --inherit doesn't destroy an existing dataset.
-	var baseDir string
+	//
+	// When the literal name doesn't match but the schema has exactly one
+	// dataset, we fall back to it. This is the "user ran `seedmancer export`
+	// before we changed the default to `baseline`, so they have a timestamp
+	// folder instead" case — agents shouldn't have to discover the timestamp
+	// before they can do partial generations. Multiple datasets → no fallback,
+	// because picking arbitrarily would silently bias the result.
+	var (
+		baseDir       string
+		resolvedFrom  = inheritFrom
+		usedFallback  bool
+	)
 	if inheritFrom != "" {
 		_, dir, err := utils.FindLocalDataset(projectRoot, cfg.StoragePath, schema.FingerprintShort, inheritFrom)
-		if err != nil {
-			return GenerateLocalOutput{}, fmt.Errorf("resolving inherit base %q: %w", inheritFrom, err)
+		if err == nil {
+			baseDir = dir
+		} else {
+			datasets := listLocalDatasetIDs(schema.Path)
+			fallback := singleFallbackDataset(datasets, datasetName)
+			if fallback != "" {
+				_, dir2, err2 := utils.FindLocalDataset(projectRoot, cfg.StoragePath, schema.FingerprintShort, fallback)
+				if err2 == nil {
+					baseDir = dir2
+					resolvedFrom = fallback
+					usedFallback = true
+				}
+			}
+			if baseDir == "" {
+				avail := "(none)"
+				if len(datasets) > 0 {
+					avail = strings.Join(datasets, ", ")
+				}
+				return GenerateLocalOutput{}, fmt.Errorf(
+					"inherit base %q not found under schema %s. Available datasets: %s",
+					inheritFrom, schema.FingerprintShort, avail,
+				)
+			}
 		}
-		baseDir = dir
 	}
 
 	datasetDir := utils.DatasetPath(projectRoot, cfg.StoragePath, schema.FingerprintShort, datasetName)
@@ -1488,8 +1541,9 @@ func RunGenerateLocal(ctx context.Context, in GenerateLocalInput) (GenerateLocal
 		Path:                  datasetDir,
 		Tables:                tables,
 		GeneratorScriptStored: utils.SaveGeneratorScript(projectRoot, datasetName, in.Script) == nil,
-		InheritedFrom:         inheritFrom,
+		InheritedFrom:         resolvedFrom,
 		ClearedTables:         sortedKeys(cleared),
+		InheritFallback:       usedFallback,
 	}, nil
 }
 

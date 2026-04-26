@@ -110,6 +110,20 @@ Use ` + "`generate_dataset_local`" + ` when:
 Use ` + "`generate_dataset`" + ` when you want the cloud service to fabricate a large,
 realistic dataset from a short natural-language description.
 
+## When NOT to use Seedmancer at all
+
+Seedmancer is for **curated, repeatable snapshots**. It is the wrong tool for:
+
+- **Large-scale stress / load fixtures (≳ 100k rows per table).** CSV import is
+  I/O-bound; for 1M+ rows prefer ` + "`INSERT … SELECT … FROM generate_series(...)`" + `
+  or ` + "`COPY`" + ` from a streaming generator, run directly against the target
+  database. Keep that script under ` + "`load-tests/`" + ` (or similar) — not as a
+  Seedmancer dataset. Mixing scale loaders with reproducible fixtures makes
+  both worse.
+- **Production-shape anonymisation pipelines.** Use a dedicated masking tool.
+- **One-off "I just need to insert this row" hacks.** Use plain SQL or your
+  ORM seeders.
+
 ## Recommended workflow: ` + "`inherit`" + ` from baseline
 
 The ` + "`inherit`" + ` parameter is the safe default for any partial generation.
