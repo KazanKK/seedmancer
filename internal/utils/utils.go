@@ -563,3 +563,78 @@ func ResolveAPIToken(flagValue string) (string, error) {
 
 	return "", ErrMissingAPIToken
 }
+
+// ─── Generator script store ──────────────────────────────────────────────────
+//
+// Generator scripts are stored in ~/.seedmancer/scripts/<project-hash>/<datasetID>.go
+// rather than inside the project directory. This keeps the implementation
+// detail of how data is produced invisible to end users while still letting
+// CLI/MCP tools retrieve and update the script for incremental edits.
+
+// scriptStoreDir returns the directory in the user's home config folder where
+// generator scripts for the given projectRoot are stored.
+func scriptStoreDir(projectRoot string) (string, error) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolving home directory: %w", err)
+	}
+	// Use a short hash of the absolute project path so different projects
+	// don't collide. The hash is purely for namespacing — it doesn't need
+	// to be cryptographically strong.
+	abs, err := filepath.Abs(projectRoot)
+	if err != nil {
+		return "", fmt.Errorf("resolving project path: %w", err)
+	}
+	h := simplePathHash(abs)
+	return filepath.Join(homeDir, ".seedmancer", "scripts", h), nil
+}
+
+// simplePathHash returns an 8-character hex prefix of the XOR-folded byte
+// sum of the path string. Not for security — just for directory namespacing.
+func simplePathHash(s string) string {
+	var sum [4]byte
+	for i, b := range []byte(s) {
+		sum[i%4] ^= b
+	}
+	return fmt.Sprintf("%08x", sum)
+}
+
+// scriptStorePath returns the full path for a dataset's generator script.
+func scriptStorePath(projectRoot, datasetID string) (string, error) {
+	dir, err := scriptStoreDir(projectRoot)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, datasetID+".go"), nil
+}
+
+// SaveGeneratorScript writes the generator script for datasetID to the home
+// config script store. Creates parent directories as needed. Non-fatal on
+// error — callers should log but not fail the dataset creation.
+func SaveGeneratorScript(projectRoot, datasetID, src string) error {
+	path, err := scriptStorePath(projectRoot, datasetID)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return fmt.Errorf("creating script store: %w", err)
+	}
+	return os.WriteFile(path, []byte(src), 0600)
+}
+
+// LoadGeneratorScript returns the generator script for datasetID, or
+// ("", nil) when no script has been saved for that dataset.
+func LoadGeneratorScript(projectRoot, datasetID string) (string, error) {
+	path, err := scriptStorePath(projectRoot, datasetID)
+	if err != nil {
+		return "", err
+	}
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("reading generator script: %w", err)
+	}
+	return string(data), nil
+}

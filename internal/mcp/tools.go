@@ -51,6 +51,19 @@ func registerTools(s *mcp.Server) {
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
+		Name:  "get_dataset_script",
+		Title: "Get dataset generator script",
+		Description: "Return the generator script that was used to create a local dataset with generate_dataset_local. " +
+			"Use this before generating a new dataset — retrieve the existing script, modify it, and pass the " +
+			"modified source back to generate_dataset_local instead of writing a new script from scratch. " +
+			"Returns an error when the dataset was not created with generate_dataset_local.",
+		Annotations: readOnly,
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in cmd.GetDatasetScriptInput) (*mcp.CallToolResult, cmd.GetDatasetScriptOutput, error) {
+		out, err := cmd.RunGetDatasetScript(ctx, in)
+		return nil, out, err
+	})
+
+	mcp.AddTool(s, &mcp.Tool{
 		Name:        "list_schemas",
 		Title:       "List schemas",
 		Description: "List schemas known locally and/or remotely.",

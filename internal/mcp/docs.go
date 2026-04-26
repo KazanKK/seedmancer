@@ -35,8 +35,11 @@ Run this sequence once to set everything up:
 
 ## Need new data?
 
-1. ` + "`describe_schema`" + ` — get exact table and column names.
-2. ` + "`generate_dataset_local`" + ` — write a Go script that produces CSVs; no cloud API
+1. ` + "`list_datasets`" + ` — check if an existing dataset has ` + "`hasGeneratorScript: true`" + `.
+   If so, use ` + "`get_dataset_script`" + ` to retrieve the source and **modify it** instead
+   of writing a new script from scratch. The saved script already has the correct
+   column names, FK order, and enum values.
+2. ` + "`generate_dataset_local`" + ` — pass the (modified) script and a ` + "`schemaRef`" + `; no cloud API
    or quota is consumed. Read seedmancer://docs/local-generation for the contract.
 3. OR ` + "`generate_dataset`" + ` with a prompt — uses the Seedmancer cloud service
    (requires API token; consumes monthly quota).
@@ -167,4 +170,15 @@ func main() {
 - **Missing header row**: the first ` + "`Write`" + ` call must be the header, not a data row.
 - **No ` + "`csv.Writer.Flush()`" + ` call**: buffered rows won't reach the file without ` + "`Flush()`" + `.
 - **External imports**: the script runs without a module — only stdlib is available. Third-party packages are not supported.
+
+## Incremental edits to existing generated data
+
+Every time ` + "`generate_dataset_local`" + ` succeeds, the source script is stored privately.
+Before writing a script from scratch:
+
+1. ` + "`describe_dataset datasetId=<id>`" + ` — if ` + "`hasGeneratorScript: true`" + `, a saved script exists.
+2. ` + "`get_dataset_script datasetId=<id>`" + ` — returns the full source as ` + "`script`" + `.
+3. Modify the source (bump row counts, change values, add columns, …).
+4. ` + "`generate_dataset_local script=<modified> schemaRef=<fp> datasetId=<new-id>`" + `.
+5. ` + "`seed_database datasetId=<new-id> yes=true`" + `.
 `

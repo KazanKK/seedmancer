@@ -107,14 +107,17 @@ type DescribeDatasetInput struct {
 // contains, their row counts, and a small preview — so agents don't
 // need shell access to understand what's in it.
 type DescribeDatasetOutput struct {
-	Dataset           string               `json:"dataset"`
-	Path              string               `json:"path"`
-	SchemaFingerprint string               `json:"schemaFingerprint"`
-	SchemaShort       string               `json:"schemaShort"`
-	SchemaDisplayName string               `json:"schemaDisplayName,omitempty"`
-	SourceEnv         string               `json:"sourceEnv,omitempty"`
-	UpdatedAt         string               `json:"updatedAt"`
-	Files             []DatasetFilePreview `json:"files"`
+	Dataset              string               `json:"dataset"`
+	Path                 string               `json:"path"`
+	SchemaFingerprint    string               `json:"schemaFingerprint"`
+	SchemaShort          string               `json:"schemaShort"`
+	SchemaDisplayName    string               `json:"schemaDisplayName,omitempty"`
+	SourceEnv            string               `json:"sourceEnv,omitempty"`
+	UpdatedAt            string               `json:"updatedAt"`
+	Files                []DatasetFilePreview `json:"files"`
+	// HasGeneratorScript is true when a generator script has been saved for
+	// this dataset. Retrieve the script with the get_dataset_script tool.
+	HasGeneratorScript   bool                 `json:"hasGeneratorScript,omitempty"`
 }
 
 // DatasetFilePreview is one row in DescribeDatasetOutput.Files. Rows is
@@ -179,7 +182,46 @@ func RunDescribeDataset(_ context.Context, in DescribeDatasetInput) (DescribeDat
 		}
 		out.Files = append(out.Files, fp)
 	}
+	// Signal whether a generator script was saved for this dataset so agents
+	// know to call get_dataset_script before writing a new script from scratch.
+	if script, err := utils.LoadGeneratorScript(projectRoot, in.DatasetID); err == nil && script != "" {
+		out.HasGeneratorScript = true
+	}
 	return out, nil
+}
+
+// ─── get_dataset_script ───────────────────────────────────────────────────────
+
+type GetDatasetScriptInput struct {
+	DatasetID string `json:"datasetId" jsonschema:"Dataset id whose generator script to retrieve"`
+}
+
+type GetDatasetScriptOutput struct {
+	DatasetID string `json:"datasetId"`
+	Script    string `json:"script"`
+}
+
+// RunGetDatasetScript returns the generator script that was saved when the
+// dataset was created with generate_dataset_local / generate-local. Returns
+// an error when no script has been saved for the given dataset id.
+func RunGetDatasetScript(_ context.Context, in GetDatasetScriptInput) (GetDatasetScriptOutput, error) {
+	configPath, err := utils.FindConfigFile()
+	if err != nil {
+		return GetDatasetScriptOutput{}, err
+	}
+	projectRoot := filepath.Dir(configPath)
+
+	script, err := utils.LoadGeneratorScript(projectRoot, in.DatasetID)
+	if err != nil {
+		return GetDatasetScriptOutput{}, fmt.Errorf("loading generator script: %w", err)
+	}
+	if script == "" {
+		return GetDatasetScriptOutput{}, fmt.Errorf(
+			"no generator script found for dataset %q — it may have been created without generate_dataset_local",
+			in.DatasetID,
+		)
+	}
+	return GetDatasetScriptOutput{DatasetID: in.DatasetID, Script: script}, nil
 }
 
 // previewDatasetFile reads the first `n+1` lines of a CSV/JSON file
@@ -677,6 +719,13 @@ This project uses **Seedmancer** for test data management.
 4. ` + "`generate_dataset_local`" + ` — write a Go script that produces CSVs (no cloud needed).
 5. ` + "`seed_database`" + ` — load the new dataset into the database.
 
+## To modify existing generated data:
+
+1. ` + "`describe_dataset`" + ` — check for ` + "`hasGeneratorScript: true`" + `.
+2. ` + "`get_dataset_script`" + ` — retrieve the saved source.
+3. Modify it and pass back to ` + "`generate_dataset_local`" + ` with a new ` + "`datasetId`" + `.
+4. ` + "`seed_database`" + ` with the new dataset id.
+
 ## If this is a brand-new project (no seedmancer.yaml):
 1. ` + "`init_project`" + ` — creates seedmancer.yaml and .seedmancer/.
 2. Then follow the standard workflow above from step 1.
@@ -718,6 +767,9 @@ generate, or seed test/fixture data:
 - Then: ` + "`describe_schema`" + ` → ` + "`generate_dataset_local`" + ` → ` + "`seed_database`" + `.
 - For a new project without seedmancer.yaml: ` + "`init_project`" + ` first.
 - Prefer ` + "`generate_dataset_local`" + ` (local, no quota) over ` + "`generate_dataset`" + ` (cloud).
+- **To modify existing data**: call ` + "`describe_dataset`" + ` to check for ` + "`hasGeneratorScript`" + `,
+  then ` + "`get_dataset_script`" + ` to retrieve the source, modify it, and pass it back
+  to ` + "`generate_dataset_local`" + ` with a new dataset id.
 - **CLI fallback** (when MCP tools are unavailable): write a Go script to a temp
   file then run ` + "`seedmancer generate-local --script-file /tmp/gen.go --schema-id <fp>`" + `,
   then ` + "`seedmancer seed --id <dataset-id>`" + `. The script writes <table>.csv to os.Args[1].
@@ -1205,10 +1257,11 @@ type GenerateLocalInput struct {
 }
 
 type GenerateLocalOutput struct {
-	Dataset string   `json:"dataset"`
-	Schema  string   `json:"schema"`
-	Path    string   `json:"path"`
-	Tables  []string `json:"tables"`
+	Dataset              string   `json:"dataset"`
+	Schema               string   `json:"schema"`
+	Path                 string   `json:"path"`
+	Tables               []string `json:"tables"`
+	GeneratorScriptStored bool    `json:"generatorScriptStored"`
 }
 
 func RunGenerateLocal(ctx context.Context, in GenerateLocalInput) (GenerateLocalOutput, error) {
@@ -1280,10 +1333,11 @@ func RunGenerateLocal(ctx context.Context, in GenerateLocalInput) (GenerateLocal
 	}
 
 	return GenerateLocalOutput{
-		Dataset: datasetName,
-		Schema:  schema.FingerprintShort,
-		Path:    datasetDir,
-		Tables:  tables,
+		Dataset:              datasetName,
+		Schema:               schema.FingerprintShort,
+		Path:                 datasetDir,
+		Tables:               tables,
+		GeneratorScriptStored: utils.SaveGeneratorScript(projectRoot, datasetName, in.Script) == nil,
 	}, nil
 }
 
