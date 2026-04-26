@@ -114,7 +114,7 @@ realistic dataset from a short natural-language description.
 ## Go script contract
 
 - ` + "`package main`" + `, stdlib only (` + "`encoding/csv`" + `, ` + "`fmt`" + `, ` + "`os`" + `, ` + "`math/rand`" + `, ` + "`time`" + `, …).
-- No ` + "`go.mod`" + ` needed — the CLI runs it with ` + "`go run main.go <outDir>`" + `.
+- No ` + "`go.mod`" + ` needed — the script is interpreted by the embedded Go engine inside the Seedmancer binary. **No Go toolchain needs to be installed.**
 - Output directory is ` + "`os.Args[1]`" + `. Write each CSV there as ` + "`<tableName>.csv`" + `.
 - **First row must be the column header**, with names matching the schema exactly (case-sensitive).
 - Subsequent rows are data. Use ` + "`encoding/csv`" + ` — it handles quoting automatically.
@@ -166,5 +166,5 @@ func main() {
 - **Wrong column names**: copy names verbatim from ` + "`describe_schema`" + ` — a mismatch silently inserts NULL or causes restore errors.
 - **Missing header row**: the first ` + "`Write`" + ` call must be the header, not a data row.
 - **No ` + "`csv.Writer.Flush()`" + ` call**: buffered rows won't reach the file without ` + "`Flush()`" + `.
-- **External imports**: the script runs without a module — only stdlib is available.
+- **External imports**: the script runs without a module — only stdlib is available. Third-party packages are not supported.
 `

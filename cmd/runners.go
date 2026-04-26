@@ -8,13 +8,13 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
 	db "github.com/KazanKK/seedmancer/database"
+	"github.com/KazanKK/seedmancer/internal/gointerp"
 	utils "github.com/KazanKK/seedmancer/internal/utils"
 )
 
@@ -695,7 +695,8 @@ seedmancer seed --id <dataset-id>
 ` + "```" + `
 
 The Go script receives the output directory as os.Args[1] and must write
-<table>.csv files there (stdlib only). Same contract as generate_dataset_local.
+<table>.csv files there (stdlib only). The Seedmancer binary includes an
+embedded Go interpreter — no Go toolchain needed.
 `
 
 // claudeMdBlock is appended to (or used to replace an existing block in)
@@ -720,6 +721,7 @@ generate, or seed test/fixture data:
 - **CLI fallback** (when MCP tools are unavailable): write a Go script to a temp
   file then run ` + "`seedmancer generate-local --script-file /tmp/gen.go --schema-id <fp>`" + `,
   then ` + "`seedmancer seed --id <dataset-id>`" + `. The script writes <table>.csv to os.Args[1].
+  The Seedmancer binary includes an embedded Go interpreter — no Go toolchain needed.
 <!-- seedmancer:end -->`
 
 type InstallAgentRulesInput struct {
@@ -1253,35 +1255,12 @@ func RunGenerateLocal(ctx context.Context, in GenerateLocalInput) (GenerateLocal
 		return GenerateLocalOutput{}, fmt.Errorf("creating dataset dir: %w", err)
 	}
 
-	// Write script to a temporary directory and run it via `go run`.
-	tmpDir, err := os.MkdirTemp("", "seedmancer-gen-*")
-	if err != nil {
+	// Execute the script via the embedded yaegi Go interpreter.
+	// No Go toolchain needs to be installed on the client — yaegi is bundled
+	// in the Seedmancer binary and supports the full standard library.
+	if err := gointerp.Run(in.Script, datasetDir); err != nil {
 		_ = os.RemoveAll(datasetDir)
-		return GenerateLocalOutput{}, fmt.Errorf("creating temp dir: %w", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	scriptPath := filepath.Join(tmpDir, "main.go")
-	if err := os.WriteFile(scriptPath, []byte(in.Script), 0644); err != nil {
-		_ = os.RemoveAll(datasetDir)
-		return GenerateLocalOutput{}, fmt.Errorf("writing script: %w", err)
-	}
-
-	runCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
-	defer cancel()
-
-	var stderr bytes.Buffer
-	goCmd := exec.CommandContext(runCtx, "go", "run", scriptPath, datasetDir)
-	goCmd.Stderr = &stderr
-	goCmd.Stdout = io.Discard
-
-	if err := goCmd.Run(); err != nil {
-		_ = os.RemoveAll(datasetDir)
-		msg := strings.TrimSpace(stderr.String())
-		if msg == "" {
-			msg = err.Error()
-		}
-		return GenerateLocalOutput{}, fmt.Errorf("script execution failed: %s", msg)
+		return GenerateLocalOutput{}, err
 	}
 
 	// Collect the CSV files the script produced.

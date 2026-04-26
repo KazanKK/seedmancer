@@ -9,25 +9,31 @@ import (
 	"github.com/urfave/cli/v2"
 )
 
-// GenerateLocalCommand runs a user-supplied Go script locally to produce CSV
+// GenerateLocalCommand runs a user-supplied Go script to produce CSV
 // files, without calling any cloud API or consuming any monthly quota.
+//
+// The script is interpreted by an embedded Go interpreter (yaegi) bundled
+// inside the Seedmancer binary — no Go toolchain needs to be installed on
+// the client machine.
 //
 // The script must be a self-contained Go program (package main, stdlib only)
 // that writes <table>.csv files to the directory passed as os.Args[1].
 // See `seedmancer://docs/local-generation` or the --help text for the contract.
 //
-// Typical agent workflow when MCP is unavailable:
+// Typical agent workflow:
 //  1. Write the Go script to a temp file (e.g. /tmp/gen.go).
 //  2. seedmancer generate-local --script-file /tmp/gen.go --schema-id <ref>
 //  3. seedmancer seed --id <dataset-id>
 func GenerateLocalCommand() *cli.Command {
 	return &cli.Command{
 		Name:  "generate-local",
-		Usage: "Run a local Go script to generate CSV test data (no cloud, no quota)",
-		Description: "Executes a user-supplied Go program locally via `go run` to\n" +
-			"produce CSV files for one or more tables. The script receives the\n" +
-			"output directory as os.Args[1] and must write <table>.csv files\n" +
-			"there using only stdlib (encoding/csv, fmt, os, math/rand, …).\n\n" +
+		Usage: "Run a local Go script to generate CSV test data (no cloud, no quota, no Go toolchain needed)",
+		Description: "Executes a Go program to produce CSV files for one or more tables.\n" +
+			"The script is interpreted by an embedded Go engine inside the\n" +
+			"Seedmancer binary — no `go` command needs to be in PATH.\n\n" +
+			"The script receives the output directory as os.Args[1] and must\n" +
+			"write <table>.csv files there using only stdlib (encoding/csv,\n" +
+			"fmt, os, math/rand, crypto/rand, time, …).\n\n" +
 			"This is the offline / quota-free alternative to `seedmancer generate`.\n" +
 			"Use it directly or let an AI agent write the script and call this\n" +
 			"command when the Seedmancer MCP server is not available.\n\n" +
