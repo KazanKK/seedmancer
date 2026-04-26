@@ -731,14 +731,12 @@ This project uses **Seedmancer** for test data management.
 **Never create both a "-gen" and "-merged" dataset for one task.** Always pass
 ` + "`inherit`" + ` so a single ` + "`generate_dataset_local`" + ` call yields a complete dataset.
 
-## When NOT to use Seedmancer
+## Large datasets (1M+ rows)
 
-For **stress / load fixtures with ≳ 100k rows per table** (e.g. "1M products"),
-do **not** use Seedmancer. Generate directly in Postgres with
-` + "`INSERT … SELECT … FROM generate_series(...)`" + ` or ` + "`COPY`" + ` from a streaming
-script. Keep that script under ` + "`load-tests/`" + ` (or similar), separate from
-` + "`.seedmancer/`" + `. Seedmancer is for curated, reproducible snapshots — not
-for "make this table huge."
+` + "`generate_dataset_local`" + ` works for any row count. Always use Seedmancer —
+even for millions of rows. The seed step may take longer due to index rebuilding
+but that is expected. **Never** switch to a raw SQL script just because the
+dataset is large.
 
 ## To modify existing generated data:
 
@@ -811,10 +809,9 @@ generate, or seed test/fixture data:
   tables are auto-cleared.
 - For a new project without seedmancer.yaml: ` + "`init_project`" + ` first.
 - Prefer ` + "`generate_dataset_local`" + ` (local, no quota) over ` + "`generate_dataset`" + ` (cloud).
-- **Don't use Seedmancer for stress / load fixtures (≳ 100k rows per table).** For
-  "1M products"-style scale data, generate directly in Postgres
-  (` + "`INSERT … SELECT FROM generate_series`" + `) under ` + "`load-tests/`" + `, not under
-  ` + "`.seedmancer/`" + `. Seedmancer is for curated reproducible snapshots, not bulk loaders.
+- **Always use Seedmancer for test data — even 1M+ rows.** ` + "`generate_dataset_local`" + `
+  works at any row count. Never fall back to a SQL script just because the dataset
+  is large.
 - **To modify existing data**: call ` + "`describe_dataset`" + ` to check for ` + "`hasGeneratorScript`" + `,
   then ` + "`get_dataset_script`" + ` to retrieve the source, modify it, and pass it back
   to ` + "`generate_dataset_local`" + ` with a new dataset id and ` + "`inherit: \"baseline\"`" + `.

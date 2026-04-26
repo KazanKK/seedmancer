@@ -110,16 +110,16 @@ Use ` + "`generate_dataset_local`" + ` when:
 Use ` + "`generate_dataset`" + ` when you want the cloud service to fabricate a large,
 realistic dataset from a short natural-language description.
 
-## When NOT to use Seedmancer at all
+## Performance note for large datasets
 
-Seedmancer is for **curated, repeatable snapshots**. It is the wrong tool for:
+` + "`generate_dataset_local`" + ` works for any row count. For very large tables
+(hundreds of thousands of rows) the Go generator runs in memory and writes CSV
+files, which is efficient for insertion-later workflows but not streaming.
+If the user asks for 1M+ rows and speed is the priority, mention that the seed
+step will take time proportional to index rebuilding on the target DB.
 
-- **Large-scale stress / load fixtures (≳ 100k rows per table).** CSV import is
-  I/O-bound; for 1M+ rows prefer ` + "`INSERT … SELECT … FROM generate_series(...)`" + `
-  or ` + "`COPY`" + ` from a streaming generator, run directly against the target
-  database. Keep that script under ` + "`load-tests/`" + ` (or similar) — not as a
-  Seedmancer dataset. Mixing scale loaders with reproducible fixtures makes
-  both worse.
+## Guidance on what Seedmancer should NOT be
+
 - **Production-shape anonymisation pipelines.** Use a dedicated masking tool.
 - **One-off "I just need to insert this row" hacks.** Use plain SQL or your
   ORM seeders.
