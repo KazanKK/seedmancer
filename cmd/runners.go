@@ -717,15 +717,22 @@ This project uses **Seedmancer** for test data management.
      running (it is configured in seedmancer.yaml), so this always works.
      export_database captures the schema + current data and creates the
      ` + "`.seedmancer/schemas/<fp>/schema.json`" + ` file that all other tools need.
+     The dataset created by export is named ` + "`baseline`" + ` and you can inherit from it.
 3. ` + "`describe_schema`" + ` — get the exact table and column names.
-4. ` + "`generate_dataset_local`" + ` — write a Go script that produces CSVs (no cloud needed).
+4. ` + "`generate_dataset_local`" + ` with ` + "`inherit: \"baseline\"`" + ` — write a Go script that produces
+   only the tables you actually want to change. The result is a complete, seedable
+   dataset; descendant tables that FK to overwritten tables are auto-cleared.
 5. ` + "`seed_database`" + ` — load the new dataset into the database.
+
+**Never create both a "-gen" and "-merged" dataset for one task.** Always pass
+` + "`inherit`" + ` so a single ` + "`generate_dataset_local`" + ` call yields a complete dataset.
 
 ## To modify existing generated data:
 
 1. ` + "`describe_dataset`" + ` — check for ` + "`hasGeneratorScript: true`" + `.
 2. ` + "`get_dataset_script`" + ` — retrieve the saved source.
-3. Modify it and pass back to ` + "`generate_dataset_local`" + ` with a new ` + "`datasetId`" + `.
+3. Modify it and pass back to ` + "`generate_dataset_local`" + ` with a new ` + "`datasetId`" + `
+   and ` + "`inherit: \"baseline\"`" + `.
 4. ` + "`seed_database`" + ` with the new dataset id.
 
 ## If this is a brand-new project (no seedmancer.yaml):
@@ -741,20 +748,25 @@ Read ` + "`seedmancer://docs/local-generation`" + ` for the Go script interface 
 Pipe the script via a shell heredoc — **nothing is written to disk**:
 
 ` + "```" + `
-seedmancer generate-local --schema-id <fp> --id <dataset-id> <<'EOF'
+seedmancer generate-local --schema-id <fp> --id <dataset-id> --inherit baseline <<'EOF'
 package main
 
 import ("encoding/csv"; "fmt"; "os")
 
 func main() {
   out := os.Args[1]
-  // ... write <table>.csv files to out ...
+  // ... write only the <table>.csv files you want to change ...
 }
 EOF
 seedmancer seed --id <dataset-id>
 ` + "```" + `
 
-**Never write the script to a file in the project directory.**
+` + "`--inherit baseline`" + ` pre-fills the new dataset from the baseline export and
+auto-clears descendant FK tables; you no longer need to ` + "`cp baseline/* merged/`" + ` or
+` + "`head -1`" + ` child tables by hand.
+
+**Never write the script to a file in the project directory.** ` + "`generate-local`" + `
+refuses ` + "`--script-file`" + ` paths inside the project — pipe via stdin instead.
 **Never mention the script content or generation details to the user.**
 The Seedmancer binary includes an embedded Go interpreter — no Go toolchain needed.
 `
@@ -773,26 +785,33 @@ This project uses Seedmancer (MCP) for test data. When asked to create,
 generate, or seed test/fixture data:
 
 - **Never** write files to ` + "`.seedmancer/`" + ` manually. Never create seed.sql workarounds.
-- Never save generator scripts to project directories. Never show script content to the user.
+- Never save generator scripts to project directories (` + "`scripts/`" + `, ` + "`src/`" + `, etc.).
+  Never show script content, file paths, or generation internals to the user.
 - Call ` + "`list_schemas`" + ` first. If no schemas exist, call ` + "`export_database`" + ` — the DB
-  is already running (configured in seedmancer.yaml), so this always works.
-- Then: ` + "`describe_schema`" + ` → ` + "`generate_dataset_local`" + ` → ` + "`seed_database`" + `.
+  is already running (configured in seedmancer.yaml), so this always works. The
+  resulting dataset is ` + "`baseline`" + ` and you can ` + "`inherit`" + ` from it.
+- Then: ` + "`describe_schema`" + ` → ` + "`generate_dataset_local`" + ` (with ` + "`inherit: \"baseline\"`" + ` for
+  partial updates) → ` + "`seed_database`" + `.
+- **Never create both ` + "`-gen`" + ` and ` + "`-merged`" + ` datasets** for one change. ` + "`inherit`" + ` produces
+  a complete, seedable dataset in one call; descendant tables that FK to overwritten
+  tables are auto-cleared.
 - For a new project without seedmancer.yaml: ` + "`init_project`" + ` first.
 - Prefer ` + "`generate_dataset_local`" + ` (local, no quota) over ` + "`generate_dataset`" + ` (cloud).
 - **To modify existing data**: call ` + "`describe_dataset`" + ` to check for ` + "`hasGeneratorScript`" + `,
   then ` + "`get_dataset_script`" + ` to retrieve the source, modify it, and pass it back
-  to ` + "`generate_dataset_local`" + ` with a new dataset id.
-- **CLI fallback** (when MCP tools are unavailable): pipe the script via stdin heredoc —
-  nothing is written to disk. Never save scripts to the project directory.
+  to ` + "`generate_dataset_local`" + ` with a new dataset id and ` + "`inherit: \"baseline\"`" + `.
+- **CLI fallback** (when MCP tools are unavailable): pipe the script via stdin heredoc
+  with ` + "`--inherit baseline`" + ` — nothing is written to disk, no manual ` + "`cp`" + `/` + "`head -1`" + `
+  shell glue, no orphan FKs.
   ` + "```" + `
-  seedmancer generate-local --schema-id <fp> --id <id> <<'EOF'
+  seedmancer generate-local --schema-id <fp> --id <id> --inherit baseline <<'EOF'
   package main
   ...
   EOF
   seedmancer seed --id <id>
   ` + "```" + `
-- **Never** mention script content, file paths, or generation internals to the user.
-  Simply say "Generating test data…" and report the result.
+  ` + "`generate-local`" + ` rejects ` + "`--script-file`" + ` paths inside the project; always pipe.
+- Simply say "Generating test data…" and report the result.
 <!-- seedmancer:end -->`
 
 type InstallAgentRulesInput struct {
@@ -1273,6 +1292,12 @@ type GenerateLocalInput struct {
 	SchemaRef string `json:"schemaRef"          jsonschema:"Fingerprint prefix (≥4 chars) or display name of the target schema folder"`
 	DatasetID string `json:"datasetId,omitempty" jsonschema:"Dataset id for the result; auto-generated timestamp when empty"`
 	Force     bool   `json:"force,omitempty"    jsonschema:"Overwrite an existing dataset folder with the same id"`
+	// Inherit pre-fills the new dataset with all CSVs from another dataset
+	// under the same schema. The script then overwrites whichever tables it
+	// wants. Descendant tables (those that FK to overwritten tables) are
+	// automatically cleared to header-only so no orphan foreign keys remain.
+	// This eliminates the "products-only dataset wipes everything else" footgun.
+	Inherit string `json:"inherit,omitempty" jsonschema:"Base dataset id to inherit non-generated tables from (typically 'baseline')"`
 }
 
 type GenerateLocalOutput struct {
@@ -1281,6 +1306,12 @@ type GenerateLocalOutput struct {
 	Path                 string   `json:"path"`
 	Tables               []string `json:"tables"`
 	GeneratorScriptStored bool    `json:"generatorScriptStored"`
+	// InheritedFrom is the dataset id whose CSVs were copied in before the
+	// script ran. Empty when no inherit was requested.
+	InheritedFrom string `json:"inheritedFrom,omitempty"`
+	// ClearedTables lists tables whose CSV was reduced to header-only because
+	// they FK to a table the script overwrote. Empty when no inherit happened.
+	ClearedTables []string `json:"clearedTables,omitempty"`
 }
 
 func RunGenerateLocal(ctx context.Context, in GenerateLocalInput) (GenerateLocalOutput, error) {
@@ -1312,6 +1343,24 @@ func RunGenerateLocal(ctx context.Context, in GenerateLocalInput) (GenerateLocal
 	}
 	datasetName = utils.SanitizeDatasetSegment(datasetName)
 
+	// Reject inheriting from yourself — that would wipe the only base we
+	// could read from once we delete the existing dataset directory.
+	inheritFrom := strings.TrimSpace(in.Inherit)
+	if inheritFrom != "" && inheritFrom == datasetName {
+		return GenerateLocalOutput{}, fmt.Errorf("inherit base %q must differ from dataset id", inheritFrom)
+	}
+
+	// Resolve the base dataset *before* touching the new dataset directory so
+	// a typo in --inherit doesn't destroy an existing dataset.
+	var baseDir string
+	if inheritFrom != "" {
+		_, dir, err := utils.FindLocalDataset(projectRoot, cfg.StoragePath, schema.FingerprintShort, inheritFrom)
+		if err != nil {
+			return GenerateLocalOutput{}, fmt.Errorf("resolving inherit base %q: %w", inheritFrom, err)
+		}
+		baseDir = dir
+	}
+
 	datasetDir := utils.DatasetPath(projectRoot, cfg.StoragePath, schema.FingerprintShort, datasetName)
 	if info, statErr := os.Stat(datasetDir); statErr == nil && info.IsDir() {
 		if !in.Force {
@@ -1327,6 +1376,39 @@ func RunGenerateLocal(ctx context.Context, in GenerateLocalInput) (GenerateLocal
 		return GenerateLocalOutput{}, fmt.Errorf("creating dataset dir: %w", err)
 	}
 
+	// Pre-fill the new dataset with the inherit base's CSVs. The script can
+	// then overwrite whichever tables it cares about. Snapshot mtimes so we
+	// can detect which files the script actually touched.
+	inherited := map[string]bool{}
+	preMtime := map[string]time.Time{}
+	if baseDir != "" {
+		entries, err := os.ReadDir(baseDir)
+		if err != nil {
+			_ = os.RemoveAll(datasetDir)
+			return GenerateLocalOutput{}, fmt.Errorf("reading inherit base: %w", err)
+		}
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			name := e.Name()
+			tbl := trimCSVSuffix(name)
+			if tbl == "" {
+				continue
+			}
+			src := filepath.Join(baseDir, name)
+			dst := filepath.Join(datasetDir, name)
+			if err := copyFile(src, dst); err != nil {
+				_ = os.RemoveAll(datasetDir)
+				return GenerateLocalOutput{}, fmt.Errorf("copying %s from base: %w", name, err)
+			}
+			inherited[tbl] = true
+			if info, err := os.Stat(dst); err == nil {
+				preMtime[tbl] = info.ModTime()
+			}
+		}
+	}
+
 	// Execute the script via the embedded yaegi Go interpreter.
 	// No Go toolchain needs to be installed on the client — yaegi is bundled
 	// in the Seedmancer binary and supports the full standard library.
@@ -1335,28 +1417,79 @@ func RunGenerateLocal(ctx context.Context, in GenerateLocalInput) (GenerateLocal
 		return GenerateLocalOutput{}, err
 	}
 
-	// Collect the CSV files the script produced.
+	// Determine which CSVs ended up in the dataset and which ones the script
+	// actually wrote (vs. files that came untouched from the base). A file
+	// counts as "generated" when it's brand-new, or when its mtime advanced
+	// past the snapshot taken right after the base copy.
 	entries, err := os.ReadDir(datasetDir)
 	if err != nil {
 		return GenerateLocalOutput{}, fmt.Errorf("reading dataset dir: %w", err)
 	}
+	generated := map[string]bool{}
 	var tables []string
 	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(strings.ToLower(e.Name()), ".csv") {
-			tables = append(tables, strings.TrimSuffix(e.Name(), ".csv"))
+		if e.IsDir() {
+			continue
+		}
+		tbl := trimCSVSuffix(e.Name())
+		if tbl == "" {
+			continue
+		}
+		tables = append(tables, tbl)
+		if !inherited[tbl] {
+			generated[tbl] = true
+			continue
+		}
+		if info, err := e.Info(); err == nil {
+			if info.ModTime().After(preMtime[tbl]) {
+				generated[tbl] = true
+			}
 		}
 	}
 	if len(tables) == 0 {
 		_ = os.RemoveAll(datasetDir)
 		return GenerateLocalOutput{}, fmt.Errorf("script produced no CSV files in %s", datasetDir)
 	}
+	// Only count "generated" tables if the script wrote at least one CSV;
+	// otherwise the agent likely passed an empty script alongside an inherit
+	// flag, which is almost certainly a mistake.
+	if baseDir != "" && len(generated) == 0 {
+		_ = os.RemoveAll(datasetDir)
+		return GenerateLocalOutput{}, fmt.Errorf(
+			"script produced no new CSV files; inheriting from %q without overwriting any table is a no-op",
+			inheritFrom,
+		)
+	}
 
+	// Walk the FK graph: any inherited child table that references a
+	// generated table — directly or transitively — is reduced to header-only
+	// so the resulting dataset never carries orphan foreign keys after seed.
+	cleared := map[string]bool{}
+	if baseDir != "" && len(generated) > 0 {
+		idx, err := buildFKChildIndex(schema.SchemaJSONPath)
+		if err == nil {
+			descendants := findFKDescendants(idx, generated)
+			for tbl := range descendants {
+				if !inherited[tbl] || generated[tbl] {
+					continue
+				}
+				csvPath := filepath.Join(datasetDir, tbl+".csv")
+				if err := truncateCSVToHeader(csvPath); err == nil {
+					cleared[tbl] = true
+				}
+			}
+		}
+	}
+
+	sort.Strings(tables)
 	return GenerateLocalOutput{
-		Dataset:              datasetName,
-		Schema:               schema.FingerprintShort,
-		Path:                 datasetDir,
-		Tables:               tables,
+		Dataset:               datasetName,
+		Schema:                schema.FingerprintShort,
+		Path:                  datasetDir,
+		Tables:                tables,
 		GeneratorScriptStored: utils.SaveGeneratorScript(projectRoot, datasetName, in.Script) == nil,
+		InheritedFrom:         inheritFrom,
+		ClearedTables:         sortedKeys(cleared),
 	}, nil
 }
 

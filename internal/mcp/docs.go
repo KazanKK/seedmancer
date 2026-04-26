@@ -29,6 +29,8 @@ Run this sequence once to set everything up:
      other tools depend on.
 2. ` + "`describe_schema`" + ` — get the exact table and column names.
 3. ` + "`generate_dataset_local`" + ` — write a Go script that produces CSVs locally.
+   For partial updates (e.g. "regenerate only products"), pass
+   ` + "`inherit: \"baseline\"`" + ` so the result is a complete, seedable dataset.
    Read seedmancer://docs/local-generation for the contract.
 4. ` + "`seed_database`" + ` with ` + "`yes: true`" + ` — resets the env and loads the dataset.
 5. Run the actual test command outside MCP (e.g. Playwright, pytest).
@@ -108,11 +110,23 @@ Use ` + "`generate_dataset_local`" + ` when:
 Use ` + "`generate_dataset`" + ` when you want the cloud service to fabricate a large,
 realistic dataset from a short natural-language description.
 
-## Workflow
+## Recommended workflow: ` + "`inherit`" + ` from baseline
 
-1. ` + "`describe_schema`" + ` — get the exact table names and column names.
-2. Write a Go script that produces one ` + "`<table>.csv`" + ` per table.
-3. ` + "`generate_dataset_local`" + ` — pass the script and a ` + "`schemaRef`" + `.
+The ` + "`inherit`" + ` parameter is the safe default for any partial generation.
+It pre-fills the new dataset with all CSVs from a base dataset, lets your
+script overwrite only the tables it cares about, and **automatically clears
+any descendant table that FKs to an overwritten table** so seeding can never
+produce orphan foreign keys.
+
+1. ` + "`list_schemas`" + ` — confirm a schema exists. If not, ` + "`export_database`" + `
+   first to capture the live DB as a ` + "`baseline`" + ` dataset.
+2. ` + "`describe_schema`" + ` — get exact table and column names.
+3. ` + "`generate_dataset_local`" + ` with ` + "`inherit: \"baseline\"`" + ` — write a tiny script that
+   only emits the table(s) you actually want to change.
+4. ` + "`seed_database`" + ` with ` + "`yes: true`" + `.
+
+**No more "gen vs merged" datasets.** A single inherit call produces a complete,
+seedable dataset.
 
 ## Go script contract
 
@@ -121,10 +135,15 @@ realistic dataset from a short natural-language description.
 - Output directory is ` + "`os.Args[1]`" + `. Write each CSV there as ` + "`<tableName>.csv`" + `.
 - **First row must be the column header**, with names matching the schema exactly (case-sensitive).
 - Subsequent rows are data. Use ` + "`encoding/csv`" + ` — it handles quoting automatically.
-- For tables with foreign keys, generate parent tables first and collect their IDs
-  before generating child rows.
+- When using ` + "`inherit`" + `, you only need to write the table(s) you're changing. Parent
+  tables come from the base; descendant tables are auto-cleared. When **not** using
+  ` + "`inherit`" + `, generate parent tables first and reuse their IDs in child rows.
 
-## Minimal example
+## Minimal example (with inherit)
+
+The script below replaces only ` + "`products.csv`" + `. ` + "`brands`" + ` and ` + "`categories`" + ` come
+from the inherited baseline; ` + "`product_images`" + `, ` + "`inventory`" + `, ` + "`order_items`" + `
+(any table that FKs to ` + "`products`" + `) are reduced to header-only automatically.
 
 ` + "```go" + `
 package main
@@ -139,23 +158,13 @@ import (
 func main() {
 	out := os.Args[1]
 
-	// --- brands (parent) ---
-	bf, _ := os.Create(out + "/brands.csv")
-	bw := csv.NewWriter(bf)
-	bw.Write([]string{"id", "name"})
-	for i := 1; i <= 3; i++ {
-		bw.Write([]string{strconv.Itoa(i), fmt.Sprintf("Brand %d", i)})
-	}
-	bw.Flush(); bf.Close()
-
-	// --- products (child, references brands.id) ---
 	pf, _ := os.Create(out + "/products.csv")
 	pw := csv.NewWriter(pf)
 	pw.Write([]string{"id", "brand_id", "name", "price"})
 	for i := 1; i <= 10; i++ {
 		pw.Write([]string{
 			strconv.Itoa(i),
-			strconv.Itoa((i-1)%3 + 1), // brand_id cycles 1-3
+			"1", // any brand id present in the inherited brands.csv
 			fmt.Sprintf("Product %d", i),
 			fmt.Sprintf("%.2f", float64(i)*9.99),
 		})
@@ -164,12 +173,29 @@ func main() {
 }
 ` + "```" + `
 
+Call:
+
+` + "```" + `
+generate_dataset_local
+  schemaRef: <fp>
+  datasetId: products-v2
+  inherit: baseline
+  script: <the Go source above>
+` + "```" + `
+
+The result has full ` + "`brands`" + `/` + "`categories`" + ` from baseline, the new ` + "`products`" + `,
+and header-only ` + "`product_images`" + `/` + "`inventory`" + `/` + "`order_items`" + ` so the seed never
+produces orphan FKs.
+
 ## Common pitfalls
 
 - **Wrong column names**: copy names verbatim from ` + "`describe_schema`" + ` — a mismatch silently inserts NULL or causes restore errors.
 - **Missing header row**: the first ` + "`Write`" + ` call must be the header, not a data row.
 - **No ` + "`csv.Writer.Flush()`" + ` call**: buffered rows won't reach the file without ` + "`Flush()`" + `.
 - **External imports**: the script runs without a module — only stdlib is available. Third-party packages are not supported.
+- **Forgetting ` + "`inherit`" + `**: a partial generation without ` + "`inherit`" + ` produces a thin
+  dataset that, when seeded, wipes every table the script didn't write. Always pass
+  ` + "`inherit: \"baseline\"`" + ` (or the most relevant existing dataset) for partial updates.
 
 ## Incremental edits to existing generated data
 
@@ -179,6 +205,6 @@ Before writing a script from scratch:
 1. ` + "`describe_dataset datasetId=<id>`" + ` — if ` + "`hasGeneratorScript: true`" + `, a saved script exists.
 2. ` + "`get_dataset_script datasetId=<id>`" + ` — returns the full source as ` + "`script`" + `.
 3. Modify the source (bump row counts, change values, add columns, …).
-4. ` + "`generate_dataset_local script=<modified> schemaRef=<fp> datasetId=<new-id>`" + `.
+4. ` + "`generate_dataset_local script=<modified> schemaRef=<fp> datasetId=<new-id> inherit=baseline`" + `.
 5. ` + "`seed_database datasetId=<new-id> yes=true`" + `.
 `

@@ -202,7 +202,12 @@ func registerTools(s *mcp.Server) {
 		Description: "Run an agent-written Go script locally to synthesise a dataset. " +
 			"No cloud API, no quota, and no internet connection are needed. " +
 			"Read seedmancer://docs/local-generation first to learn the Go script contract, " +
-			"then call describe_schema to get the exact column names before writing the script.",
+			"then call describe_schema to get the exact column names before writing the script. " +
+			"For partial updates (e.g. regenerating only products without touching users/orders), " +
+			"pass `inherit: \"baseline\"` (or any other dataset id under the same schema). The new " +
+			"dataset is pre-filled from the base, the script overwrites the table(s) it cares about, " +
+			"and any descendant table that FKs to an overwritten table is auto-cleared so the result " +
+			"is always safe to seed without orphan foreign keys.",
 		Annotations: &mcp.ToolAnnotations{DestructiveHint: falsePtr(), IdempotentHint: false},
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in cmd.GenerateLocalInput) (*mcp.CallToolResult, cmd.GenerateLocalOutput, error) {
 		out, err := cmd.RunGenerateLocal(ctx, in)
