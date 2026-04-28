@@ -17,17 +17,6 @@ import (
 	"github.com/urfave/cli/v2"
 )
 
-// fetchResult is the --json shape emitted after a successful fetch.
-type fetchResult struct {
-	Dataset          string   `json:"dataset"`
-	SchemaID         string   `json:"schemaId"`
-	SchemaShort      string   `json:"schemaShort"`
-	SchemaFingerprint string  `json:"schemaFingerprint"`
-	SchemaDisplayName string  `json:"schemaDisplayName,omitempty"`
-	Output           string   `json:"output"`
-	Files            []string `json:"files"`
-}
-
 // datasetAPI mirrors the /v1.0/datasets response shape. Only the fields we
 // actually consume are decoded; everything else is ignored by encoding/json.
 type datasetAPI struct {
@@ -59,7 +48,7 @@ func FetchCommand() *cli.Command {
 		Description: "Downloads one previously-synced dataset and unpacks it under\n" +
 			"<storagePath>/schemas/<fp-short>/datasets/<name>/, matching the\n" +
 			"layout used by `seedmancer export` so `seedmancer seed` can load\n" +
-			"it straight away. Pass --output to drop the files elsewhere.",
+			"it straight away.",
 		ArgsUsage: " ",
 		Flags: []cli.Flag{
 			&cli.StringFlag{
@@ -72,21 +61,9 @@ func FetchCommand() *cli.Command {
 				Name:  "token",
 				Usage: "API token (falls back to ~/.seedmancer/credentials, then SEEDMANCER_API_TOKEN)",
 			},
-			&cli.StringFlag{
-				Name:    "output",
-				Aliases: []string{"o"},
-				Usage:   "Custom output directory (defaults to the schema-first layout)",
-			},
-			&cli.BoolFlag{
-				Name:  "json",
-				Usage: "Emit result as JSON for CI/CD pipelines",
-				Value: false,
-			},
 		},
 		Action: func(c *cli.Context) error {
 			datasetName := strings.TrimSpace(c.String("dataset-id"))
-			outputFlag := strings.TrimSpace(c.String("output"))
-			jsonMode := c.Bool("json")
 
 			token, err := utils.ResolveAPIToken(c.String("token"))
 			if err != nil {
@@ -94,15 +71,12 @@ func FetchCommand() *cli.Command {
 			}
 			baseURL := utils.GetBaseURL()
 
-			// Ask the server for every dataset matching the name. This gives
-			// us both the dataset id for downloading and the schema
-			// fingerprint for the local folder.
 			match, err := findRemoteDataset(baseURL, token, datasetName, "")
 			if err != nil {
 				return err
 			}
 
-			outputDir, err := resolveFetchOutput(outputFlag, match, datasetName)
+			outputDir, err := resolveFetchOutput(match, datasetName)
 			if err != nil {
 				return err
 			}
@@ -134,36 +108,16 @@ func FetchCommand() *cli.Command {
 			// The server zips schema sidecars (schema.json + *_func.sql +
 			// *_trigger.sql) alongside dataset CSVs, but our on-disk layout
 			// keeps sidecars one level up so multiple datasets share one
-			// schema folder. When using the default layout, split them now
-			// so `list --local` recognises the schema and `seed` can find
-			// the sidecars without rebuilding a merge-dir every time.
-			// Custom --output keeps everything flat; the user asked for
-			// literally that directory.
-			if outputFlag == "" {
-				schemaDir := filepath.Dir(filepath.Dir(outputDir))
-				lifted, err := liftSchemaSidecars(outputDir, schemaDir)
-				if err != nil {
-					sp.Stop(false, "Fetch failed")
-					return fmt.Errorf("placing schema files: %v", err)
-				}
-				ui.Debug("Lifted %d schema sidecar(s) into %s", lifted, schemaDir)
+			// schema folder. Split them so `seedmancer seed` can find the
+			// sidecars without rebuilding a merge-dir every time.
+			schemaDir := filepath.Dir(filepath.Dir(outputDir))
+			lifted, err := liftSchemaSidecars(outputDir, schemaDir)
+			if err != nil {
+				sp.Stop(false, "Fetch failed")
+				return fmt.Errorf("placing schema files: %v", err)
 			}
+			ui.Debug("Lifted %d schema sidecar(s) into %s", lifted, schemaDir)
 			sp.Stop(true, fmt.Sprintf("Fetched %s → %s (%d files)", datasetName, outputDir, len(extracted)))
-
-			if jsonMode {
-				res := fetchResult{
-					Dataset:           datasetName,
-					Output:            outputDir,
-					Files:             extracted,
-					SchemaID:          match.Schema.ID,
-					SchemaShort:       match.Schema.FingerprintShort,
-					SchemaFingerprint: match.Schema.Fingerprint,
-				}
-				if match.Schema.DisplayName != nil {
-					res.SchemaDisplayName = *match.Schema.DisplayName
-				}
-				return outputJSON(res)
-			}
 
 			return nil
 		},
@@ -224,12 +178,12 @@ func findRemoteDataset(baseURL, token, datasetName, schemaPrefix string) (datase
 	case 0:
 		if schemaPrefix != "" {
 			return datasetAPI{}, fmt.Errorf(
-				"no remote dataset named %q under schema prefix %q\n  Run 'seedmancer list --remote' to see available datasets",
+				"no remote dataset named %q under schema prefix %q\n  Run 'seedmancer list' to see available datasets",
 				datasetName, schemaPrefix,
 			)
 		}
 		return datasetAPI{}, fmt.Errorf(
-			"no remote dataset named %q\n  Run 'seedmancer list --remote' to see available datasets",
+			"no remote dataset named %q\n  Run 'seedmancer list' to see available datasets",
 			datasetName,
 		)
 	case 1:
@@ -250,25 +204,13 @@ func findRemoteDataset(baseURL, token, datasetName, schemaPrefix string) (datase
 
 // resolveFetchOutput picks the destination directory for extracted CSVs.
 //
-// Priority:
-//  1. --output <dir>            -> used verbatim (no config needed)
-//  2. seedmancer.yaml present   -> <storagePath>/schemas/<fp-short>/datasets/<name>
-//  3. no config, no --output    -> error with actionable hint
-func resolveFetchOutput(outputFlag string, match datasetAPI, datasetName string) (string, error) {
-	if outputFlag != "" {
-		abs, err := filepath.Abs(outputFlag)
-		if err != nil {
-			return "", fmt.Errorf("resolving output path: %v", err)
-		}
-		return abs, nil
-	}
-
+// Uses the schema-first layout: <storagePath>/schemas/<fp-short>/datasets/<name>
+func resolveFetchOutput(match datasetAPI, datasetName string) (string, error) {
 	configPath, err := utils.FindConfigFile()
 	if err != nil {
 		return "", fmt.Errorf(
-			"no seedmancer.yaml found and --output not specified.\n" +
-				"  Use --output <dir> to set the destination directly,\n" +
-				"  or run 'seedmancer init' to create a seedmancer.yaml",
+			"no seedmancer.yaml found.\n" +
+				"  Run 'seedmancer init' to create a seedmancer.yaml",
 		)
 	}
 	projectRoot := filepath.Dir(configPath)
@@ -279,7 +221,7 @@ func resolveFetchOutput(outputFlag string, match datasetAPI, datasetName string)
 
 	if match.Schema == nil {
 		return "", fmt.Errorf(
-			"remote dataset %q has no attached schema — pass --output <dir> to write CSVs somewhere explicit",
+			"remote dataset %q has no attached schema",
 			datasetName,
 		)
 	}

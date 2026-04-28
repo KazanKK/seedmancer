@@ -137,7 +137,8 @@ Workflow when the user wants test data:
      The DB is already running (configured in seedmancer.yaml) so export always works.
   2. describe_schema — get the exact table and column names.
   3. generate_dataset_local — write a Go script, run it locally, no cloud needed.
-  4. seed_database — load the new dataset into the database.
+  4. seed_database — Optional. If user wants to load the new dataset into the database.
+  5. sync_dataset — Optional. If user wants to sync the new dataset to the cloud.
 
 Typical workflows:
   • Before running tests: call seed_database with the configured dataset id.

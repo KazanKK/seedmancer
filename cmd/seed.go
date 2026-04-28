@@ -69,11 +69,7 @@ func SeedCommand() *cli.Command {
 				Name:  "continue-on-error",
 				Usage: "Keep seeding remaining envs after a failure (default: stop)",
 			},
-			&cli.BoolFlag{
-				Name:  "dry-run",
-				Usage: "Resolve envs and print what would run; make no DB changes",
-			},
-		&cli.BoolFlag{
+	&cli.BoolFlag{
 			Name:  "no-services",
 			Usage: "Skip 3rd-party service connector seeds (Supabase Auth, etc.)",
 		},
@@ -115,15 +111,7 @@ func SeedCommand() *cli.Command {
 			ui.Info("source: %s", meta.SourceEnv)
 		}
 
-			if c.Bool("dry-run") {
-				ui.Info("dry-run: no databases will be modified")
-				for _, t := range targets {
-					ui.KeyValue(fmt.Sprintf("  %-12s", t.Name), maskDatabaseURL(t.DatabaseURL))
-				}
-				return nil
-			}
-
-			// Build the merged restore dir ONCE and reuse across targets.
+		// Build the merged restore dir ONCE and reuse across targets.
 			// Each RestoreFromCSV call is read-only against this dir, so
 			// this is both correct and a meaningful perf win when seeding
 			// several envs.

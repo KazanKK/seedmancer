@@ -46,8 +46,7 @@ func ListCommand() *cli.Command {
 		Name:  "list",
 		Usage: "List datasets, grouped by schema fingerprint",
 		Description: "Shows one row per dataset with its schema fingerprint and last-updated\n" +
-			"time, newest first. By default both local and remote datasets are\n" +
-			"shown — pass --local or --remote to scope to one side.\n\n" +
+			"time, newest first. Both local and remote datasets are shown.\n\n" +
 			"To see schema-level details (display names, sizes, table counts)\n" +
 			"use `seedmancer schemas list` instead.",
 		ArgsUsage: " ",
@@ -56,95 +55,41 @@ func ListCommand() *cli.Command {
 				Name:  "token",
 				Usage: "API token (falls back to ~/.seedmancer/credentials, then SEEDMANCER_API_TOKEN)",
 			},
-			&cli.BoolFlag{
-				Name:  "local",
-				Usage: "List only local datasets",
-				Value: false,
-			},
-			&cli.BoolFlag{
-				Name:  "remote",
-				Usage: "List only remote datasets",
-				Value: false,
-			},
-			&cli.BoolFlag{
-				Name:  "json",
-				Usage: "Emit result as JSON for CI/CD pipelines",
-				Value: false,
-			},
 		},
 		Action: func(c *cli.Context) error {
-			localOnly := c.Bool("local")
-			remoteOnly := c.Bool("remote")
-			jsonMode := c.Bool("json")
-
-			// No flags → show both.
-			if !localOnly && !remoteOnly {
-				localOnly = true
-				remoteOnly = true
-			}
-
-			var out listOutput
-
-			if localOnly {
-				entries, err := listLocalEntries()
-				if err != nil {
-					if jsonMode {
-						out.Local = []listEntry{}
-					} else {
-						ui.Title("Local")
-						ui.Warn("%v", err)
-					}
+			// Local
+			entries, err := listLocalEntries()
+			if err != nil {
+				ui.Title("Local")
+				ui.Warn("%v", err)
+			} else {
+				ui.Title("Local")
+				if len(entries) == 0 {
+					ui.Info("No local schemas found. Run `seedmancer export` first.")
 				} else {
-					if jsonMode {
-						out.Local = entries
-					} else {
-						ui.Title("Local")
-						if len(entries) == 0 {
-							ui.Info("No local schemas found. Run `seedmancer export` first.")
-						} else {
-							renderTable(entries)
-						}
-					}
+					renderTable(entries)
 				}
 			}
 
-			if remoteOnly {
-				token, tokenErr := utils.ResolveAPIToken(c.String("token"))
-				if tokenErr != nil {
-					if jsonMode {
-						return outputJSON(out)
-					}
-					// "seedmancer list" (no flags) runs both sides; show local
-					// results + an inline login hint so the user keeps working
-					// offline instead of a hard failure.
-					if localOnly {
-						ui.Title("Remote")
-						ui.PrintLoginHint()
-						return nil
-					}
-					return tokenErr
-				}
-
-				entries, err := listRemoteEntries(token)
-				if err != nil {
-					return err
-				}
-
-				if jsonMode {
-					out.Remote = entries
-				} else {
-					ui.Title("Remote")
-					if len(entries) == 0 {
-						ui.Info("No remote schemas found.")
-					} else {
-						renderTable(entries)
-					}
-				}
+			// Remote — show a login hint when unauthenticated but keep going
+			token, tokenErr := utils.ResolveAPIToken(c.String("token"))
+			if tokenErr != nil {
+				ui.Title("Remote")
+				ui.PrintLoginHint()
+				return nil
 			}
 
-			if jsonMode {
-				return outputJSON(out)
+			remoteEntries, err := listRemoteEntries(token)
+			if err != nil {
+				return err
 			}
+			ui.Title("Remote")
+			if len(remoteEntries) == 0 {
+				ui.Info("No remote schemas found.")
+			} else {
+				renderTable(remoteEntries)
+			}
+
 			return nil
 		},
 	}
