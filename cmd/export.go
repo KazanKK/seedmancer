@@ -1,15 +1,18 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	db "github.com/KazanKK/seedmancer/database"
 	"github.com/KazanKK/seedmancer/internal/ui"
+	svc "github.com/KazanKK/seedmancer/internal/services"
 	utils "github.com/KazanKK/seedmancer/internal/utils"
 
 	"github.com/urfave/cli/v2"
@@ -61,6 +64,14 @@ func ExportCommand() *cli.Command {
 				Usage:   "Overwrite an existing dataset without confirmation",
 				Value:   false,
 			},
+		&cli.BoolFlag{
+			Name:  "no-services",
+			Usage: "Skip 3rd-party service connector exports (Supabase Auth, etc.)",
+		},
+		&cli.StringFlag{
+			Name:  "token",
+			Usage: "API token for plan checks (falls back to ~/.seedmancer/credentials, then SEEDMANCER_API_TOKEN)",
+		},
 		},
 		Action: func(c *cli.Context) error {
 			configPath, err := utils.FindConfigFile()
@@ -83,14 +94,11 @@ func ExportCommand() *cli.Command {
 
 		datasetName := strings.TrimSpace(c.String("id"))
 		if datasetName == "" {
-			// Default to "baseline" so the dataset id matches the documented
-			// `inherit: baseline` flow used by generate_dataset_local. Earlier
-			// versions defaulted to a YYYYMMDDHHMMSS timestamp, which forced
-			// agents to look up the timestamp before they could inherit from
-			// the export. Re-running export overwrites the existing baseline
-			// (after --force / confirmation) which is what most users want.
-			datasetName = "baseline"
-			ui.Info("Using default dataset id: baseline (override with --id)")
+			// Default to a timestamp so repeated exports don't silently
+			// overwrite each other. Use "baseline" explicitly when you want
+			// the canonical "reset to this point" snapshot.
+			datasetName = time.Now().Format("20060102150405")
+			ui.Info("Using default dataset id: %s (override with --id)", datasetName)
 		}
 			datasetName = utils.SanitizeDatasetSegment(datasetName)
 
@@ -168,6 +176,40 @@ func ExportCommand() *cli.Command {
 
 		if err := utils.WriteDatasetMeta(datasetDir, utils.DatasetMeta{SourceEnv: target.Name}); err != nil {
 			ui.Warn("could not write dataset metadata: %v", err)
+		}
+
+		// Phase 4: service connectors (Pro gate)
+		if !c.Bool("no-services") && len(cfg.Services) > 0 {
+			baseURL := utils.GetBaseURL()
+			token, _ := utils.ResolveAPIToken(c.String("token"))
+			if err := utils.CheckServiceConnectorEntitlement(baseURL, token); err != nil {
+				// If the user isn't logged in, warn but skip rather than block
+				// the export entirely — the DB dump succeeded and is usable.
+				if errors.Is(err, utils.ErrMissingAPIToken) || errors.Is(err, utils.ErrInvalidAPIToken) {
+					ui.Warn("Skipping service connectors: not logged in (run `seedmancer login` to enable Pro features)")
+				} else {
+					ui.Warn("Skipping service connectors: %v", err)
+				}
+			} else {
+				connectors, buildErr := svc.BuildAll(cfg)
+				if buildErr != nil {
+					ui.Warn("service connectors unavailable: %v", buildErr)
+				} else {
+					for _, nc := range connectors {
+						sp2 := ui.StartSpinner(fmt.Sprintf("Exporting %s...", nc.Name))
+						data, err := nc.Connector.Export(c.Context)
+						if err != nil {
+							sp2.Stop(false, fmt.Sprintf("%s export failed: %v", nc.Name, err))
+						} else {
+							if err := os.WriteFile(filepath.Join(datasetDir, nc.SidecarFilename()), data, 0644); err != nil {
+								sp2.Stop(false, fmt.Sprintf("%s write failed: %v", nc.Name, err))
+							} else {
+								sp2.Stop(true, fmt.Sprintf("%s exported", nc.Name))
+							}
+						}
+					}
+				}
+			}
 		}
 
 		fmt.Println()

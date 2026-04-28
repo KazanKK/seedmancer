@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -10,6 +11,7 @@ import (
 
 	db "github.com/KazanKK/seedmancer/database"
 	"github.com/KazanKK/seedmancer/internal/ui"
+	svc "github.com/KazanKK/seedmancer/internal/services"
 	utils "github.com/KazanKK/seedmancer/internal/utils"
 
 	"github.com/urfave/cli/v2"
@@ -71,6 +73,14 @@ func SeedCommand() *cli.Command {
 				Name:  "dry-run",
 				Usage: "Resolve envs and print what would run; make no DB changes",
 			},
+		&cli.BoolFlag{
+			Name:  "no-services",
+			Usage: "Skip 3rd-party service connector seeds (Supabase Auth, etc.)",
+		},
+		&cli.StringFlag{
+			Name:  "token",
+			Usage: "API token for plan checks (falls back to ~/.seedmancer/credentials, then SEEDMANCER_API_TOKEN)",
+		},
 		},
 		Action: func(c *cli.Context) error {
 			configPath, err := utils.FindConfigFile()
@@ -117,12 +127,61 @@ func SeedCommand() *cli.Command {
 			// Each RestoreFromCSV call is read-only against this dir, so
 			// this is both correct and a meaningful perf win when seeding
 			// several envs.
-			merged, cleanup, err := materializeRestoreDir(schema.Path, datasetDir)
-			if err != nil {
-				return err
+		merged, cleanup, err := materializeRestoreDir(schema.Path, datasetDir)
+		if err != nil {
+			return err
+		}
+		defer cleanup()
+		ui.Debug("Merged restore dir: %s", merged)
+
+		// Service connectors run BEFORE the DB restore so that auth triggers
+		// (e.g. on_auth_user_created → insert into public.users) fire on an
+		// empty table. The subsequent DB restore truncates and refills public.*
+		// from CSV, landing in the exact same state either way.
+		if !c.Bool("no-services") && len(cfg.Services) > 0 {
+			baseURL := utils.GetBaseURL()
+			token, _ := utils.ResolveAPIToken(c.String("token"))
+			if entErr := utils.CheckServiceConnectorEntitlement(baseURL, token); entErr != nil {
+				if errors.Is(entErr, utils.ErrMissingAPIToken) || errors.Is(entErr, utils.ErrInvalidAPIToken) {
+					ui.Warn("Skipping service connectors: not logged in (run `seedmancer login` to enable Pro features)")
+				} else {
+					// ErrServiceConnectorsPro or a network error — surface the
+					// full message so the user knows what to do.
+					ui.Warn("Skipping service connectors: %v", entErr)
+				}
+			} else {
+				connectors, err := svc.BuildAll(cfg)
+				if err != nil {
+					ui.Warn("service connectors unavailable: %v", err)
+				} else {
+					// Pass the first available DB URL so the auth connector can
+					// clean mirror rows before creating new auth users.
+					svcCtx := c.Context
+					for _, t := range targets {
+						if t.DatabaseURL != "" {
+							svcCtx = svc.WithDBURL(svcCtx, t.DatabaseURL)
+							break
+						}
+					}
+					for _, nc := range connectors {
+						sidecarPath := filepath.Join(datasetDir, nc.SidecarFilename())
+						data, err := os.ReadFile(sidecarPath)
+						if err != nil {
+							if !os.IsNotExist(err) {
+								ui.Warn("%s: read sidecar: %v", nc.Name, err)
+							}
+							continue
+						}
+						sp := ui.StartSpinner(fmt.Sprintf("Seeding %s...", nc.Name))
+						if err := nc.Connector.Seed(svcCtx, data); err != nil {
+							sp.Stop(false, fmt.Sprintf("%s seed failed: %v", nc.Name, err))
+						} else {
+							sp.Stop(true, fmt.Sprintf("%s seeded", nc.Name))
+						}
+					}
+				}
 			}
-			defer cleanup()
-			ui.Debug("Merged restore dir: %s", merged)
+		}
 
 		results := make([]seedResult, 0, len(targets))
 		for i, t := range targets {
@@ -142,12 +201,13 @@ func SeedCommand() *cli.Command {
 				}
 			}
 
-			fmt.Fprintln(os.Stderr)
-			printSeedSummary(results)
-			if anyFailed(results) {
-				return fmt.Errorf("one or more environments failed to seed")
-			}
-			return nil
+		fmt.Fprintln(os.Stderr)
+		printSeedSummary(results)
+		if anyFailed(results) {
+			return fmt.Errorf("one or more environments failed to seed")
+		}
+
+		return nil
 		},
 	}
 }

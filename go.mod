@@ -4,7 +4,9 @@ go 1.23.0
 
 require (
 	github.com/lib/pq v1.10.9
+	github.com/modelcontextprotocol/go-sdk v1.0.0
 	github.com/olekukonko/tablewriter v0.0.5
+	github.com/traefik/yaegi v0.16.1
 	github.com/urfave/cli/v2 v2.25.7
 	golang.org/x/term v0.28.0
 )
@@ -12,8 +14,6 @@ require (
 require (
 	github.com/google/jsonschema-go v0.3.0 // indirect
 	github.com/mattn/go-runewidth v0.0.9 // indirect
-	github.com/modelcontextprotocol/go-sdk v1.0.0 // indirect
-	github.com/traefik/yaegi v0.16.1 // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
 	golang.org/x/sys v0.29.0 // indirect
 )

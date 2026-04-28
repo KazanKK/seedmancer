@@ -46,8 +46,6 @@ func main() {
 	initCmd.Category = "Get started"
 	loginCmd := cmd.LoginCommand()
 	loginCmd.Category = "Get started"
-	logoutCmd := cmd.LogoutCommand()
-	logoutCmd.Category = "Get started"
 	statusCmd := cmd.StatusCommand()
 	statusCmd.Category = "Get started"
 	envCmd := cmd.EnvCommand()
@@ -57,8 +55,10 @@ func main() {
 	exportCmd.Category = "Local"
 	generateCmd := cmd.GenerateCommand()
 	generateCmd.Category = "Local"
+	generateCmd.Hidden = true
 	generateLocalCmd := cmd.GenerateLocalCommand()
 	generateLocalCmd.Category = "Local"
+	generateLocalCmd.Hidden = true
 	seedCmd := cmd.SeedCommand()
 	seedCmd.Category = "Local"
 	listCmd := cmd.ListCommand()
@@ -70,6 +70,7 @@ func main() {
 	fetchCmd.Category = "Remote"
 	schemasCmd := cmd.SchemasCommand()
 	schemasCmd.Category = "Remote"
+	schemasCmd.Hidden = true
 
 	// "Integrations" sorts after G/L/R alphabetically (I < L), so we use
 	// a leading space on the label to force it to the end of --help. The
@@ -82,15 +83,13 @@ func main() {
 		Usage:           "Schema-first database seeding — export, AI-generate, sync, restore.",
 		HideHelpCommand: true, // every subcommand still has -h / --help
 		Description: "Seedmancer dumps your database schema + data into content-addressed\n" +
-			"schema folders, lets AI fabricate realistic rows against that schema,\n" +
-			"and syncs datasets to the cloud so teammates can pull them back.\n\n" +
+			"schema folders and syncs datasets to the cloud so teammates can pull them back.\n\n" +
 			"Typical flow:\n" +
-			"  seedmancer init                       # one-time project setup\n" +
-			"  seedmancer export --id baseline       # dump schema + data to .seedmancer/\n" +
-			"  seedmancer generate --prompt \"...\"    # AI-generated dataset\n" +
-			"  seedmancer sync  --id baseline        # upload to cloud\n" +
-			"  seedmancer fetch --id baseline        # (on another machine)\n" +
-			"  seedmancer seed  --id baseline        # restore into DB",
+			"  seedmancer init                     # one-time project setup\n" +
+			"  seedmancer export --id baseline     # dump schema + data to .seedmancer/\n" +
+			"  seedmancer sync  --id baseline      # upload to cloud\n" +
+			"  seedmancer fetch --id baseline      # (on another machine)\n" +
+			"  seedmancer seed  --id baseline      # restore into DB",
 		Flags: []cli.Flag{
 			&cli.BoolFlag{
 				Name:    "debug",
@@ -105,7 +104,6 @@ func main() {
 		Commands: []*cli.Command{
 			initCmd,
 			loginCmd,
-			logoutCmd,
 			statusCmd,
 			envCmd,
 		exportCmd,

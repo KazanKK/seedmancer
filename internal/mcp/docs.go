@@ -54,6 +54,18 @@ Run this sequence once to set everything up:
 - All destructive tools carry the MCP ` + "`destructiveHint`" + `, so hosts can
   surface confirmation UI.
 - Logs are written to --log-file, never stdout. stdio stays pristine.
+
+## 3rd-party service connectors (Pro)
+
+` + "`seed_database`" + ` and ` + "`export_database`" + ` also drive service connectors when they
+are configured in ` + "`seedmancer.yaml`" + `. The available connector is:
+
+- **Supabase Auth** — snapshots and restores ` + "`auth.users`" + ` via the Admin API,
+  preserving original UUIDs so Postgres FK links stay valid.
+  Read ` + "`seedmancer://docs/supabase-auth-connector`" + ` for the full reference.
+
+Use ` + "`list_services`" + ` to see which connectors are active, and
+` + "`export_service`" + ` / ` + "`seed_service`" + ` to operate them independently.
 `
 
 const docPlaywrightRecipe = `# Reset DB before Playwright
@@ -221,4 +233,113 @@ Before writing a script from scratch:
 3. Modify the source (bump row counts, change values, add columns, …).
 4. ` + "`generate_dataset_local script=<modified> schemaRef=<fp> datasetId=<new-id> inherit=baseline`" + `.
 5. ` + "`seed_database datasetId=<new-id> yes=true`" + `.
+`
+
+const docSupabaseAuthConnector = `# Supabase Auth service connector (Pro)
+
+Seedmancer can snapshot and restore Supabase Auth users alongside your
+Postgres database so that a single ` + "`seedmancer seed`" + ` command resets auth state.
+
+> **Requires a Pro plan.** The connector is ignored (with a warning) when
+> no API token is configured or the account is on the Free plan.
+
+## seedmancer.yaml configuration
+
+` + "```yaml" + `
+services:
+  auth:
+    type: supabase-auth
+    url_env: SUPABASE_URL            # env-var holding the project URL
+    service_role_key_env: SUPABASE_SERVICE_ROLE_KEY  # env-var holding the service role JWT
+    # OR supply values directly:
+    # url: https://<project>.supabase.co
+    # service_role_key: eyJ…
+` + "```" + `
+
+Both ` + "`*_env`" + ` fields accept an environment variable name **or** a direct value.
+Seedmancer auto-detects direct values by their prefix (` + "`http://`" + `, ` + "`https://`" + `,
+` + "`eyJ`" + ` for JWTs) so you can also write:
+
+` + "```yaml" + `
+services:
+  auth:
+    type: supabase-auth
+    url_env: http://127.0.0.1:54321           # direct URL for local Supabase
+    service_role_key_env: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9…  # direct JWT
+` + "```" + `
+
+## What is exported
+
+All users in ` + "`auth.users`" + `:
+
+| Field | Notes |
+|---|---|
+| id | Original UUID — preserved on restore to keep FK links intact |
+| email | Used as the stable identity key for incremental sync |
+| user_metadata | Arbitrary JSON stored against the user |
+| password | Stored as a bcrypt hash; replayed during restore |
+
+## What is seeded (restored)
+
+Seeding is **incremental**:
+
+1. Fetch all current auth users.
+2. For each snapshot user:
+   - Match by UUID first, then by e-mail as a fallback.
+   - **Update** (PATCH) if a match is found — sets metadata and password.
+   - **Create** (POST) otherwise, preserving the original UUID so any
+     Postgres rows that reference ` + "`auth.users.id`" + ` remain valid.
+3. Delete auth users not present in the snapshot.
+
+### Mirror tables (trigger-based)
+
+If your schema has a ` + "`public.user`" + ` (or similar) table that is populated by
+a trigger on ` + "`auth.users`" + `, Seedmancer handles this automatically:
+
+- Services are seeded **before** the Postgres database restore.
+- When a new auth user is about to be created and a direct DB URL is
+  available in the context, Seedmancer deletes any conflicting row in
+  ` + "`public`" + ` schema tables that have an ` + "`email`" + ` column, preventing the
+  ` + "`duplicate key`" + ` error the trigger would otherwise cause.
+- After services are done, the DB restore replaces ` + "`public.user`" + ` with
+  the correct CSV data, which already has the preserved UUIDs.
+
+## MCP tools
+
+| Tool | Description |
+|---|---|
+| ` + "`list_services`" + ` | List connectors from seedmancer.yaml |
+| ` + "`export_service datasetId=<id> service=auth`" + ` | Snapshot auth users into ` + "`<dataset>/_supabase_auth.json`" + ` |
+| ` + "`seed_service datasetId=<id> service=auth`" + ` | Restore auth users from the sidecar |
+| ` + "`export_database datasetId=<id>`" + ` | Export Postgres + all services together |
+| ` + "`seed_database datasetId=<id> yes=true`" + ` | Seed Postgres + all services together |
+
+## Typical workflow
+
+` + "```" + `
+# 1. Set up (once)
+#    Add the services block to seedmancer.yaml and set SUPABASE_URL +
+#    SUPABASE_SERVICE_ROLE_KEY (use the service-role key, not the anon key).
+
+# 2. Capture a known-good state
+export_database datasetId=baseline
+
+# 3. Reset everything (auth users + Postgres)
+seed_database datasetId=baseline yes=true
+` + "```" + `
+
+## Common pitfalls
+
+- **Anon key vs service-role key**: the Admin API requires the
+  ` + "`service_role`" + ` JWT, not the ` + "`anon`" + ` JWT. Using the wrong key returns a
+  403 ` + "`bad_jwt`" + ` error.
+- **Local Supabase SSL**: the local Supabase Postgres instance typically has
+  SSL disabled. Seedmancer appends ` + "`?sslmode=disable`" + ` automatically when
+  connecting to a local DB for mirror-table cleanup.
+- **Unique e-mail constraint**: if the snapshot was captured before UUID
+  preservation was introduced, the seed falls back to matching by e-mail
+  and issues a PATCH instead of a duplicate POST, so old snapshots still
+  seed cleanly.
+- **User quota**: Supabase free-tier projects have a limit on the number
+  of auth users. Keep test datasets small (< 100 users) to stay within limits.
 `

@@ -15,6 +15,7 @@ import (
 
 	db "github.com/KazanKK/seedmancer/database"
 	"github.com/KazanKK/seedmancer/internal/gointerp"
+	svc "github.com/KazanKK/seedmancer/internal/services"
 	utils "github.com/KazanKK/seedmancer/internal/utils"
 )
 
@@ -899,6 +900,12 @@ type SeedInput struct {
 	Yes             bool `json:"yes,omitempty" jsonschema:"Skip the prod confirmation prompt"`
 	ContinueOnError bool `json:"continueOnError,omitempty" jsonschema:"Keep seeding remaining envs after a failure"`
 	DryRun          bool `json:"dryRun,omitempty" jsonschema:"Resolve envs and return plan only; make no DB changes"`
+	// NoServices skips service-connector seeds when true. Useful for
+	// fast DB-only resets when service state doesn't need to change.
+	NoServices bool `json:"noServices,omitempty" jsonschema:"Skip 3rd-party service connectors (Supabase Auth, etc.)"`
+	// Token is the Seedmancer API token used for plan entitlement checks.
+	// Falls back to the credentials file / SEEDMANCER_API_TOKEN env var.
+	Token string `json:"token,omitempty" jsonschema:"Seedmancer API token (for Pro plan check)"`
 }
 
 type SeedTargetResult struct {
@@ -915,6 +922,11 @@ type SeedOutput struct {
 	DryRun   bool               `json:"dryRun"`
 	Results  []SeedTargetResult `json:"results"`
 	AnyError bool               `json:"anyError"`
+	// ServicesSeeded lists the service connector names that were restored.
+	ServicesSeeded []string `json:"servicesSeeded,omitempty"`
+	// ServiceErrors lists per-service errors that did not halt the seed
+	// (non-fatal: DB was still restored successfully).
+	ServiceErrors []string `json:"serviceErrors,omitempty"`
 }
 
 // RunSeed is the structured entry point used by the MCP tool handler. It
@@ -965,6 +977,56 @@ func RunSeed(_ context.Context, in SeedInput) (SeedOutput, error) {
 	}
 	defer cleanup()
 
+	// ── Service connectors (run BEFORE DB) ───────────────────────────────────
+	// Services must be seeded before the Postgres restore because many projects
+	// have a trigger on auth.users INSERT that writes to a public.users mirror
+	// table. If we seed the DB first, the mirror table already has rows; the
+	// trigger then fires on re-creation of auth users and hits a duplicate-key
+	// constraint. By seeding auth/services first (while public.* is still
+	// empty), the trigger inserts succeed, and the subsequent DB restore
+	// truncates + refills the public.* tables from the CSV anyway.
+	if !in.NoServices && !in.DryRun && len(cfg.Services) > 0 {
+		baseURL := utils.GetBaseURL()
+		token, _ := utils.ResolveAPIToken(in.Token)
+		if entErr := utils.CheckServiceConnectorEntitlement(baseURL, token); entErr != nil {
+			out.ServiceErrors = append(out.ServiceErrors, fmt.Sprintf("service connectors blocked: %v", entErr))
+			out.AnyError = true
+		} else {
+			connectors, err := svc.BuildAll(cfg)
+			if err != nil {
+				out.ServiceErrors = append(out.ServiceErrors, fmt.Sprintf("building connectors: %v", err))
+				out.AnyError = true
+			} else {
+				// Pass the first available DB URL so auth connector can clean
+				// mirror rows before creating new auth users.
+				svcCtx := context.Background()
+				for _, t := range targets {
+					if t.DatabaseURL != "" {
+						svcCtx = svc.WithDBURL(svcCtx, t.DatabaseURL)
+						break
+					}
+				}
+				for _, nc := range connectors {
+					sidecarPath := filepath.Join(datasetDir, nc.SidecarFilename())
+					data, err := os.ReadFile(sidecarPath)
+					if err != nil {
+						if !os.IsNotExist(err) {
+							out.ServiceErrors = append(out.ServiceErrors, fmt.Sprintf("%s: read sidecar: %v", nc.Name, err))
+							out.AnyError = true
+						}
+						continue
+					}
+					if err := nc.Connector.Seed(svcCtx, data); err != nil {
+						out.ServiceErrors = append(out.ServiceErrors, fmt.Sprintf("%s: %v", nc.Name, err))
+						out.AnyError = true
+					} else {
+						out.ServicesSeeded = append(out.ServicesSeeded, nc.Name)
+					}
+				}
+			}
+		}
+	}
+
 	for i, t := range targets {
 		res := seedOneEnvQuiet(t, merged, in.Yes, sourceEnv, datasetName)
 		r := SeedTargetResult{
@@ -987,6 +1049,7 @@ func RunSeed(_ context.Context, in SeedInput) (SeedOutput, error) {
 			break
 		}
 	}
+
 	return out, nil
 }
 
@@ -1050,18 +1113,26 @@ func seedOneEnvQuiet(target utils.NamedEnv, mergedDir string, yes bool, sourceEn
 // ─── export ───────────────────────────────────────────────────────────────────
 
 type ExportInput struct {
-	ID    string `json:"id,omitempty" jsonschema:"Dataset id for the new dump (defaults to a YYYYMMDDHHMMSS timestamp)"`
-	Env   string `json:"env,omitempty" jsonschema:"Named environment to export from (defaults to default_env)"`
-	DBURL string `json:"dbUrl,omitempty" jsonschema:"Ad-hoc source URL (takes precedence over env)"`
-	Force bool   `json:"force,omitempty" jsonschema:"Overwrite an existing dataset without prompting"`
+	ID         string `json:"id,omitempty" jsonschema:"Dataset id for the new dump (defaults to baseline)"`
+	Env        string `json:"env,omitempty" jsonschema:"Named environment to export from (defaults to default_env)"`
+	DBURL      string `json:"dbUrl,omitempty" jsonschema:"Ad-hoc source URL (takes precedence over env)"`
+	Force      bool   `json:"force,omitempty" jsonschema:"Overwrite an existing dataset without prompting"`
+	// NoServices skips service-connector exports when true. Useful for
+	// DB-only snapshots when service credentials are not available.
+	NoServices bool   `json:"noServices,omitempty" jsonschema:"Skip 3rd-party service connectors (Supabase Auth, etc.)"`
+	// Token is the Seedmancer API token used for plan entitlement checks.
+	// Falls back to the credentials file / SEEDMANCER_API_TOKEN env var.
+	Token string `json:"token,omitempty" jsonschema:"Seedmancer API token (for Pro plan check)"`
 }
 
 type ExportOutput struct {
-	Dataset           string `json:"dataset"`
-	SchemaFingerprint string `json:"schemaFingerprint"`
-	SchemaShort       string `json:"schemaShort"`
-	Path              string `json:"path"`
-	Env               string `json:"env"`
+	Dataset           string   `json:"dataset"`
+	SchemaFingerprint string   `json:"schemaFingerprint"`
+	SchemaShort       string   `json:"schemaShort"`
+	Path              string   `json:"path"`
+	Env               string   `json:"env"`
+	// ServicesExported lists the service connector names that were snapshotted.
+	ServicesExported  []string `json:"servicesExported,omitempty"`
 }
 
 func RunExport(_ context.Context, in ExportInput) (ExportOutput, error) {
@@ -1144,12 +1215,39 @@ func RunExport(_ context.Context, in ExportInput) (ExportOutput, error) {
 		return ExportOutput{}, fmt.Errorf("exporting data: %v", err)
 	}
 	_ = utils.WriteDatasetMeta(datasetDir, utils.DatasetMeta{SourceEnv: target.Name})
+
+	// ── Service connectors (Pro gate) ────────────────────────────────────────
+	var servicesExported []string
+	if !in.NoServices && len(cfg.Services) > 0 {
+		baseURL := utils.GetBaseURL()
+		token, _ := utils.ResolveAPIToken(in.Token)
+		if entErr := utils.CheckServiceConnectorEntitlement(baseURL, token); entErr != nil {
+			return ExportOutput{}, fmt.Errorf("service connectors blocked: %w", entErr)
+		}
+		connectors, err := svc.BuildAll(cfg)
+		if err != nil {
+			return ExportOutput{}, fmt.Errorf("building service connectors: %w", err)
+		}
+		for _, nc := range connectors {
+			data, err := nc.Connector.Export(context.Background())
+			if err != nil {
+				return ExportOutput{}, fmt.Errorf("exporting service %q: %w", nc.Name, err)
+			}
+			sidecarPath := filepath.Join(datasetDir, nc.SidecarFilename())
+			if err := os.WriteFile(sidecarPath, data, 0644); err != nil {
+				return ExportOutput{}, fmt.Errorf("writing %s: %w", nc.SidecarFilename(), err)
+			}
+			servicesExported = append(servicesExported, nc.Name)
+		}
+	}
+
 	return ExportOutput{
 		Dataset:           datasetName,
 		SchemaFingerprint: fingerprint,
 		SchemaShort:       fpShort,
 		Path:              datasetDir,
 		Env:               target.Name,
+		ServicesExported:  servicesExported,
 	}, nil
 }
 
@@ -1767,4 +1865,174 @@ func ListLocalSchemasBrief() ([]LocalSchemaBrief, error) {
 		})
 	}
 	return out, nil
+}
+
+// ─── services ─────────────────────────────────────────────────────────────────
+
+// ListServicesOutput is the structured result of RunListServices.
+type ListServicesOutput struct {
+	Services []ServiceInfo `json:"services"`
+}
+
+// ServiceInfo describes one configured service connector.
+type ServiceInfo struct {
+	Name string `json:"name"`
+	Type string `json:"type"`
+}
+
+// RunListServices returns the services configured in seedmancer.yaml.
+func RunListServices(_ context.Context, _ struct{}) (ListServicesOutput, error) {
+	configPath, err := utils.FindConfigFile()
+	if err != nil {
+		return ListServicesOutput{}, err
+	}
+	cfg, err := utils.LoadConfig(configPath)
+	if err != nil {
+		return ListServicesOutput{}, err
+	}
+	out := ListServicesOutput{}
+	for _, name := range cfg.SortedServiceNames() {
+		out.Services = append(out.Services, ServiceInfo{
+			Name: name,
+			Type: cfg.Services[name].Type,
+		})
+	}
+	if out.Services == nil {
+		out.Services = []ServiceInfo{}
+	}
+	return out, nil
+}
+
+// ExportServiceInput specifies which service to snapshot and where to store it.
+type ExportServiceInput struct {
+	// ServiceName is the key from seedmancer.yaml's services map.
+	ServiceName string `json:"serviceName" jsonschema:"Name of the service to export (matches seedmancer.yaml services key)"`
+	// DatasetID is the dataset folder to write the sidecar into.
+	DatasetID string `json:"datasetId" jsonschema:"Dataset id whose folder will receive the sidecar JSON"`
+}
+
+// ExportServiceOutput is the structured result of RunExportService.
+type ExportServiceOutput struct {
+	ServiceName    string `json:"serviceName"`
+	SidecarFile    string `json:"sidecarFile"`
+	DatasetPath    string `json:"datasetPath"`
+	BytesWritten   int    `json:"bytesWritten"`
+}
+
+// RunExportService snapshots a single named service into an existing dataset folder.
+func RunExportService(ctx context.Context, in ExportServiceInput) (ExportServiceOutput, error) {
+	configPath, err := utils.FindConfigFile()
+	if err != nil {
+		return ExportServiceOutput{}, err
+	}
+	projectRoot := filepath.Dir(configPath)
+	cfg, err := utils.LoadConfig(configPath)
+	if err != nil {
+		return ExportServiceOutput{}, err
+	}
+
+	svcCfg, ok := cfg.Services[in.ServiceName]
+	if !ok {
+		return ExportServiceOutput{}, fmt.Errorf(
+			"service %q not found in seedmancer.yaml; configured services: %v",
+			in.ServiceName, cfg.SortedServiceNames(),
+		)
+	}
+
+	connector, err := svc.New(in.ServiceName, svcCfg)
+	if err != nil {
+		return ExportServiceOutput{}, err
+	}
+
+	_, datasetDir, err := utils.FindLocalDataset(projectRoot, cfg.StoragePath, "", in.DatasetID)
+	if err != nil {
+		return ExportServiceOutput{}, fmt.Errorf("finding dataset %q: %w", in.DatasetID, err)
+	}
+
+	data, err := connector.Export(ctx)
+	if err != nil {
+		return ExportServiceOutput{}, fmt.Errorf("exporting %s: %w", in.ServiceName, err)
+	}
+
+	sidecarName := svc.SidecarFilename(in.ServiceName)
+	sidecarPath := filepath.Join(datasetDir, sidecarName)
+	if err := os.WriteFile(sidecarPath, data, 0644); err != nil {
+		return ExportServiceOutput{}, fmt.Errorf("writing sidecar: %w", err)
+	}
+
+	return ExportServiceOutput{
+		ServiceName:  in.ServiceName,
+		SidecarFile:  sidecarName,
+		DatasetPath:  datasetDir,
+		BytesWritten: len(data),
+	}, nil
+}
+
+// SeedServiceInput specifies which service to restore and which dataset to read from.
+type SeedServiceInput struct {
+	// ServiceName is the key from seedmancer.yaml's services map.
+	ServiceName string `json:"serviceName" jsonschema:"Name of the service to seed (matches seedmancer.yaml services key)"`
+	// DatasetID is the dataset folder containing the sidecar JSON.
+	DatasetID string `json:"datasetId" jsonschema:"Dataset id whose sidecar JSON will be used for the seed"`
+}
+
+// SeedServiceOutput is the structured result of RunSeedService.
+type SeedServiceOutput struct {
+	ServiceName string `json:"serviceName"`
+	DatasetID   string `json:"datasetId"`
+	SidecarFile string `json:"sidecarFile"`
+}
+
+// RunSeedService restores a single named service from its sidecar in a dataset folder.
+func RunSeedService(ctx context.Context, in SeedServiceInput) (SeedServiceOutput, error) {
+	configPath, err := utils.FindConfigFile()
+	if err != nil {
+		return SeedServiceOutput{}, err
+	}
+	projectRoot := filepath.Dir(configPath)
+	cfg, err := utils.LoadConfig(configPath)
+	if err != nil {
+		return SeedServiceOutput{}, err
+	}
+
+	svcCfg, ok := cfg.Services[in.ServiceName]
+	if !ok {
+		return SeedServiceOutput{}, fmt.Errorf(
+			"service %q not found in seedmancer.yaml; configured services: %v",
+			in.ServiceName, cfg.SortedServiceNames(),
+		)
+	}
+
+	connector, err := svc.New(in.ServiceName, svcCfg)
+	if err != nil {
+		return SeedServiceOutput{}, err
+	}
+
+	_, datasetDir, err := utils.FindLocalDataset(projectRoot, cfg.StoragePath, "", in.DatasetID)
+	if err != nil {
+		return SeedServiceOutput{}, fmt.Errorf("finding dataset %q: %w", in.DatasetID, err)
+	}
+
+	sidecarName := svc.SidecarFilename(in.ServiceName)
+	sidecarPath := filepath.Join(datasetDir, sidecarName)
+	data, err := os.ReadFile(sidecarPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return SeedServiceOutput{}, fmt.Errorf(
+				"sidecar %s not found in dataset %q — run export_service first",
+				sidecarName, in.DatasetID,
+			)
+		}
+		return SeedServiceOutput{}, fmt.Errorf("reading sidecar: %w", err)
+	}
+
+	if err := connector.Seed(ctx, data); err != nil {
+		return SeedServiceOutput{}, fmt.Errorf("seeding %s: %w", in.ServiceName, err)
+	}
+
+	return SeedServiceOutput{
+		ServiceName: in.ServiceName,
+		DatasetID:   in.DatasetID,
+		SidecarFile: sidecarName,
+	}, nil
 }

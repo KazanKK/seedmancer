@@ -177,4 +177,18 @@ func registerResources(s *mcp.Server) {
 			}},
 		}, nil
 	})
+
+	s.AddResource(&mcp.Resource{
+		URI:         "seedmancer://docs/supabase-auth-connector",
+		Name:        "Supabase Auth connector",
+		Title:       "Supabase Auth service connector (Pro)",
+		Description: "How to configure, export, and seed Supabase Auth users alongside Postgres using the Supabase Auth service connector.",
+		MIMEType:    "text/markdown",
+	}, func(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
+		return &mcp.ReadResourceResult{
+			Contents: []*mcp.ResourceContents{{
+				URI: req.Params.URI, MIMEType: "text/markdown", Text: docSupabaseAuthConnector,
+			}},
+		}, nil
+	})
 }

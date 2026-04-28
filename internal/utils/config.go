@@ -29,6 +29,12 @@ import (
 // installs don't get signed out. New writes go to ~/.seedmancer/credentials
 // (see credentials.go); `seedmancer login` no longer touches config files.
 //
+// Services is an optional map of named 3rd-party service connectors. Each
+// entry snapshots/restores an external service (Supabase Auth users, etc.)
+// alongside the Postgres DB so a single `seedmancer seed` resets the entire
+// test environment. Credentials are always read from environment variables
+// named in each ServiceConfig so seedmancer.yaml can be committed safely.
+//
 // Unknown keys are ignored by yaml.Unmarshal (the default). That's on
 // purpose so future keys (e.g. value_map, before_seed) can be hand-edited
 // before older CLI versions understand them without causing errors.
@@ -36,6 +42,11 @@ type Config struct {
 	StoragePath  string               `yaml:"storage_path"`
 	DefaultEnv   string               `yaml:"default_env,omitempty"`
 	Environments map[string]EnvConfig `yaml:"environments,omitempty"`
+
+	// Services holds optional 3rd-party service connector configs, keyed by
+	// a user-chosen name (e.g. "auth"). Export and seed iterate
+	// over these in sorted order after the Postgres phase.
+	Services map[string]ServiceConfig `yaml:"services,omitempty"`
 
 	// Legacy single-target fields — kept for read-compat.
 	DatabaseURL string `yaml:"database_url,omitempty"`
@@ -47,6 +58,37 @@ type Config struct {
 // EnvConfig is one named target inside `environments:`.
 type EnvConfig struct {
 	DatabaseURL string `yaml:"database_url"`
+}
+
+// ServiceConfig holds the configuration for one 3rd-party service connector.
+// All sensitive values (API keys, tokens) are indirected through environment
+// variable names so the config file itself never contains secrets.
+//
+// Supported types:
+//   - "supabase-auth" — Supabase Auth users. Requires URLEnv + ServiceRoleKeyEnv.
+type ServiceConfig struct {
+	// Type identifies which connector implementation to use.
+	// Required. Must be "supabase-auth".
+	Type string `yaml:"type"`
+
+	// URLEnv is the name of the environment variable holding the Supabase
+	// project URL (e.g. "SUPABASE_URL"). Used by the "supabase-auth" type.
+	URLEnv string `yaml:"url_env,omitempty"`
+
+	// ServiceRoleKeyEnv is the name of the environment variable holding the
+	// Supabase service role key. Used by the "supabase-auth" type.
+	ServiceRoleKeyEnv string `yaml:"service_role_key_env,omitempty"`
+}
+
+// SortedServiceNames returns the names of all configured services in
+// alphabetical order so export/seed runs are deterministic.
+func (c Config) SortedServiceNames() []string {
+	names := make([]string, 0, len(c.Services))
+	for n := range c.Services {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // NamedEnv pairs a resolved env with its name so callers can render banners
