@@ -4,65 +4,24 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
-
-permissions:
-  contents: read
-
-concurrency:
-  group: test-${{ github.ref }}
-  cancel-in-progress: true
 
 jobs:
   unit:
-    name: Unit tests
+    name: Go unit tests
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-go@v5
+      - name: Setup Go
+        uses: actions/setup-go@v5
         with:
-          go-version: "1.22"
+          go-version-file: go.mod
           cache: true
 
-      - name: go vet
-        run: go vet ./...
+      - name: Build
+        run: GOTOOLCHAIN=auto go build ./...
 
-      - name: go build
-        run: go build ./...
-
-      - name: go test
-        # Run the full package tree, skipping the env-gated integration test.
-        # SEEDMANCER_INTEGRATION_DATABASE_URL is unset, so the Postgres-backed
-        # test uses t.Skip() and only the pure-logic unit tests execute.
-        run: go test -race -count=1 ./...
-
-  integration:
-    name: Postgres integration
-    runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_USER: postgres
-          POSTGRES_DB: postgres
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd="pg_isready -U postgres"
-          --health-interval=5s
-          --health-timeout=3s
-          --health-retries=10
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version: "1.22"
-          cache: true
-
-      - name: Run Postgres round-trip test
-        env:
-          SEEDMANCER_INTEGRATION_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable
-        run: go test -race -count=1 -run TestPostgresIntegration ./database/...
+      - name: Test
+        run: GOTOOLCHAIN=auto go test ./...

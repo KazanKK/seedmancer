@@ -260,16 +260,10 @@ func classifyConfigScope(path string) string {
 }
 
 // resolveAPIURLSource returns (value, source) where source is one of:
-// "env", "config", or "default". It intentionally mirrors the order in
-// utils.GetBaseURL so the two never drift.
+// "env" or "default". It intentionally mirrors utils.GetBaseURL.
 func resolveAPIURLSource() (string, string) {
-	if v := strings.TrimRight(strings.TrimSpace(os.Getenv("SEEDMANCER_API_URL")), "/"); v != "" {
+	if v := strings.TrimRight(strings.TrimSpace(os.Getenv("SEEDMANCER_CLOUD_API_URL")), "/"); v != "" {
 		return v, "env"
-	}
-	if cfgPath, err := utils.FindConfigFile(); err == nil {
-		if cfg, err := utils.LoadConfig(cfgPath); err == nil && cfg.APIURL != "" {
-			return strings.TrimRight(cfg.APIURL, "/"), "config"
-		}
 	}
 	return "https://api.seedmancer.dev", "default"
 }

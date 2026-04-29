@@ -191,9 +191,8 @@ func resolveDashboardURL(flag string) string {
 	if v := strings.TrimSpace(flag); v != "" {
 		return strings.TrimRight(v, "/")
 	}
-	// Allow reusing SEEDMANCER_API_URL for dev hosts that serve both the
-	// dashboard and API from the same origin. Production runs the API on a
-	// subdomain so we also allow SEEDMANCER_DASHBOARD_URL to differ.
+	// When the resolved API origin is not production, treat it as the dashboard
+	// host too (local monorepo dev). Otherwise use the public marketing site.
 	if v := strings.TrimSpace(utils.GetBaseURL()); v != "" && !strings.Contains(v, "api.seedmancer.dev") {
 		return strings.TrimRight(v, "/")
 	}

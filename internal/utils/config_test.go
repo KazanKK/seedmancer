@@ -9,14 +9,13 @@ import (
 func TestLoadConfig(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "seedmancer.yaml")
-	writeFile(t, cfgPath, "storage_path: .seed\napi_token: tok\napi_url: https://example.com\ndatabase_url: postgres://x\n")
+	writeFile(t, cfgPath, "storage_path: .seed\napi_token: tok\ndatabase_url: postgres://x\n")
 
 	cfg, err := LoadConfig(cfgPath)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
 	if cfg.StoragePath != ".seed" || cfg.APIToken != "tok" ||
-		cfg.APIURL != "https://example.com" ||
 		cfg.DatabaseURL != "postgres://x" {
 		t.Fatalf("unexpected cfg: %+v", cfg)
 	}

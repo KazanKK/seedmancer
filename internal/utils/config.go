@@ -52,7 +52,6 @@ type Config struct {
 	DatabaseURL string `yaml:"database_url,omitempty"`
 
 	APIToken string `yaml:"api_token,omitempty"`
-	APIURL   string `yaml:"api_url,omitempty"`
 }
 
 // EnvConfig is one named target inside `environments:`.

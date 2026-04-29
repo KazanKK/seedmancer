@@ -505,16 +505,18 @@ func formatSchemaList(schemas []LocalSchema) string {
 
 // ─── API config helpers ─────────────────────────────────────────────────────
 
-// GetBaseURL resolves the Seedmancer HTTP API origin (no trailing slash).
-// Priority: SEEDMANCER_API_URL → api_url in seedmancer.yaml → https://api.seedmancer.dev
+// GetBaseURL resolves the Seedmancer cloud HTTP API origin (no trailing slash).
+//
+// Priority:
+//  1. SEEDMANCER_CLOUD_API_URL — opt-in override (staging, self-hosted API dev).
+//  2. https://api.seedmancer.dev
+//
+// SEEDMANCER_API_URL is not read here; it is reserved for the Seedmancer-web
+// Playwright suite (HTTP base for the Next.js app under test) and must not
+// affect CLI behaviour. The api_url YAML key is not supported.
 func GetBaseURL() string {
-	if v := os.Getenv("SEEDMANCER_API_URL"); v != "" {
-		return strings.TrimRight(v, "/")
-	}
-	if cfgPath, err := FindConfigFile(); err == nil {
-		if cfg, err := LoadConfig(cfgPath); err == nil && cfg.APIURL != "" {
-			return strings.TrimRight(cfg.APIURL, "/")
-		}
+	if v := os.Getenv("SEEDMANCER_CLOUD_API_URL"); v != "" {
+		return strings.TrimRight(strings.TrimSpace(v), "/")
 	}
 	return "https://api.seedmancer.dev"
 }

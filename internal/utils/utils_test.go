@@ -66,13 +66,13 @@ func TestGetBaseURL_defaults(t *testing.T) {
 		t.Fatalf("chdir: %v", err)
 	}
 	t.Setenv("HOME", dir)
-	t.Setenv("SEEDMANCER_API_URL", "")
+	t.Setenv("SEEDMANCER_CLOUD_API_URL", "")
 	if got := GetBaseURL(); got != "https://api.seedmancer.dev" {
 		t.Errorf("default base URL = %q", got)
 	}
 }
 
-func TestGetBaseURL_envOverridesConfig(t *testing.T) {
+func TestGetBaseURL_cloudEnvOverride(t *testing.T) {
 	dir := t.TempDir()
 	prev, _ := os.Getwd()
 	t.Cleanup(func() { _ = os.Chdir(prev) })
@@ -80,18 +80,32 @@ func TestGetBaseURL_envOverridesConfig(t *testing.T) {
 		t.Fatalf("chdir: %v", err)
 	}
 	t.Setenv("HOME", dir)
-	writeFile(t, filepath.Join(dir, "seedmancer.yaml"), "storage_path: .seedmancer\napi_url: https://from-config.example.com\n")
+	writeFile(t, filepath.Join(dir, "seedmancer.yaml"), "storage_path: .seedmancer\n")
 
-	// Env should win.
-	t.Setenv("SEEDMANCER_API_URL", "https://from-env.example.com/")
+	t.Setenv("SEEDMANCER_CLOUD_API_URL", "https://from-env.example.com/")
 	if got := GetBaseURL(); got != "https://from-env.example.com" {
-		t.Fatalf("env should win: got %q", got)
+		t.Fatalf("SEEDMANCER_CLOUD_API_URL should win: got %q", got)
 	}
 
-	// Without env, config takes over.
-	t.Setenv("SEEDMANCER_API_URL", "")
-	if got := GetBaseURL(); got != "https://from-config.example.com" {
-		t.Fatalf("config should be used when env unset: got %q", got)
+	t.Setenv("SEEDMANCER_CLOUD_API_URL", "")
+	if got := GetBaseURL(); got != "https://api.seedmancer.dev" {
+		t.Fatalf("default production URL when env unset: got %q", got)
+	}
+}
+
+func TestGetBaseURL_ignoresLegacyApiURLInYaml(t *testing.T) {
+	dir := t.TempDir()
+	prev, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(prev) })
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	t.Setenv("HOME", dir)
+	t.Setenv("SEEDMANCER_CLOUD_API_URL", "")
+	writeFile(t, filepath.Join(dir, "seedmancer.yaml"), "storage_path: .seedmancer\napi_url: https://legacy-in-yaml.example\n")
+
+	if got := GetBaseURL(); got != "https://api.seedmancer.dev" {
+		t.Fatalf("api_url in yaml must be ignored: got %q", got)
 	}
 }
 

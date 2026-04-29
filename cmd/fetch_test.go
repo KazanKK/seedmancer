@@ -32,17 +32,6 @@ func TestDisplayLabelForSchema(t *testing.T) {
 	}
 }
 
-func TestResolveFetchOutput_withFlagUsesAbsolutePath(t *testing.T) {
-	dir := t.TempDir()
-	out, err := resolveFetchOutput(filepath.Join(dir, "out"), datasetAPI{}, "ds1")
-	if err != nil {
-		t.Fatalf("unexpected err: %v", err)
-	}
-	if !filepath.IsAbs(out) {
-		t.Fatalf("output not absolute: %q", out)
-	}
-}
-
 func TestResolveFetchOutput_noConfigNoFlagErrors(t *testing.T) {
 	dir := t.TempDir()
 	prev, _ := os.Getwd()
@@ -53,9 +42,9 @@ func TestResolveFetchOutput_noConfigNoFlagErrors(t *testing.T) {
 	// Stub HOME so no ~/.seedmancer/config.yaml lookup interferes with the test.
 	t.Setenv("HOME", dir)
 
-	_, err := resolveFetchOutput("", datasetAPI{Name: "ds1"}, "ds1")
+	_, err := resolveFetchOutput(datasetAPI{Name: "ds1"}, "ds1")
 	if err == nil {
-		t.Fatal("expected error when config missing and --output not set")
+		t.Fatal("expected error when seedmancer.yaml is missing")
 	}
 }
 
@@ -70,7 +59,7 @@ func TestResolveFetchOutput_usesConfigStoragePath(t *testing.T) {
 
 	writeFile(t, filepath.Join(dir, "seedmancer.yaml"), "storage_path: .seedmancer\n")
 
-	got, err := resolveFetchOutput("", datasetAPI{
+	got, err := resolveFetchOutput(datasetAPI{
 		Name:   "ds1",
 		Schema: &schemaRefShort{FingerprintShort: "abcd12345678"},
 	}, "ds1")

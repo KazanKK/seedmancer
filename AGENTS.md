@@ -25,6 +25,11 @@ supports MCP, **use the tools instead of shelling out**:
 Call `login_info` first when you're unsure whether the host has an API
 token configured.
 
+Cloud API origin defaults to `https://api.seedmancer.dev`. Optional override:
+`SEEDMANCER_CLOUD_API_URL`. `SEEDMANCER_API_URL` is **not** read by the CLI
+(reserved for the Seedmancer-web Playwright suite). Do not use `api_url` in
+`seedmancer.yaml` — it is ignored.
+
 ## Safety rails worth knowing
 
 - `seed_database` refuses to seed prod-like env names (`prod`,
