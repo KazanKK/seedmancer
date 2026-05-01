@@ -229,25 +229,16 @@ func seedOneEnv(target utils.NamedEnv, mergedDir, datasetName, sourceEnv string,
 		}
 	}
 
-	dbURL, scheme, err := normalizePostgresDSN(target.DatabaseURL)
+	manager, normalizedURL, err := db.NewManager(target.DatabaseURL)
 	if err != nil {
 		return seedResult{Env: target.Name, Err: err, Duration: time.Since(start)}
 	}
-	if scheme != "postgres" {
-		return seedResult{
-			Env:      target.Name,
-			Err:      fmt.Errorf("unsupported database type: %s (only postgres is supported)", scheme),
-			Duration: time.Since(start),
-		}
-	}
-
-	pg := &db.PostgresManager{}
-	if err := pg.ConnectWithDSN(dbURL); err != nil {
+	if err := manager.ConnectWithDSN(normalizedURL); err != nil {
 		return seedResult{Env: target.Name, Err: fmt.Errorf("connecting: %v", err), Duration: time.Since(start)}
 	}
 
 	sp := ui.StartSpinner("Importing dataset...")
-	if err := pg.RestoreFromCSV(mergedDir); err != nil {
+	if err := manager.RestoreFromCSV(mergedDir); err != nil {
 		sp.Stop(false, fmt.Sprintf("Import failed (%s)", target.Name))
 		ui.Error("%v", err)
 		return seedResult{Env: target.Name, Err: err, Duration: time.Since(start)}

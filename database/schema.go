@@ -43,6 +43,7 @@ type DatabaseType string
 
 const (
 	Postgres DatabaseType = "postgres"
+	MySQL    DatabaseType = "mysql"
 )
 
 type Schema struct {

@@ -1089,22 +1089,14 @@ func seedOneEnvQuiet(target utils.NamedEnv, mergedDir string, yes bool, sourceEn
 		}
 		return seedResult{Env: target.Name, Err: fmt.Errorf("%s", msg), Duration: time.Since(start)}
 	}
-	dbURL, scheme, err := normalizePostgresDSN(target.DatabaseURL)
+	manager, normalizedURL, err := db.NewManager(target.DatabaseURL)
 	if err != nil {
 		return seedResult{Env: target.Name, Err: err, Duration: time.Since(start)}
 	}
-	if scheme != "postgres" {
-		return seedResult{
-			Env:      target.Name,
-			Err:      fmt.Errorf("unsupported database type: %s (only postgres is supported)", scheme),
-			Duration: time.Since(start),
-		}
-	}
-	pg := &db.PostgresManager{}
-	if err := pg.ConnectWithDSN(dbURL); err != nil {
+	if err := manager.ConnectWithDSN(normalizedURL); err != nil {
 		return seedResult{Env: target.Name, Err: fmt.Errorf("connecting: %v", err), Duration: time.Since(start)}
 	}
-	if err := pg.RestoreFromCSV(mergedDir); err != nil {
+	if err := manager.RestoreFromCSV(mergedDir); err != nil {
 		return seedResult{Env: target.Name, Err: err, Duration: time.Since(start)}
 	}
 	return seedResult{Env: target.Name, Duration: time.Since(start)}
@@ -1165,15 +1157,11 @@ func RunExport(_ context.Context, in ExportInput) (ExportOutput, error) {
 	}
 	datasetName = utils.SanitizeDatasetSegment(datasetName)
 
-	dbURL, scheme, err := normalizePostgresDSN(target.DatabaseURL)
+	manager, normalizedURL, err := db.NewManager(target.DatabaseURL)
 	if err != nil {
 		return ExportOutput{}, err
 	}
-	if scheme != "postgres" {
-		return ExportOutput{}, fmt.Errorf("unsupported database type: %s", scheme)
-	}
-	pg := &db.PostgresManager{}
-	if err := pg.ConnectWithDSN(dbURL); err != nil {
+	if err := manager.ConnectWithDSN(normalizedURL); err != nil {
 		return ExportOutput{}, fmt.Errorf("connecting to database: %v", err)
 	}
 
@@ -1182,7 +1170,7 @@ func RunExport(_ context.Context, in ExportInput) (ExportOutput, error) {
 		return ExportOutput{}, fmt.Errorf("creating temp directory: %v", err)
 	}
 	defer os.RemoveAll(tmpSchema)
-	if err := pg.ExportSchema(tmpSchema); err != nil {
+	if err := manager.ExportSchema(tmpSchema); err != nil {
 		return ExportOutput{}, fmt.Errorf("exporting schema: %v", err)
 	}
 	fingerprint, err := utils.FingerprintSchemaFile(filepath.Join(tmpSchema, "schema.json"))
@@ -1211,7 +1199,7 @@ func RunExport(_ context.Context, in ExportInput) (ExportOutput, error) {
 	if err := os.MkdirAll(datasetDir, 0755); err != nil {
 		return ExportOutput{}, fmt.Errorf("creating dataset directory: %v", err)
 	}
-	if err := pg.ExportToCSV(datasetDir); err != nil {
+	if err := manager.ExportToCSV(datasetDir); err != nil {
 		return ExportOutput{}, fmt.Errorf("exporting data: %v", err)
 	}
 	_ = utils.WriteDatasetMeta(datasetDir, utils.DatasetMeta{SourceEnv: target.Name})

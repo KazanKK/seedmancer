@@ -1,6 +1,6 @@
 # Seedmancer CLI
 
-Reset your PostgreSQL database to a saved state in seconds — export snapshots, restore them on demand, sync to the cloud, and generate test data with AI.
+Reset your PostgreSQL or MySQL database to a saved state in seconds — export snapshots, restore them on demand, sync to the cloud, and generate test data with AI.
 
 → **Full documentation: [seedmancer.dev/docs](https://seedmancer.dev/docs)**
 

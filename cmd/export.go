@@ -102,16 +102,11 @@ func ExportCommand() *cli.Command {
 		}
 			datasetName = utils.SanitizeDatasetSegment(datasetName)
 
-			dbURL, scheme, err := normalizePostgresDSN(dbURL)
+			manager, normalizedURL, err := db.NewManager(dbURL)
 			if err != nil {
 				return err
 			}
-			if scheme != "postgres" {
-				return fmt.Errorf("unsupported database type: %s (only postgres is supported)", scheme)
-			}
-
-			pg := &db.PostgresManager{}
-			if err := pg.ConnectWithDSN(dbURL); err != nil {
+			if err := manager.ConnectWithDSN(normalizedURL); err != nil {
 				return fmt.Errorf("connecting to database: %v", err)
 			}
 
@@ -123,11 +118,11 @@ func ExportCommand() *cli.Command {
 			}
 			defer os.RemoveAll(tmpSchema)
 
-			sp := ui.StartSpinner("Exporting schema...")
-			if err := pg.ExportSchema(tmpSchema); err != nil {
-				sp.Stop(false, "Schema export failed")
-				return fmt.Errorf("exporting schema: %v", err)
-			}
+		sp := ui.StartSpinner("Exporting schema...")
+		if err := manager.ExportSchema(tmpSchema); err != nil {
+			sp.Stop(false, "Schema export failed")
+			return fmt.Errorf("exporting schema: %v", err)
+		}
 			sp.Stop(true, "Schema exported")
 
 			fingerprint, err := utils.FingerprintSchemaFile(filepath.Join(tmpSchema, "schema.json"))
@@ -168,7 +163,7 @@ func ExportCommand() *cli.Command {
 			}
 
 		sp = ui.StartSpinner("Exporting table data...")
-		if err := pg.ExportToCSV(datasetDir); err != nil {
+		if err := manager.ExportToCSV(datasetDir); err != nil {
 			sp.Stop(false, "Data export failed")
 			return fmt.Errorf("exporting data: %v", err)
 		}
