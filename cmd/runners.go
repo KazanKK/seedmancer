@@ -108,17 +108,17 @@ type DescribeDatasetInput struct {
 // contains, their row counts, and a small preview — so agents don't
 // need shell access to understand what's in it.
 type DescribeDatasetOutput struct {
-	Dataset              string               `json:"dataset"`
-	Path                 string               `json:"path"`
-	SchemaFingerprint    string               `json:"schemaFingerprint"`
-	SchemaShort          string               `json:"schemaShort"`
-	SchemaDisplayName    string               `json:"schemaDisplayName,omitempty"`
-	SourceEnv            string               `json:"sourceEnv,omitempty"`
-	UpdatedAt            string               `json:"updatedAt"`
-	Files                []DatasetFilePreview `json:"files"`
+	Dataset           string               `json:"dataset"`
+	Path              string               `json:"path"`
+	SchemaFingerprint string               `json:"schemaFingerprint"`
+	SchemaShort       string               `json:"schemaShort"`
+	SchemaDisplayName string               `json:"schemaDisplayName,omitempty"`
+	SourceEnv         string               `json:"sourceEnv,omitempty"`
+	UpdatedAt         string               `json:"updatedAt"`
+	Files             []DatasetFilePreview `json:"files"`
 	// HasGeneratorScript is true when a generator script has been saved for
 	// this dataset. Retrieve the script with the get_dataset_script tool.
-	HasGeneratorScript   bool                 `json:"hasGeneratorScript,omitempty"`
+	HasGeneratorScript bool `json:"hasGeneratorScript,omitempty"`
 }
 
 // DatasetFilePreview is one row in DescribeDatasetOutput.Files. Rows is
@@ -364,7 +364,7 @@ type DescribeSchemaInput struct {
 }
 
 type SchemaTable struct {
-	Name    string        `json:"name"`
+	Name    string         `json:"name"`
 	Columns []SchemaColumn `json:"columns"`
 }
 
@@ -985,14 +985,14 @@ func RunSeed(_ context.Context, in SeedInput) (SeedOutput, error) {
 	// constraint. By seeding auth/services first (while public.* is still
 	// empty), the trigger inserts succeed, and the subsequent DB restore
 	// truncates + refills the public.* tables from the CSV anyway.
-	if !in.NoServices && !in.DryRun && len(cfg.Services) > 0 {
+	if !in.NoServices && !in.DryRun && len(cfg.ServicesForEnv(targets[0].Name)) > 0 {
 		baseURL := utils.GetBaseURL()
 		token, _ := utils.ResolveAPIToken(in.Token)
 		if entErr := utils.CheckServiceConnectorEntitlement(baseURL, token); entErr != nil {
 			out.ServiceErrors = append(out.ServiceErrors, fmt.Sprintf("service connectors blocked: %v", entErr))
 			out.AnyError = true
 		} else {
-			connectors, err := svc.BuildAll(cfg)
+			connectors, err := svc.BuildAll(cfg.ServicesForEnv(targets[0].Name))
 			if err != nil {
 				out.ServiceErrors = append(out.ServiceErrors, fmt.Sprintf("building connectors: %v", err))
 				out.AnyError = true
@@ -1000,6 +1000,7 @@ func RunSeed(_ context.Context, in SeedInput) (SeedOutput, error) {
 				// Pass the first available DB URL so auth connector can clean
 				// mirror rows before creating new auth users.
 				svcCtx := context.Background()
+				svcCtx = svc.WithDataDir(svcCtx, merged)
 				for _, t := range targets {
 					if t.DatabaseURL != "" {
 						svcCtx = svc.WithDBURL(svcCtx, t.DatabaseURL)
@@ -1054,9 +1055,9 @@ func RunSeed(_ context.Context, in SeedInput) (SeedOutput, error) {
 }
 
 // resolveSeedTargetsFromOpts is the cli-free version of resolveSeedTargets:
-// same precedence rules (ad-hoc URL > named env > default), but driven
-// from plain strings so the MCP handler doesn't have to synthesize a
-// cli.Context.
+// same precedence rules, but driven from plain strings so the MCP handler
+// doesn't have to synthesize a cli.Context. $SEEDMANCER_DATABASE_URL is only
+// used when no environments are configured (bare CI / no seedmancer.yaml).
 func resolveSeedTargetsFromOpts(dbURL, envCSV string, cfg utils.Config) ([]utils.NamedEnv, error) {
 	if adhoc := strings.TrimSpace(dbURL); adhoc != "" {
 		if strings.TrimSpace(envCSV) != "" {
@@ -1067,11 +1068,13 @@ func resolveSeedTargetsFromOpts(dbURL, envCSV string, cfg utils.Config) ([]utils
 			EnvConfig: utils.EnvConfig{DatabaseURL: adhoc},
 		}}, nil
 	}
-	if v := strings.TrimSpace(os.Getenv("SEEDMANCER_DATABASE_URL")); v != "" && strings.TrimSpace(envCSV) == "" {
-		return []utils.NamedEnv{{
-			Name:      adHocEnvName,
-			EnvConfig: utils.EnvConfig{DatabaseURL: v},
-		}}, nil
+	if len(cfg.EffectiveEnvs()) == 0 && strings.TrimSpace(envCSV) == "" {
+		if v := strings.TrimSpace(os.Getenv("SEEDMANCER_DATABASE_URL")); v != "" {
+			return []utils.NamedEnv{{
+				Name:      adHocEnvName,
+				EnvConfig: utils.EnvConfig{DatabaseURL: v},
+			}}, nil
+		}
 	}
 	return cfg.ResolveEnvs(envCSV)
 }
@@ -1082,49 +1085,54 @@ func resolveSeedTargetsFromOpts(dbURL, envCSV string, cfg utils.Config) ([]utils
 // result; the CLI still has its pretty path via seedOneEnv.
 func seedOneEnvQuiet(target utils.NamedEnv, mergedDir string, yes bool, sourceEnv, datasetName string) seedResult {
 	start := time.Now()
+	dest := targetDisplay(target)
 	if !yes {
-		msg := fmt.Sprintf("confirmation required to seed %q into %q — set yes:true to confirm", datasetName, target.Name)
-		if sourceEnv != "" {
-			msg = fmt.Sprintf("confirmation required to seed %q (from %q) into %q — set yes:true to confirm", datasetName, sourceEnv, target.Name)
+		msg := fmt.Sprintf("confirmation required to seed %q into %q — set yes:true to confirm", datasetName, dest)
+		if sourceEnv != "" && sourceEnv != adHocEnvName {
+			msg = fmt.Sprintf("confirmation required to seed %q (from %q) into %q — set yes:true to confirm", datasetName, sourceEnv, dest)
 		}
-		return seedResult{Env: target.Name, Err: fmt.Errorf("%s", msg), Duration: time.Since(start)}
+		return seedResult{Env: dest, Err: fmt.Errorf("%s", msg), Duration: time.Since(start)}
 	}
 	manager, normalizedURL, err := db.NewManager(target.DatabaseURL)
 	if err != nil {
-		return seedResult{Env: target.Name, Err: err, Duration: time.Since(start)}
+		return seedResult{Env: dest, Err: err, Duration: time.Since(start)}
 	}
 	if err := manager.ConnectWithDSN(normalizedURL); err != nil {
-		return seedResult{Env: target.Name, Err: fmt.Errorf("connecting: %v", err), Duration: time.Since(start)}
+		return seedResult{Env: dest, Err: fmt.Errorf("connecting: %v", err), Duration: time.Since(start)}
 	}
 	if err := manager.RestoreFromCSV(mergedDir); err != nil {
-		return seedResult{Env: target.Name, Err: err, Duration: time.Since(start)}
+		return seedResult{Env: dest, Err: err, Duration: time.Since(start)}
 	}
-	return seedResult{Env: target.Name, Duration: time.Since(start)}
+	return seedResult{Env: dest, Duration: time.Since(start)}
 }
 
 // ─── export ───────────────────────────────────────────────────────────────────
 
 type ExportInput struct {
-	ID         string `json:"id,omitempty" jsonschema:"Dataset id for the new dump (defaults to baseline)"`
-	Env        string `json:"env,omitempty" jsonschema:"Named environment to export from (defaults to default_env)"`
-	DBURL      string `json:"dbUrl,omitempty" jsonschema:"Ad-hoc source URL (takes precedence over env)"`
-	Force      bool   `json:"force,omitempty" jsonschema:"Overwrite an existing dataset without prompting"`
+	ID    string `json:"id,omitempty" jsonschema:"Dataset id for the new dump (defaults to baseline)"`
+	Env   string `json:"env,omitempty" jsonschema:"Named environment to export from (defaults to default_env)"`
+	DBURL string `json:"dbUrl,omitempty" jsonschema:"Ad-hoc source URL (takes precedence over env)"`
+	Force bool   `json:"force,omitempty" jsonschema:"Overwrite an existing dataset without prompting"`
 	// NoServices skips service-connector exports when true. Useful for
 	// DB-only snapshots when service credentials are not available.
-	NoServices bool   `json:"noServices,omitempty" jsonschema:"Skip 3rd-party service connectors (Supabase Auth, etc.)"`
+	NoServices bool `json:"noServices,omitempty" jsonschema:"Skip 3rd-party service connectors (Supabase Auth, etc.)"`
+	// NoAIInfer disables the backend AI mapping inference call during
+	// service connector export. Useful when offline or when manual
+	// externalIdResolution rules already cover all CSV columns.
+	NoAIInfer bool `json:"noAiInfer,omitempty" jsonschema:"Skip backend AI mapping inference for service connectors (Stripe externalIdResolution)"`
 	// Token is the Seedmancer API token used for plan entitlement checks.
 	// Falls back to the credentials file / SEEDMANCER_API_TOKEN env var.
 	Token string `json:"token,omitempty" jsonschema:"Seedmancer API token (for Pro plan check)"`
 }
 
 type ExportOutput struct {
-	Dataset           string   `json:"dataset"`
-	SchemaFingerprint string   `json:"schemaFingerprint"`
-	SchemaShort       string   `json:"schemaShort"`
-	Path              string   `json:"path"`
-	Env               string   `json:"env"`
+	Dataset           string `json:"dataset"`
+	SchemaFingerprint string `json:"schemaFingerprint"`
+	SchemaShort       string `json:"schemaShort"`
+	Path              string `json:"path"`
+	Env               string `json:"env"`
 	// ServicesExported lists the service connector names that were snapshotted.
-	ServicesExported  []string `json:"servicesExported,omitempty"`
+	ServicesExported []string `json:"servicesExported,omitempty"`
 }
 
 func RunExport(_ context.Context, in ExportInput) (ExportOutput, error) {
@@ -1141,9 +1149,12 @@ func RunExport(_ context.Context, in ExportInput) (ExportOutput, error) {
 	var target utils.NamedEnv
 	if adhoc := strings.TrimSpace(in.DBURL); adhoc != "" {
 		target = utils.NamedEnv{Name: adHocEnvName, EnvConfig: utils.EnvConfig{DatabaseURL: adhoc}}
-	} else if v := strings.TrimSpace(os.Getenv("SEEDMANCER_DATABASE_URL")); v != "" && strings.TrimSpace(in.Env) == "" {
-		target = utils.NamedEnv{Name: adHocEnvName, EnvConfig: utils.EnvConfig{DatabaseURL: v}}
-	} else {
+	} else if len(cfg.EffectiveEnvs()) == 0 && strings.TrimSpace(in.Env) == "" {
+		if v := strings.TrimSpace(os.Getenv("SEEDMANCER_DATABASE_URL")); v != "" {
+			target = utils.NamedEnv{Name: adHocEnvName, EnvConfig: utils.EnvConfig{DatabaseURL: v}}
+		}
+	}
+	if target.DatabaseURL == "" {
 		t, err := cfg.ResolveEnv(in.Env)
 		if err != nil {
 			return ExportOutput{}, err
@@ -1206,18 +1217,23 @@ func RunExport(_ context.Context, in ExportInput) (ExportOutput, error) {
 
 	// ── Service connectors (Pro gate) ────────────────────────────────────────
 	var servicesExported []string
-	if !in.NoServices && len(cfg.Services) > 0 {
+	if !in.NoServices && len(cfg.ServicesForEnv(target.Name)) > 0 {
 		baseURL := utils.GetBaseURL()
 		token, _ := utils.ResolveAPIToken(in.Token)
 		if entErr := utils.CheckServiceConnectorEntitlement(baseURL, token); entErr != nil {
 			return ExportOutput{}, fmt.Errorf("service connectors blocked: %w", entErr)
 		}
-		connectors, err := svc.BuildAll(cfg)
+		connectors, err := svc.BuildAll(cfg.ServicesForEnv(target.Name))
 		if err != nil {
 			return ExportOutput{}, fmt.Errorf("building service connectors: %w", err)
 		}
 		for _, nc := range connectors {
-			data, err := nc.Connector.Export(context.Background())
+			svcCtx := svc.WithDataDir(context.Background(), datasetDir)
+			svcCtx = svc.WithAICredentials(svcCtx, svc.AICredentials{BaseURL: baseURL, Token: token})
+			if in.NoAIInfer {
+				svcCtx = svc.WithNoAIInfer(svcCtx)
+			}
+			data, err := nc.Connector.Export(svcCtx)
 			if err != nil {
 				return ExportOutput{}, fmt.Errorf("exporting service %q: %w", nc.Name, err)
 			}
@@ -1402,11 +1418,11 @@ type GenerateLocalInput struct {
 }
 
 type GenerateLocalOutput struct {
-	Dataset              string   `json:"dataset"`
-	Schema               string   `json:"schema"`
-	Path                 string   `json:"path"`
-	Tables               []string `json:"tables"`
-	GeneratorScriptStored bool    `json:"generatorScriptStored"`
+	Dataset               string   `json:"dataset"`
+	Schema                string   `json:"schema"`
+	Path                  string   `json:"path"`
+	Tables                []string `json:"tables"`
+	GeneratorScriptStored bool     `json:"generatorScriptStored"`
 	// InheritedFrom is the dataset id whose CSVs were copied in before the
 	// script ran. Empty when no inherit was requested.
 	InheritedFrom string `json:"inheritedFrom,omitempty"`
@@ -1465,9 +1481,9 @@ func RunGenerateLocal(ctx context.Context, in GenerateLocalInput) (GenerateLocal
 	// before they can do partial generations. Multiple datasets → no fallback,
 	// because picking arbitrarily would silently bias the result.
 	var (
-		baseDir       string
-		resolvedFrom  = inheritFrom
-		usedFallback  bool
+		baseDir      string
+		resolvedFrom = inheritFrom
+		usedFallback bool
 	)
 	if inheritFrom != "" {
 		_, dir, err := utils.FindLocalDataset(projectRoot, cfg.StoragePath, schema.FingerprintShort, inheritFrom)
@@ -1682,11 +1698,11 @@ type FetchInput struct {
 }
 
 type FetchOutput struct {
-	Dataset          string   `json:"dataset"`
-	SchemaShort      string   `json:"schemaShort"`
-	SchemaFingerprint string  `json:"schemaFingerprint"`
-	Path             string   `json:"path"`
-	Files            []string `json:"files"`
+	Dataset           string   `json:"dataset"`
+	SchemaShort       string   `json:"schemaShort"`
+	SchemaFingerprint string   `json:"schemaFingerprint"`
+	Path              string   `json:"path"`
+	Files             []string `json:"files"`
 }
 
 func RunFetch(ctx context.Context, in FetchInput) (FetchOutput, error) {
@@ -1728,11 +1744,11 @@ func RunFetch(ctx context.Context, in FetchInput) (FetchOutput, error) {
 // ─── login / logout ───────────────────────────────────────────────────────────
 
 type LoginInfoOutput struct {
-	AuthURL       string `json:"authUrl"`
-	DashboardURL  string `json:"dashboardUrl"`
-	Note          string `json:"note"`
-	SignedIn      bool   `json:"signedIn"`
-	TokenPreview  string `json:"tokenPreview,omitempty"`
+	AuthURL      string `json:"authUrl"`
+	DashboardURL string `json:"dashboardUrl"`
+	Note         string `json:"note"`
+	SignedIn     bool   `json:"signedIn"`
+	TokenPreview string `json:"tokenPreview,omitempty"`
 }
 
 // RunLoginInfo returns the URL a human would open to complete the login
@@ -1879,10 +1895,11 @@ func RunListServices(_ context.Context, _ struct{}) (ListServicesOutput, error) 
 		return ListServicesOutput{}, err
 	}
 	out := ListServicesOutput{}
-	for _, name := range cfg.SortedServiceNames() {
+	activeEnv := cfg.ActiveEnvName()
+	for _, name := range cfg.SortedServiceNamesForEnv(activeEnv) {
 		out.Services = append(out.Services, ServiceInfo{
 			Name: name,
-			Type: cfg.Services[name].Type,
+			Type: cfg.ServicesForEnv(activeEnv)[name].Type,
 		})
 	}
 	if out.Services == nil {
@@ -1897,14 +1914,18 @@ type ExportServiceInput struct {
 	ServiceName string `json:"serviceName" jsonschema:"Name of the service to export (matches seedmancer.yaml services key)"`
 	// DatasetID is the dataset folder to write the sidecar into.
 	DatasetID string `json:"datasetId" jsonschema:"Dataset id whose folder will receive the sidecar JSON"`
+	// NoAIInfer disables backend AI mapping inference for this export.
+	NoAIInfer bool `json:"noAiInfer,omitempty" jsonschema:"Skip backend AI mapping inference (Stripe externalIdResolution)"`
+	// Token is the Seedmancer API token used for Pro plan checks.
+	Token string `json:"token,omitempty" jsonschema:"Seedmancer API token (for Pro plan check)"`
 }
 
 // ExportServiceOutput is the structured result of RunExportService.
 type ExportServiceOutput struct {
-	ServiceName    string `json:"serviceName"`
-	SidecarFile    string `json:"sidecarFile"`
-	DatasetPath    string `json:"datasetPath"`
-	BytesWritten   int    `json:"bytesWritten"`
+	ServiceName  string `json:"serviceName"`
+	SidecarFile  string `json:"sidecarFile"`
+	DatasetPath  string `json:"datasetPath"`
+	BytesWritten int    `json:"bytesWritten"`
 }
 
 // RunExportService snapshots a single named service into an existing dataset folder.
@@ -1919,12 +1940,17 @@ func RunExportService(ctx context.Context, in ExportServiceInput) (ExportService
 		return ExportServiceOutput{}, err
 	}
 
-	svcCfg, ok := cfg.Services[in.ServiceName]
+	activeEnv := cfg.ActiveEnvName()
+	svcCfg, ok := cfg.ServicesForEnv(activeEnv)[in.ServiceName]
 	if !ok {
 		return ExportServiceOutput{}, fmt.Errorf(
 			"service %q not found in seedmancer.yaml; configured services: %v",
-			in.ServiceName, cfg.SortedServiceNames(),
+			in.ServiceName, cfg.SortedServiceNamesForEnv(activeEnv),
 		)
+	}
+	token, _ := utils.ResolveAPIToken(in.Token)
+	if err := utils.CheckServiceConnectorEntitlement(utils.GetBaseURL(), token); err != nil {
+		return ExportServiceOutput{}, fmt.Errorf("service connectors blocked: %w", err)
 	}
 
 	connector, err := svc.New(in.ServiceName, svcCfg)
@@ -1937,7 +1963,12 @@ func RunExportService(ctx context.Context, in ExportServiceInput) (ExportService
 		return ExportServiceOutput{}, fmt.Errorf("finding dataset %q: %w", in.DatasetID, err)
 	}
 
-	data, err := connector.Export(ctx)
+	svcCtx := svc.WithDataDir(ctx, datasetDir)
+	svcCtx = svc.WithAICredentials(svcCtx, svc.AICredentials{BaseURL: utils.GetBaseURL(), Token: token})
+	if in.NoAIInfer {
+		svcCtx = svc.WithNoAIInfer(svcCtx)
+	}
+	data, err := connector.Export(svcCtx)
 	if err != nil {
 		return ExportServiceOutput{}, fmt.Errorf("exporting %s: %w", in.ServiceName, err)
 	}
@@ -1956,12 +1987,105 @@ func RunExportService(ctx context.Context, in ExportServiceInput) (ExportService
 	}, nil
 }
 
+// InferServiceMappingInput specifies which service + dataset to analyze.
+type InferServiceMappingInput struct {
+	// ServiceName identifies the connector to infer mappings for. Currently
+	// only "stripe"-typed services are supported.
+	ServiceName string `json:"serviceName" jsonschema:"Name of the service to infer mappings for (matches seedmancer.yaml services key, must be a stripe-typed connector)"`
+	// DatasetID is the dataset folder containing the sidecar to analyze.
+	DatasetID string `json:"datasetId" jsonschema:"Dataset id whose sidecar JSON will be analyzed"`
+	// Token is the Seedmancer API token used for Pro plan + AI inference calls.
+	Token string `json:"token,omitempty" jsonschema:"Seedmancer API token (for Pro plan check + AI inference)"`
+}
+
+// InferServiceMappingOutput is the structured proposal returned by
+// RunInferServiceMapping. The CLI / MCP host can present `added` + `removed`
+// to the user before calling export_service to actually persist the change.
+type InferServiceMappingOutput struct {
+	ServiceName string                          `json:"serviceName"`
+	DatasetID   string                          `json:"datasetId"`
+	SidecarFile string                          `json:"sidecarFile"`
+	Proposal    svc.InferStripeMappingResult    `json:"proposal"`
+}
+
+// RunInferServiceMapping runs AI mapping inference against a service's
+// existing sidecar and returns the proposed externalIdResolution + objects
+// without writing anything to disk. Callers can compare the proposal to the
+// current sidecar (using `added` / `removed`) and decide whether to re-run
+// export_service to persist the change.
+func RunInferServiceMapping(ctx context.Context, in InferServiceMappingInput) (InferServiceMappingOutput, error) {
+	configPath, err := utils.FindConfigFile()
+	if err != nil {
+		return InferServiceMappingOutput{}, err
+	}
+	projectRoot := filepath.Dir(configPath)
+	cfg, err := utils.LoadConfig(configPath)
+	if err != nil {
+		return InferServiceMappingOutput{}, err
+	}
+
+	activeEnv := cfg.ActiveEnvName()
+	svcCfg, ok := cfg.ServicesForEnv(activeEnv)[in.ServiceName]
+	if !ok {
+		return InferServiceMappingOutput{}, fmt.Errorf(
+			"service %q not found in seedmancer.yaml; configured services: %v",
+			in.ServiceName, cfg.SortedServiceNamesForEnv(activeEnv),
+		)
+	}
+	if svcCfg.Type != "stripe" {
+		return InferServiceMappingOutput{}, fmt.Errorf(
+			"infer_service_mapping currently supports only stripe-typed services; %q has type %q",
+			in.ServiceName, svcCfg.Type,
+		)
+	}
+	token, _ := utils.ResolveAPIToken(in.Token)
+	if err := utils.CheckServiceConnectorEntitlement(utils.GetBaseURL(), token); err != nil {
+		return InferServiceMappingOutput{}, fmt.Errorf("service connectors blocked: %w", err)
+	}
+
+	_, datasetDir, err := utils.FindLocalDataset(projectRoot, cfg.StoragePath, "", in.DatasetID)
+	if err != nil {
+		return InferServiceMappingOutput{}, fmt.Errorf("finding dataset %q: %w", in.DatasetID, err)
+	}
+
+	sidecarName := svc.SidecarFilename(in.ServiceName)
+	sidecarPath := filepath.Join(datasetDir, sidecarName)
+	data, err := os.ReadFile(sidecarPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return InferServiceMappingOutput{}, fmt.Errorf(
+				"sidecar %s not found in dataset %q — run export_service first",
+				sidecarName, in.DatasetID,
+			)
+		}
+		return InferServiceMappingOutput{}, fmt.Errorf("read sidecar: %w", err)
+	}
+
+	inferCtx := svc.WithAICredentials(ctx, svc.AICredentials{
+		BaseURL: utils.GetBaseURL(),
+		Token:   token,
+	})
+	proposal, err := svc.InferStripeMapping(inferCtx, datasetDir, data)
+	if err != nil {
+		return InferServiceMappingOutput{}, err
+	}
+
+	return InferServiceMappingOutput{
+		ServiceName: in.ServiceName,
+		DatasetID:   in.DatasetID,
+		SidecarFile: sidecarName,
+		Proposal:    proposal,
+	}, nil
+}
+
 // SeedServiceInput specifies which service to restore and which dataset to read from.
 type SeedServiceInput struct {
 	// ServiceName is the key from seedmancer.yaml's services map.
 	ServiceName string `json:"serviceName" jsonschema:"Name of the service to seed (matches seedmancer.yaml services key)"`
 	// DatasetID is the dataset folder containing the sidecar JSON.
 	DatasetID string `json:"datasetId" jsonschema:"Dataset id whose sidecar JSON will be used for the seed"`
+	// Token is the Seedmancer API token used for Pro plan checks.
+	Token string `json:"token,omitempty" jsonschema:"Seedmancer API token (for Pro plan check)"`
 }
 
 // SeedServiceOutput is the structured result of RunSeedService.
@@ -1983,12 +2107,17 @@ func RunSeedService(ctx context.Context, in SeedServiceInput) (SeedServiceOutput
 		return SeedServiceOutput{}, err
 	}
 
-	svcCfg, ok := cfg.Services[in.ServiceName]
+	activeEnvSeed := cfg.ActiveEnvName()
+	svcCfg, ok := cfg.ServicesForEnv(activeEnvSeed)[in.ServiceName]
 	if !ok {
 		return SeedServiceOutput{}, fmt.Errorf(
 			"service %q not found in seedmancer.yaml; configured services: %v",
-			in.ServiceName, cfg.SortedServiceNames(),
+			in.ServiceName, cfg.SortedServiceNamesForEnv(activeEnvSeed),
 		)
+	}
+	token, _ := utils.ResolveAPIToken(in.Token)
+	if err := utils.CheckServiceConnectorEntitlement(utils.GetBaseURL(), token); err != nil {
+		return SeedServiceOutput{}, fmt.Errorf("service connectors blocked: %w", err)
 	}
 
 	connector, err := svc.New(in.ServiceName, svcCfg)
@@ -2014,7 +2143,7 @@ func RunSeedService(ctx context.Context, in SeedServiceInput) (SeedServiceOutput
 		return SeedServiceOutput{}, fmt.Errorf("reading sidecar: %w", err)
 	}
 
-	if err := connector.Seed(ctx, data); err != nil {
+	if err := connector.Seed(svc.WithDataDir(ctx, datasetDir), data); err != nil {
 		return SeedServiceOutput{}, fmt.Errorf("seeding %s: %w", in.ServiceName, err)
 	}
 

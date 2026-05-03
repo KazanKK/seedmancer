@@ -106,10 +106,10 @@ func main() {
 			loginCmd,
 			statusCmd,
 			envCmd,
-		exportCmd,
-		generateCmd,
-		generateLocalCmd,
-		seedCmd,
+			exportCmd,
+			generateCmd,
+			generateLocalCmd,
+			seedCmd,
 			listCmd,
 			syncCmd,
 			fetchCmd,
@@ -141,9 +141,9 @@ func main() {
 // we normalize here.
 //
 // The algorithm walks one subcommand level at a time. For each level it:
-//   1. keeps everything up to (and including) the subcommand name,
-//   2. separates the remaining tokens into flags+values vs positional args,
-//   3. re-emits them as [flags...] [positionals...].
+//  1. keeps everything up to (and including) the subcommand name,
+//  2. separates the remaining tokens into flags+values vs positional args,
+//  3. re-emits them as [flags...] [positionals...].
 //
 // Bool flags (which take no value) are detected from the command's own
 // flag list, so `--dry-run <name>` isn't mis-parsed as "dry-run takes

@@ -262,7 +262,7 @@ func classifyConfigScope(path string) string {
 // resolveAPIURLSource returns (value, source) where source is one of:
 // "env" or "default". It intentionally mirrors utils.GetBaseURL.
 func resolveAPIURLSource() (string, string) {
-	if v := strings.TrimRight(strings.TrimSpace(os.Getenv("SEEDMANCER_CLOUD_API_URL")), "/"); v != "" {
+	if v := strings.TrimRight(strings.TrimSpace(os.Getenv("SEEDMANCER_API_URL")), "/"); v != "" {
 		return v, "env"
 	}
 	return "https://api.seedmancer.dev", "default"

@@ -6,13 +6,13 @@
 // The package is intentionally self-contained:
 //   - server.go  wires up the transport and registers everything.
 //   - tools.go   declares each tool + its handler. Handlers are thin wrappers
-//                around cmd.Run* and the utils package — no stdout is ever
-//                produced here, which matters because stdio transport uses
-//                stdout for JSON-RPC frames.
+//     around cmd.Run* and the utils package — no stdout is ever
+//     produced here, which matters because stdio transport uses
+//     stdout for JSON-RPC frames.
 //   - resources.go registers static and dynamic read-only views of the
-//                project (config, datasets, schemas, docs).
+//     project (config, datasets, schemas, docs).
 //   - docs.go    embeds short agent-oriented markdown so clients can learn
-//                the workflow without a network round-trip.
+//     the workflow without a network round-trip.
 //
 // The server never prints to stdout — all logging is routed to the log
 // file set in Config.LogFile (or discarded when empty). This is a hard

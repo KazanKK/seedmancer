@@ -39,11 +39,12 @@ func TestResolveSingleDB_precedence(t *testing.T) {
 			t.Fatalf("got %+v err=%v", ne, err)
 		}
 	})
-	t.Run("env var SEEDMANCER_DATABASE_URL wins when no flag", func(t *testing.T) {
+	t.Run("env var SEEDMANCER_DATABASE_URL ignored when named envs are configured", func(t *testing.T) {
 		t.Setenv("SEEDMANCER_DATABASE_URL", "postgres://envvar")
 		c := newTestContext(t, []string{"--env", "staging"})
 		ne, err := resolveSingleDB(c, cfg)
-		if err != nil || ne.DatabaseURL != "postgres://envvar" {
+		// named env wins over $SEEDMANCER_DATABASE_URL when environments are configured
+		if err != nil || ne.Name != "staging" || ne.DatabaseURL != "postgres://staging" {
 			t.Fatalf("got %+v err=%v", ne, err)
 		}
 	})
@@ -60,6 +61,15 @@ func TestResolveSingleDB_precedence(t *testing.T) {
 		c := newTestContext(t, nil)
 		ne, err := resolveSingleDB(c, cfg)
 		if err != nil || ne.Name != "local" {
+			t.Fatalf("got %+v err=%v", ne, err)
+		}
+	})
+	t.Run("env var used when no environments configured", func(t *testing.T) {
+		t.Setenv("SEEDMANCER_DATABASE_URL", "postgres://envvar")
+		c := newTestContext(t, nil)
+		bare := utils.Config{} // no environments
+		ne, err := resolveSingleDB(c, bare)
+		if err != nil || ne.DatabaseURL != "postgres://envvar" || ne.Name != adHocEnvName {
 			t.Fatalf("got %+v err=%v", ne, err)
 		}
 	})
@@ -114,11 +124,11 @@ func TestIsProdLike(t *testing.T) {
 
 func TestNormalizePostgresDSN(t *testing.T) {
 	cases := []struct {
-		name, in          string
-		wantScheme        string
-		wantContains      []string
-		wantNotContains   []string
-		wantErr           bool
+		name, in        string
+		wantScheme      string
+		wantContains    []string
+		wantNotContains []string
+		wantErr         bool
 	}{
 		{
 			name:         "postgresql scheme rewritten to postgres",

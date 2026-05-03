@@ -10,8 +10,8 @@ import (
 	"time"
 
 	db "github.com/KazanKK/seedmancer/database"
-	"github.com/KazanKK/seedmancer/internal/ui"
 	svc "github.com/KazanKK/seedmancer/internal/services"
+	"github.com/KazanKK/seedmancer/internal/ui"
 	utils "github.com/KazanKK/seedmancer/internal/utils"
 
 	"github.com/urfave/cli/v2"
@@ -69,14 +69,14 @@ func SeedCommand() *cli.Command {
 				Name:  "continue-on-error",
 				Usage: "Keep seeding remaining envs after a failure (default: stop)",
 			},
-	&cli.BoolFlag{
-			Name:  "no-services",
-			Usage: "Skip 3rd-party service connector seeds (Supabase Auth, etc.)",
-		},
-		&cli.StringFlag{
-			Name:  "token",
-			Usage: "API token for plan checks (falls back to ~/.seedmancer/credentials, then SEEDMANCER_API_TOKEN)",
-		},
+			&cli.BoolFlag{
+				Name:  "no-services",
+				Usage: "Skip 3rd-party service connector seeds (Supabase Auth, etc.)",
+			},
+			&cli.StringFlag{
+				Name:  "token",
+				Usage: "API token for plan checks (falls back to ~/.seedmancer/credentials, then SEEDMANCER_API_TOKEN)",
+			},
 		},
 		Action: func(c *cli.Context) error {
 			configPath, err := utils.FindConfigFile()
@@ -94,90 +94,111 @@ func SeedCommand() *cli.Command {
 				return err
 			}
 
-		datasetName := strings.TrimSpace(c.String("dataset-id"))
-		schema, datasetDir, err := utils.FindLocalDataset(projectRoot, cfg.StoragePath, "", datasetName)
-		if err != nil {
-			return err
-		}
+			datasetName := strings.TrimSpace(c.String("dataset-id"))
+			schema, datasetDir, err := utils.FindLocalDataset(projectRoot, cfg.StoragePath, "", datasetName)
+			if err != nil {
+				return err
+			}
 
-		meta := utils.ReadDatasetMeta(datasetDir)
+			meta := utils.ReadDatasetMeta(datasetDir)
 
-		targetNames := make([]string, len(targets))
-		for i, t := range targets {
-			targetNames[i] = t.Name
-		}
-		ui.Step("seed %s (schema %s) → %s", datasetName, schema.FingerprintShort, strings.Join(targetNames, ", "))
-		if meta.SourceEnv != "" {
-			ui.Info("source: %s", meta.SourceEnv)
-		}
+			targetNames := make([]string, len(targets))
+			for i, t := range targets {
+				targetNames[i] = t.Name
+			}
+			ui.Step("seed %s (schema %s) → %s", datasetName, schema.FingerprintShort, strings.Join(targetNames, ", "))
+			if meta.SourceEnv != "" {
+				ui.Info("source: %s", meta.SourceEnv)
+			}
 
-		// Build the merged restore dir ONCE and reuse across targets.
+			// Build the merged restore dir ONCE and reuse across targets.
 			// Each RestoreFromCSV call is read-only against this dir, so
 			// this is both correct and a meaningful perf win when seeding
 			// several envs.
-		merged, cleanup, err := materializeRestoreDir(schema.Path, datasetDir)
-		if err != nil {
-			return err
+			merged, cleanup, err := materializeRestoreDir(schema.Path, datasetDir)
+			if err != nil {
+				return err
+			}
+			defer cleanup()
+			ui.Debug("Merged restore dir: %s", merged)
+
+		// Confirm all targets up front — before any destructive work — so
+		// the user can cancel cleanly without partial state changes.
+		skipConfirm := c.Bool("yes")
+		if !skipConfirm {
+			for _, t := range targets {
+				dest := targetDisplay(t)
+				msg := fmt.Sprintf("Seed %q into %q?", datasetName, dest)
+				if meta.SourceEnv != "" && meta.SourceEnv != adHocEnvName {
+					msg = fmt.Sprintf("Seed %q (exported from %q) into %q?", datasetName, meta.SourceEnv, dest)
+				}
+				if isProdLike(t.Name) {
+					ui.Title(fmt.Sprintf("→ %s", dest))
+				}
+				if !ui.Confirm(msg, false) {
+					ui.Info("Skipped.")
+					return nil
+				}
+			}
 		}
-		defer cleanup()
-		ui.Debug("Merged restore dir: %s", merged)
 
 		// Service connectors run BEFORE the DB restore so that auth triggers
 		// (e.g. on_auth_user_created → insert into public.users) fire on an
 		// empty table. The subsequent DB restore truncates and refills public.*
 		// from CSV, landing in the exact same state either way.
-		if !c.Bool("no-services") && len(cfg.Services) > 0 {
-			baseURL := utils.GetBaseURL()
-			token, _ := utils.ResolveAPIToken(c.String("token"))
-			if entErr := utils.CheckServiceConnectorEntitlement(baseURL, token); entErr != nil {
-				if errors.Is(entErr, utils.ErrMissingAPIToken) || errors.Is(entErr, utils.ErrInvalidAPIToken) {
-					ui.Warn("Skipping service connectors: not logged in (run `seedmancer login` to enable Pro features)")
-				} else {
-					// ErrServiceConnectorsPro or a network error — surface the
-					// full message so the user knows what to do.
-					ui.Warn("Skipping service connectors: %v", entErr)
-				}
-			} else {
-				connectors, err := svc.BuildAll(cfg)
-				if err != nil {
-					ui.Warn("service connectors unavailable: %v", err)
-				} else {
-					// Pass the first available DB URL so the auth connector can
-					// clean mirror rows before creating new auth users.
-					svcCtx := c.Context
-					for _, t := range targets {
-						if t.DatabaseURL != "" {
-							svcCtx = svc.WithDBURL(svcCtx, t.DatabaseURL)
-							break
-						}
+		if !c.Bool("no-services") && len(cfg.ServicesForEnv(targets[0].Name)) > 0 {
+				baseURL := utils.GetBaseURL()
+				token, _ := utils.ResolveAPIToken(c.String("token"))
+				if entErr := utils.CheckServiceConnectorEntitlement(baseURL, token); entErr != nil {
+					if errors.Is(entErr, utils.ErrMissingAPIToken) || errors.Is(entErr, utils.ErrInvalidAPIToken) {
+						ui.Warn("Skipping service connectors: not logged in (run `seedmancer login` to enable Pro features)")
+					} else {
+						// ErrServiceConnectorsPro or a network error — surface the
+						// full message so the user knows what to do.
+						ui.Warn("Skipping service connectors: %v", entErr)
 					}
-					for _, nc := range connectors {
-						sidecarPath := filepath.Join(datasetDir, nc.SidecarFilename())
-						data, err := os.ReadFile(sidecarPath)
-						if err != nil {
-							if !os.IsNotExist(err) {
-								ui.Warn("%s: read sidecar: %v", nc.Name, err)
+				} else {
+					connectors, err := svc.BuildAll(cfg.ServicesForEnv(targets[0].Name))
+					if err != nil {
+						ui.Warn("service connectors unavailable: %v", err)
+					} else {
+						// Pass the first available DB URL so the auth connector can
+						// clean mirror rows before creating new auth users.
+						svcCtx := c.Context
+						svcCtx = svc.WithDataDir(svcCtx, merged)
+						for _, t := range targets {
+							if t.DatabaseURL != "" {
+								svcCtx = svc.WithDBURL(svcCtx, t.DatabaseURL)
+								break
 							}
-							continue
 						}
-						sp := ui.StartSpinner(fmt.Sprintf("Seeding %s...", nc.Name))
-						if err := nc.Connector.Seed(svcCtx, data); err != nil {
-							sp.Stop(false, fmt.Sprintf("%s seed failed: %v", nc.Name, err))
-						} else {
-							sp.Stop(true, fmt.Sprintf("%s seeded", nc.Name))
+						for _, nc := range connectors {
+							sidecarPath := filepath.Join(datasetDir, nc.SidecarFilename())
+							data, err := os.ReadFile(sidecarPath)
+							if err != nil {
+								if !os.IsNotExist(err) {
+									ui.Warn("%s: read sidecar: %v", nc.Name, err)
+								}
+								continue
+							}
+							sp := ui.StartSpinner(fmt.Sprintf("Seeding %s...", nc.Name))
+							if err := nc.Connector.Seed(svcCtx, data); err != nil {
+								sp.Stop(false, fmt.Sprintf("%s seed failed: %v", nc.Name, err))
+							} else {
+								sp.Stop(true, fmt.Sprintf("%s seeded", nc.Name))
+							}
 						}
 					}
 				}
 			}
-		}
 
 		results := make([]seedResult, 0, len(targets))
 		for i, t := range targets {
 			if i > 0 {
 				fmt.Fprintln(os.Stderr)
 			}
-			res := seedOneEnv(t, merged, datasetName, meta.SourceEnv, c.Bool("yes"))
-			results = append(results, res)
+			res := seedOneEnv(t, merged, datasetName, meta.SourceEnv, true) // confirmed above
+				results = append(results, res)
 				if res.Err != nil && !c.Bool("continue-on-error") {
 					// Fill remaining targets as "skipped" so the summary
 					// tells the whole story instead of pretending the rest
@@ -189,13 +210,13 @@ func SeedCommand() *cli.Command {
 				}
 			}
 
-		fmt.Fprintln(os.Stderr)
-		printSeedSummary(results)
-		if anyFailed(results) {
-			return fmt.Errorf("one or more environments failed to seed")
-		}
+			fmt.Fprintln(os.Stderr)
+			printSeedSummary(results)
+			if anyFailed(results) {
+				return fmt.Errorf("one or more environments failed to seed")
+			}
 
-		return nil
+			return nil
 		},
 	}
 }
@@ -217,34 +238,35 @@ type seedResult struct {
 func seedOneEnv(target utils.NamedEnv, mergedDir, datasetName, sourceEnv string, skipConfirm bool) seedResult {
 	start := time.Now()
 
-	ui.Title(fmt.Sprintf("→ %s", target.Name))
+	ui.Title(fmt.Sprintf("→ %s", targetDisplay(target)))
 
 	if !skipConfirm {
-		msg := fmt.Sprintf("Seed %q into %q?", datasetName, target.Name)
-		if sourceEnv != "" {
-			msg = fmt.Sprintf("Seed %q (exported from %q) into %q?", datasetName, sourceEnv, target.Name)
+		dest := targetDisplay(target)
+		msg := fmt.Sprintf("Seed %q into %q?", datasetName, dest)
+		if sourceEnv != "" && sourceEnv != adHocEnvName {
+			msg = fmt.Sprintf("Seed %q (exported from %q) into %q?", datasetName, sourceEnv, dest)
 		}
 		if !ui.Confirm(msg, false) {
-			return seedResult{Env: target.Name, Skipped: true, Duration: time.Since(start)}
+			return seedResult{Env: targetDisplay(target), Skipped: true, Duration: time.Since(start)}
 		}
 	}
 
 	manager, normalizedURL, err := db.NewManager(target.DatabaseURL)
 	if err != nil {
-		return seedResult{Env: target.Name, Err: err, Duration: time.Since(start)}
+		return seedResult{Env: targetDisplay(target), Err: err, Duration: time.Since(start)}
 	}
 	if err := manager.ConnectWithDSN(normalizedURL); err != nil {
-		return seedResult{Env: target.Name, Err: fmt.Errorf("connecting: %v", err), Duration: time.Since(start)}
+		return seedResult{Env: targetDisplay(target), Err: fmt.Errorf("connecting: %v", err), Duration: time.Since(start)}
 	}
 
 	sp := ui.StartSpinner("Importing dataset...")
 	if err := manager.RestoreFromCSV(mergedDir); err != nil {
-		sp.Stop(false, fmt.Sprintf("Import failed (%s)", target.Name))
+		sp.Stop(false, fmt.Sprintf("Import failed (%s)", targetDisplay(target)))
 		ui.Error("%v", err)
-		return seedResult{Env: target.Name, Err: err, Duration: time.Since(start)}
+		return seedResult{Env: targetDisplay(target), Err: err, Duration: time.Since(start)}
 	}
-	sp.Stop(true, fmt.Sprintf("Seeded %s (%s)", target.Name, time.Since(start).Round(time.Millisecond)))
-	return seedResult{Env: target.Name, Duration: time.Since(start)}
+	sp.Stop(true, fmt.Sprintf("Seeded %s (%s)", targetDisplay(target), time.Since(start).Round(time.Millisecond)))
+	return seedResult{Env: targetDisplay(target), Duration: time.Since(start)}
 }
 
 // printSeedSummary renders a table of target outcomes. Matters most after a

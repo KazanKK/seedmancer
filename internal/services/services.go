@@ -21,6 +21,17 @@ import (
 // perform auxiliary cleanup (e.g. removing auth-mirror rows before triggering
 // an auth.users INSERT).
 type dbURLContextKey struct{}
+type dataDirContextKey struct{}
+type noAIInferContextKey struct{}
+type aiCredentialsContextKey struct{}
+
+// AICredentials carries the Seedmancer cloud base URL + API token used by
+// connectors that delegate inference to a backend AI endpoint. Threading
+// these through the context keeps the Connector interface unchanged.
+type AICredentials struct {
+	BaseURL string
+	Token   string
+}
 
 // WithDBURL returns a child context that carries the given Postgres URL.
 // The auth connector extracts it to handle ON CONFLICT situations caused
@@ -34,6 +45,45 @@ func WithDBURL(ctx context.Context, dbURL string) context.Context {
 func DBURLFromContext(ctx context.Context) (string, bool) {
 	v, ok := ctx.Value(dbURLContextKey{}).(string)
 	return v, ok && v != ""
+}
+
+// WithDataDir returns a child context that carries the dataset/restore folder.
+// Connectors that need to inspect or patch CSV sidecars (Stripe external ID
+// resolution) use this without changing the Connector interface.
+func WithDataDir(ctx context.Context, dataDir string) context.Context {
+	return context.WithValue(ctx, dataDirContextKey{}, dataDir)
+}
+
+// DataDirFromContext extracts the folder stored by WithDataDir.
+func DataDirFromContext(ctx context.Context) (string, bool) {
+	v, ok := ctx.Value(dataDirContextKey{}).(string)
+	return v, ok && v != ""
+}
+
+// WithNoAIInfer returns a child context that disables the AI inference call
+// during Stripe export. Used to honor the user's `--no-ai-infer` flag.
+func WithNoAIInfer(ctx context.Context) context.Context {
+	return context.WithValue(ctx, noAIInferContextKey{}, true)
+}
+
+// NoAIInferFromContext returns true when AI inference has been suppressed
+// by an upstream caller.
+func NoAIInferFromContext(ctx context.Context) bool {
+	v, _ := ctx.Value(noAIInferContextKey{}).(bool)
+	return v
+}
+
+// WithAICredentials returns a child context carrying the cloud API base URL
+// and token used for AI inference calls. Connectors fall back to no-AI when
+// these are missing.
+func WithAICredentials(ctx context.Context, creds AICredentials) context.Context {
+	return context.WithValue(ctx, aiCredentialsContextKey{}, creds)
+}
+
+// AICredentialsFromContext extracts the credentials stored by WithAICredentials.
+func AICredentialsFromContext(ctx context.Context) (AICredentials, bool) {
+	v, ok := ctx.Value(aiCredentialsContextKey{}).(AICredentials)
+	return v, ok
 }
 
 // Connector is the interface every 3rd-party service connector must implement.
@@ -65,23 +115,29 @@ func New(name string, cfg utils.ServiceConfig) (Connector, error) {
 	switch strings.ToLower(strings.TrimSpace(cfg.Type)) {
 	case "supabase-auth":
 		return newSupabaseAuth(name, cfg)
+	case "stripe":
+		return newStripe(name, cfg)
 	default:
 		return nil, fmt.Errorf(
-			"service %q: unknown type %q (supported: supabase-auth)",
+			"service %q: unknown type %q (supported: supabase-auth, stripe)",
 			name, cfg.Type,
 		)
 	}
 }
 
-// BuildAll resolves all services in the config into an ordered slice of
+// BuildAll resolves all services in the given map into an ordered slice of
 // (name, Connector) pairs. Order is alphabetical by name so export and seed
 // runs are deterministic. Services whose env-var credentials are missing cause
 // a descriptive error that names the offending variable and service.
-func BuildAll(cfg utils.Config) ([]NamedConnector, error) {
-	names := cfg.SortedServiceNames()
+func BuildAll(services map[string]utils.ServiceConfig) ([]NamedConnector, error) {
+	names := make([]string, 0, len(services))
+	for n := range services {
+		names = append(names, n)
+	}
+	sort.Strings(names)
 	out := make([]NamedConnector, 0, len(names))
 	for _, name := range names {
-		svcCfg := cfg.Services[name]
+		svcCfg := services[name]
 		c, err := New(name, svcCfg)
 		if err != nil {
 			return nil, err

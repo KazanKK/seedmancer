@@ -30,11 +30,11 @@ type datasetAPI struct {
 }
 
 type schemaRefShort struct {
-	ID               string `json:"id"`
+	ID               string  `json:"id"`
 	DisplayName      *string `json:"displayName"`
-	Fingerprint      string `json:"fingerprint"`
-	FingerprintShort string `json:"fingerprintShort"`
-	IsLegacy         bool   `json:"isLegacy"`
+	Fingerprint      string  `json:"fingerprint"`
+	FingerprintShort string  `json:"fingerprintShort"`
+	IsLegacy         bool    `json:"isLegacy"`
 }
 
 type datasetListResponse struct {

@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 
@@ -9,21 +10,39 @@ import (
 	"github.com/urfave/cli/v2"
 )
 
-// adHocEnvName is the label used in banners/errors when the target URL came
-// from --db-url or $SEEDMANCER_DATABASE_URL instead of a named env. Keeping
-// it in one place means every command prints the same string.
+// adHocEnvName is the internal sentinel used when the target URL came from
+// --db-url or $SEEDMANCER_DATABASE_URL instead of a named env.
 const adHocEnvName = "(ad-hoc)"
+
+// targetDisplay returns a human-readable label for a target environment.
+// For named envs it returns the env name. For ad-hoc DB URLs it returns
+// host:port/dbname (credentials stripped) so prompts read naturally.
+func targetDisplay(t utils.NamedEnv) string {
+	if t.Name != adHocEnvName {
+		return t.Name
+	}
+	u, err := url.Parse(t.DatabaseURL)
+	if err != nil || u.Host == "" {
+		return t.DatabaseURL
+	}
+	db := strings.TrimPrefix(u.Path, "/")
+	if db == "" {
+		return u.Host
+	}
+	return u.Host + "/" + db
+}
 
 // resolveSingleDB picks one database target for commands that write to a
 // single DB (export, status). Precedence, highest first:
 //
-//  1. --db-url flag / $SEEDMANCER_DATABASE_URL env (ad-hoc override)
-//  2. --env <name> (named env from seedmancer.yaml)
-//  3. cfg.DefaultEnv (the "set and forget" path)
-//  4. legacy top-level cfg.DatabaseURL (surfaced as env "default")
+//  1. --db-url flag (explicit ad-hoc override)
+//  2. --env <name> or cfg.DefaultEnv (named env from seedmancer.yaml)
+//  3. $SEEDMANCER_DATABASE_URL — only used when no environments are
+//     configured (bare CI / no seedmancer.yaml scenario)
 //
-// The returned NamedEnv.Name is "(ad-hoc)" when #1 wins so downstream code
-// can still print "→ using env: (ad-hoc)" without a special case.
+// $SEEDMANCER_DATABASE_URL is intentionally last so that a project with
+// a configured default_env always resolves to its named environment instead
+// of being silently overridden by an ambient variable.
 func resolveSingleDB(c *cli.Context, cfg utils.Config) (utils.NamedEnv, error) {
 	if adhoc := strings.TrimSpace(c.String("db-url")); adhoc != "" {
 		return utils.NamedEnv{
@@ -31,11 +50,13 @@ func resolveSingleDB(c *cli.Context, cfg utils.Config) (utils.NamedEnv, error) {
 			EnvConfig: utils.EnvConfig{DatabaseURL: adhoc},
 		}, nil
 	}
-	if v := strings.TrimSpace(os.Getenv("SEEDMANCER_DATABASE_URL")); v != "" {
-		return utils.NamedEnv{
-			Name:      adHocEnvName,
-			EnvConfig: utils.EnvConfig{DatabaseURL: v},
-		}, nil
+	if len(cfg.EffectiveEnvs()) == 0 {
+		if v := strings.TrimSpace(os.Getenv("SEEDMANCER_DATABASE_URL")); v != "" {
+			return utils.NamedEnv{
+				Name:      adHocEnvName,
+				EnvConfig: utils.EnvConfig{DatabaseURL: v},
+			}, nil
+		}
 	}
 	return cfg.ResolveEnv(c.String("env"))
 }
@@ -46,6 +67,8 @@ func resolveSingleDB(c *cli.Context, cfg utils.Config) (utils.NamedEnv, error) {
 //   - --db-url is the single-target escape hatch; it short-circuits --env
 //     and produces one ad-hoc target (otherwise `--db-url x --env local,staging`
 //     is ambiguous).
+//   - $SEEDMANCER_DATABASE_URL is only used when no environments are configured
+//     (bare CI scenario), so a project with named envs always resolves cleanly.
 //   - An empty --env falls back to the active default env, so `seedmancer
 //     seed -d snap1` keeps working for users who never adopt named envs.
 func resolveSeedTargets(c *cli.Context, cfg utils.Config) ([]utils.NamedEnv, error) {
@@ -58,11 +81,13 @@ func resolveSeedTargets(c *cli.Context, cfg utils.Config) ([]utils.NamedEnv, err
 			EnvConfig: utils.EnvConfig{DatabaseURL: adhoc},
 		}}, nil
 	}
-	if v := strings.TrimSpace(os.Getenv("SEEDMANCER_DATABASE_URL")); v != "" && !c.IsSet("env") {
-		return []utils.NamedEnv{{
-			Name:      adHocEnvName,
-			EnvConfig: utils.EnvConfig{DatabaseURL: v},
-		}}, nil
+	if len(cfg.EffectiveEnvs()) == 0 && !c.IsSet("env") {
+		if v := strings.TrimSpace(os.Getenv("SEEDMANCER_DATABASE_URL")); v != "" {
+			return []utils.NamedEnv{{
+				Name:      adHocEnvName,
+				EnvConfig: utils.EnvConfig{DatabaseURL: v},
+			}}, nil
+		}
 	}
 	return cfg.ResolveEnvs(c.String("env"))
 }

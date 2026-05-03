@@ -16,10 +16,10 @@ import (
 // Annotations follow the MCP spec:
 //   - ReadOnlyHint:    tool does not mutate state.
 //   - DestructiveHint: tool can destroy or replace data (`*bool` because
-//                      the default for non-read-only tools is `true`; we
-//                      pin it explicitly to avoid ambiguity).
+//     the default for non-read-only tools is `true`; we
+//     pin it explicitly to avoid ambiguity).
 //   - IdempotentHint:  same input → same end state (seed + fetch both
-//                      overwrite, so they qualify).
+//     overwrite, so they qualify).
 //
 // We lean on generic AddTool + `jsonschema` struct tags on the Run*Input
 // types, so JSON schemas ship automatically and stay in sync with the Go
@@ -159,7 +159,7 @@ func registerTools(s *mcp.Server) {
 
 	// ── Data plane (destructive by nature) ────────────────────────────
 	mcp.AddTool(s, &mcp.Tool{
-		Name: "seed_database",
+		Name:  "seed_database",
 		Title: "Seed database",
 		Description: "Truncate the target env(s) and reload the named dataset. " +
 			"This overwrites existing data — intended for test/dev resets.",
@@ -186,7 +186,7 @@ func registerTools(s *mcp.Server) {
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
-		Name: "generate_dataset",
+		Name:  "generate_dataset",
 		Title: "Generate dataset",
 		Description: "Ask the Seedmancer cloud to synthesize a dataset that matches an existing schema, " +
 			"using a natural-language prompt.",
@@ -270,6 +270,20 @@ func registerTools(s *mcp.Server) {
 		Annotations: &mcp.ToolAnnotations{DestructiveHint: truePtr(), IdempotentHint: true},
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in cmd.SeedServiceInput) (*mcp.CallToolResult, cmd.SeedServiceOutput, error) {
 		out, err := cmd.RunSeedService(ctx, in)
+		return nil, out, err
+	})
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:  "infer_service_mapping",
+		Title: "Propose AI mapping for a service connector",
+		Description: "Run AI inference against a Stripe service connector's existing sidecar + " +
+			"the dataset's CSV column names, and return the proposed externalIdResolution + object " +
+			"specs as a diff against the current sidecar. Read-only — does NOT modify the sidecar. " +
+			"Use this to preview AI suggestions for human approval; persist them by re-running " +
+			"export_service (which applies the same merge automatically).",
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, DestructiveHint: falsePtr()},
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in cmd.InferServiceMappingInput) (*mcp.CallToolResult, cmd.InferServiceMappingOutput, error) {
+		out, err := cmd.RunInferServiceMapping(ctx, in)
 		return nil, out, err
 	})
 

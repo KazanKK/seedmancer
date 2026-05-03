@@ -22,11 +22,11 @@ import (
 // the default password to use when recreating them (real passwords are
 // bcrypt-hashed server-side and cannot be exported).
 type supabaseAuthSnapshot struct {
-	Version         int                  `json:"version"`
-	Service         string               `json:"service"`
-	CapturedAt      time.Time            `json:"capturedAt"`
-	DefaultPassword string               `json:"defaultPassword"`
-	Users           []supabaseAuthUser   `json:"users"`
+	Version         int                `json:"version"`
+	Service         string             `json:"service"`
+	CapturedAt      time.Time          `json:"capturedAt"`
+	DefaultPassword string             `json:"defaultPassword"`
+	Users           []supabaseAuthUser `json:"users"`
 }
 
 type supabaseAuthUser struct {
@@ -34,22 +34,22 @@ type supabaseAuthUser struct {
 	// users with the same UUID, keeping any FK references in public.* tables
 	// (e.g. a "users" profile table that mirrors auth.users) consistent with
 	// the CSV data that will be restored alongside.
-	ID              string                 `json:"id,omitempty"`
-	Email           string                 `json:"email"`
-	Phone           string                 `json:"phone,omitempty"`
-	EmailConfirmed  bool                   `json:"emailConfirmed"`
-	PhoneConfirmed  bool                   `json:"phoneConfirmed,omitempty"`
-	UserMetadata    map[string]interface{} `json:"userMetadata,omitempty"`
-	AppMetadata     map[string]interface{} `json:"appMetadata,omitempty"`
+	ID             string                 `json:"id,omitempty"`
+	Email          string                 `json:"email"`
+	Phone          string                 `json:"phone,omitempty"`
+	EmailConfirmed bool                   `json:"emailConfirmed"`
+	PhoneConfirmed bool                   `json:"phoneConfirmed,omitempty"`
+	UserMetadata   map[string]interface{} `json:"userMetadata,omitempty"`
+	AppMetadata    map[string]interface{} `json:"appMetadata,omitempty"`
 }
 
 // ─── connector ───────────────────────────────────────────────────────────────
 
 type supabaseAuthConnector struct {
-	name            string
-	url             string // e.g. "https://xyzzy.supabase.co"
-	serviceRoleKey  string
-	httpClient      *http.Client
+	name           string
+	url            string // e.g. "https://xyzzy.supabase.co"
+	serviceRoleKey string
+	httpClient     *http.Client
 }
 
 func newSupabaseAuth(name string, cfg utils.ServiceConfig) (*supabaseAuthConnector, error) {
@@ -402,14 +402,14 @@ func (c *supabaseAuthConnector) deleteUser(ctx context.Context, id string) error
 
 func (c *supabaseAuthConnector) createUser(ctx context.Context, u supabaseAuthUser, password string) error {
 	type createReq struct {
-		ID              string                 `json:"id,omitempty"`
-		Email           string                 `json:"email,omitempty"`
-		Phone           string                 `json:"phone,omitempty"`
-		Password        string                 `json:"password,omitempty"`
-		EmailConfirm    bool                   `json:"email_confirm"`
-		PhoneConfirm    bool                   `json:"phone_confirm,omitempty"`
-		UserMetadata    map[string]interface{} `json:"user_metadata,omitempty"`
-		AppMetadata     map[string]interface{} `json:"app_metadata,omitempty"`
+		ID           string                 `json:"id,omitempty"`
+		Email        string                 `json:"email,omitempty"`
+		Phone        string                 `json:"phone,omitempty"`
+		Password     string                 `json:"password,omitempty"`
+		EmailConfirm bool                   `json:"email_confirm"`
+		PhoneConfirm bool                   `json:"phone_confirm,omitempty"`
+		UserMetadata map[string]interface{} `json:"user_metadata,omitempty"`
+		AppMetadata  map[string]interface{} `json:"app_metadata,omitempty"`
 	}
 
 	body := createReq{

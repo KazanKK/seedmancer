@@ -11,8 +11,8 @@ import (
 	"time"
 
 	db "github.com/KazanKK/seedmancer/database"
-	"github.com/KazanKK/seedmancer/internal/ui"
 	svc "github.com/KazanKK/seedmancer/internal/services"
+	"github.com/KazanKK/seedmancer/internal/ui"
 	utils "github.com/KazanKK/seedmancer/internal/utils"
 
 	"github.com/urfave/cli/v2"
@@ -64,14 +64,18 @@ func ExportCommand() *cli.Command {
 				Usage:   "Overwrite an existing dataset without confirmation",
 				Value:   false,
 			},
-		&cli.BoolFlag{
-			Name:  "no-services",
-			Usage: "Skip 3rd-party service connector exports (Supabase Auth, etc.)",
-		},
-		&cli.StringFlag{
-			Name:  "token",
-			Usage: "API token for plan checks (falls back to ~/.seedmancer/credentials, then SEEDMANCER_API_TOKEN)",
-		},
+			&cli.BoolFlag{
+				Name:  "no-services",
+				Usage: "Skip 3rd-party service connector exports (Supabase Auth, etc.)",
+			},
+			&cli.BoolFlag{
+				Name:  "no-ai-infer",
+				Usage: "Skip backend AI inference for service connector mapping (Stripe externalIdResolution)",
+			},
+			&cli.StringFlag{
+				Name:  "token",
+				Usage: "API token for plan checks (falls back to ~/.seedmancer/credentials, then SEEDMANCER_API_TOKEN)",
+			},
 		},
 		Action: func(c *cli.Context) error {
 			configPath, err := utils.FindConfigFile()
@@ -90,16 +94,16 @@ func ExportCommand() *cli.Command {
 				return err
 			}
 			dbURL := target.DatabaseURL
-			ui.Step("using env: %s", target.Name)
+			ui.Step("using env: %s", targetDisplay(target))
 
-		datasetName := strings.TrimSpace(c.String("id"))
-		if datasetName == "" {
-			// Default to a timestamp so repeated exports don't silently
-			// overwrite each other. Use "baseline" explicitly when you want
-			// the canonical "reset to this point" snapshot.
-			datasetName = time.Now().Format("20060102150405")
-			ui.Info("Using default dataset id: %s (override with --id)", datasetName)
-		}
+			datasetName := strings.TrimSpace(c.String("id"))
+			if datasetName == "" {
+				// Default to a timestamp so repeated exports don't silently
+				// overwrite each other. Use "baseline" explicitly when you want
+				// the canonical "reset to this point" snapshot.
+				datasetName = time.Now().Format("20060102150405")
+				ui.Info("Using default dataset id: %s (override with --id)", datasetName)
+			}
 			datasetName = utils.SanitizeDatasetSegment(datasetName)
 
 			manager, normalizedURL, err := db.NewManager(dbURL)
@@ -118,11 +122,11 @@ func ExportCommand() *cli.Command {
 			}
 			defer os.RemoveAll(tmpSchema)
 
-		sp := ui.StartSpinner("Exporting schema...")
-		if err := manager.ExportSchema(tmpSchema); err != nil {
-			sp.Stop(false, "Schema export failed")
-			return fmt.Errorf("exporting schema: %v", err)
-		}
+			sp := ui.StartSpinner("Exporting schema...")
+			if err := manager.ExportSchema(tmpSchema); err != nil {
+				sp.Stop(false, "Schema export failed")
+				return fmt.Errorf("exporting schema: %v", err)
+			}
 			sp.Stop(true, "Schema exported")
 
 			fingerprint, err := utils.FingerprintSchemaFile(filepath.Join(tmpSchema, "schema.json"))
@@ -162,54 +166,59 @@ func ExportCommand() *cli.Command {
 				return fmt.Errorf("creating dataset directory: %v", err)
 			}
 
-		sp = ui.StartSpinner("Exporting table data...")
-		if err := manager.ExportToCSV(datasetDir); err != nil {
-			sp.Stop(false, "Data export failed")
-			return fmt.Errorf("exporting data: %v", err)
-		}
-		sp.Stop(true, "Data exported")
+			sp = ui.StartSpinner("Exporting table data...")
+			if err := manager.ExportToCSV(datasetDir); err != nil {
+				sp.Stop(false, "Data export failed")
+				return fmt.Errorf("exporting data: %v", err)
+			}
+			sp.Stop(true, "Data exported")
 
-		if err := utils.WriteDatasetMeta(datasetDir, utils.DatasetMeta{SourceEnv: target.Name}); err != nil {
-			ui.Warn("could not write dataset metadata: %v", err)
-		}
+			if err := utils.WriteDatasetMeta(datasetDir, utils.DatasetMeta{SourceEnv: target.Name}); err != nil {
+				ui.Warn("could not write dataset metadata: %v", err)
+			}
 
-		// Phase 4: service connectors (Pro gate)
-		if !c.Bool("no-services") && len(cfg.Services) > 0 {
-			baseURL := utils.GetBaseURL()
-			token, _ := utils.ResolveAPIToken(c.String("token"))
-			if err := utils.CheckServiceConnectorEntitlement(baseURL, token); err != nil {
-				// If the user isn't logged in, warn but skip rather than block
-				// the export entirely — the DB dump succeeded and is usable.
-				if errors.Is(err, utils.ErrMissingAPIToken) || errors.Is(err, utils.ErrInvalidAPIToken) {
-					ui.Warn("Skipping service connectors: not logged in (run `seedmancer login` to enable Pro features)")
+			// Phase 4: service connectors (Pro gate)
+			if !c.Bool("no-services") && len(cfg.ServicesForEnv(target.Name)) > 0 {
+				baseURL := utils.GetBaseURL()
+				token, _ := utils.ResolveAPIToken(c.String("token"))
+				if err := utils.CheckServiceConnectorEntitlement(baseURL, token); err != nil {
+					// If the user isn't logged in, warn but skip rather than block
+					// the export entirely — the DB dump succeeded and is usable.
+					if errors.Is(err, utils.ErrMissingAPIToken) || errors.Is(err, utils.ErrInvalidAPIToken) {
+						ui.Warn("Skipping service connectors: not logged in (run `seedmancer login` to enable Pro features)")
+					} else {
+						ui.Warn("Skipping service connectors: %v", err)
+					}
 				} else {
-					ui.Warn("Skipping service connectors: %v", err)
-				}
-			} else {
-				connectors, buildErr := svc.BuildAll(cfg)
-				if buildErr != nil {
-					ui.Warn("service connectors unavailable: %v", buildErr)
-				} else {
-					for _, nc := range connectors {
-						sp2 := ui.StartSpinner(fmt.Sprintf("Exporting %s...", nc.Name))
-						data, err := nc.Connector.Export(c.Context)
-						if err != nil {
-							sp2.Stop(false, fmt.Sprintf("%s export failed: %v", nc.Name, err))
-						} else {
-							if err := os.WriteFile(filepath.Join(datasetDir, nc.SidecarFilename()), data, 0644); err != nil {
-								sp2.Stop(false, fmt.Sprintf("%s write failed: %v", nc.Name, err))
+					connectors, buildErr := svc.BuildAll(cfg.ServicesForEnv(target.Name))
+					if buildErr != nil {
+						ui.Warn("service connectors unavailable: %v", buildErr)
+					} else {
+						svcCtx := svc.WithDataDir(c.Context, datasetDir)
+						svcCtx = svc.WithAICredentials(svcCtx, svc.AICredentials{BaseURL: baseURL, Token: token})
+						if c.Bool("no-ai-infer") {
+							svcCtx = svc.WithNoAIInfer(svcCtx)
+						}
+						for _, nc := range connectors {
+							sp2 := ui.StartSpinner(fmt.Sprintf("Exporting %s...", nc.Name))
+							data, err := nc.Connector.Export(svcCtx)
+							if err != nil {
+								sp2.Stop(false, fmt.Sprintf("%s export failed: %v", nc.Name, err))
 							} else {
-								sp2.Stop(true, fmt.Sprintf("%s exported", nc.Name))
+								if err := os.WriteFile(filepath.Join(datasetDir, nc.SidecarFilename()), data, 0644); err != nil {
+									sp2.Stop(false, fmt.Sprintf("%s write failed: %v", nc.Name, err))
+								} else {
+									sp2.Stop(true, fmt.Sprintf("%s exported", nc.Name))
+								}
 							}
 						}
 					}
 				}
 			}
-		}
 
-		fmt.Println()
+			fmt.Println()
 			ui.Success("Export complete")
-			ui.KeyValue("Env: ", target.Name)
+			ui.KeyValue("Env: ", targetDisplay(target))
 			ui.KeyValue("Schema: ", fpShort)
 			ui.KeyValue("Dataset: ", datasetName)
 			ui.KeyValue("Path: ", datasetDir)

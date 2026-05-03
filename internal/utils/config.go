@@ -57,6 +57,12 @@ type Config struct {
 // EnvConfig is one named target inside `environments:`.
 type EnvConfig struct {
 	DatabaseURL string `yaml:"database_url"`
+
+	// Services holds optional 3rd-party service connector configs scoped to
+	// this environment. When present, these take precedence over any top-level
+	// `services:` block so different envs can use different credentials or
+	// connector types.
+	Services map[string]ServiceConfig `yaml:"services,omitempty"`
 }
 
 // ServiceConfig holds the configuration for one 3rd-party service connector.
@@ -65,9 +71,10 @@ type EnvConfig struct {
 //
 // Supported types:
 //   - "supabase-auth" — Supabase Auth users. Requires URLEnv + ServiceRoleKeyEnv.
+//   - "stripe" — Stripe test-mode objects. Requires APIKeyEnv.
 type ServiceConfig struct {
 	// Type identifies which connector implementation to use.
-	// Required. Must be "supabase-auth".
+	// Required. Must be "supabase-auth" or "stripe".
 	Type string `yaml:"type"`
 
 	// URLEnv is the name of the environment variable holding the Supabase
@@ -77,13 +84,43 @@ type ServiceConfig struct {
 	// ServiceRoleKeyEnv is the name of the environment variable holding the
 	// Supabase service role key. Used by the "supabase-auth" type.
 	ServiceRoleKeyEnv string `yaml:"service_role_key_env,omitempty"`
+
+	// APIKeyEnv is the name of the environment variable holding the Stripe
+	// secret key. Used by the "stripe" type. Declarative reset state belongs
+	// in _stripe.json next to dataset CSVs, not in seedmancer.yaml.
+	APIKeyEnv string `yaml:"apiKeyEnv,omitempty"`
 }
 
-// SortedServiceNames returns the names of all configured services in
-// alphabetical order so export/seed runs are deterministic.
+// SortedServiceNames returns the names of all top-level services in
+// alphabetical order. Prefer SortedServiceNamesForEnv when an env name is
+// available so per-environment services are respected.
 func (c Config) SortedServiceNames() []string {
 	names := make([]string, 0, len(c.Services))
 	for n := range c.Services {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// ServicesForEnv returns the service map to use for the named environment.
+// If the env has its own services block, that is returned. Otherwise the
+// top-level services block is returned as a fallback so old configs
+// (services at the root) continue to work without modification.
+func (c Config) ServicesForEnv(envName string) map[string]ServiceConfig {
+	if env, ok := c.EffectiveEnvs()[envName]; ok && len(env.Services) > 0 {
+		return env.Services
+	}
+	return c.Services
+}
+
+// SortedServiceNamesForEnv returns service names for the given env in
+// alphabetical order. Uses ServicesForEnv so env-scoped services take
+// precedence over top-level ones.
+func (c Config) SortedServiceNamesForEnv(envName string) []string {
+	svcs := c.ServicesForEnv(envName)
+	names := make([]string, 0, len(svcs))
+	for n := range svcs {
 		names = append(names, n)
 	}
 	sort.Strings(names)

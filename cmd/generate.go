@@ -421,4 +421,3 @@ func downloadFile(fileURL, destPath string) error {
 	}
 	return nil
 }
-

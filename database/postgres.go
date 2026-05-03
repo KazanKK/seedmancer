@@ -204,7 +204,7 @@ func (p *PostgresManager) ExtractSchema() (*Schema, error) {
 	}
 	defer rows.Close()
 
-schema := &Schema{
+	schema := &Schema{
 		DatabaseType: "postgres",
 		Enums:        enums,
 		Tables:       make([]Table, 0),
@@ -249,11 +249,11 @@ schema := &Schema{
 		}
 
 		column := Column{
-			Name:       columnName,
-			Type:       dataType,
-			Nullable:   isNullable == "YES",
-			IsPrimary:  isPrimary,
-			IsUnique:   isUnique,
+			Name:      columnName,
+			Type:      dataType,
+			Nullable:  isNullable == "YES",
+			IsPrimary: isPrimary,
+			IsUnique:  isUnique,
 		}
 
 		// Handle varchar length
@@ -364,7 +364,7 @@ func (p *PostgresManager) RestoreFromCSV(directory string) error {
 		if err := p.DB.QueryRow(checkSQL).Scan(&exists); err != nil {
 			return fmt.Errorf("checking if table %s exists: %v", table.Name, err)
 		}
-		
+
 		if !exists {
 			p.log("Creating table: %s", table.Name)
 			if err := p.createTable(table, false); err != nil {
@@ -375,14 +375,14 @@ func (p *PostgresManager) RestoreFromCSV(directory string) error {
 			// Truncate existing tables
 			truncateSQL := fmt.Sprintf("TRUNCATE TABLE %s CASCADE", pq.QuoteIdentifier(table.Name))
 			p.logSQL(fmt.Sprintf("Truncate Table %s", table.Name), truncateSQL)
-			
+
 			if _, err := p.DB.Exec(truncateSQL); err != nil {
 				return fmt.Errorf("truncating table %s: %v", table.Name, err)
 			}
 			p.log("Truncated table: %s", table.Name)
 		}
 	}
-	
+
 	// Now add foreign key constraints
 	for _, table := range schema.Tables {
 		if err := p.addForeignKeys(table); err != nil {
@@ -567,7 +567,7 @@ func (p *PostgresManager) createTable(table Table, includeForeignKeys bool) erro
 			uniqueConstraints = append(uniqueConstraints, col.Name)
 		}
 	}
-	
+
 	// Add primary key constraint if any
 	if len(primaryKeys) > 0 {
 		pkNames := make([]string, len(primaryKeys))
@@ -576,17 +576,17 @@ func (p *PostgresManager) createTable(table Table, includeForeignKeys bool) erro
 		}
 		columnDefs = append(columnDefs, fmt.Sprintf("PRIMARY KEY (%s)", strings.Join(pkNames, ", ")))
 	}
-	
+
 	// Add unique constraints
 	for _, uniqueCol := range uniqueConstraints {
 		columnDefs = append(columnDefs, fmt.Sprintf("UNIQUE (%s)", pq.QuoteIdentifier(uniqueCol)))
 	}
-	
+
 	// Build and execute CREATE TABLE statement
 	createSQL := fmt.Sprintf("CREATE TABLE %s (\n  %s\n)",
 		pq.QuoteIdentifier(table.Name),
 		strings.Join(columnDefs, ",\n  "))
-	
+
 	p.logSQL("Create Table", createSQL)
 	_, err := p.DB.Exec(createSQL)
 	return err
@@ -602,28 +602,28 @@ func (p *PostgresManager) addForeignKeys(table Table) error {
 			if err := p.DB.QueryRow(checkTableSQL).Scan(&tableExists); err != nil {
 				return fmt.Errorf("checking if referenced table %s exists: %v", col.ForeignKey.Table, err)
 			}
-			
+
 			if !tableExists {
-				p.log("Warning: Cannot add foreign key from %s.%s to non-existent table %s", 
+				p.log("Warning: Cannot add foreign key from %s.%s to non-existent table %s",
 					table.Name, col.Name, col.ForeignKey.Table)
 				continue
 			}
-			
+
 			// Check if the referenced column exists
-			checkColumnSQL := fmt.Sprintf("SELECT EXISTS (SELECT FROM information_schema.columns WHERE table_schema = 'public' AND table_name = '%s' AND column_name = '%s')", 
+			checkColumnSQL := fmt.Sprintf("SELECT EXISTS (SELECT FROM information_schema.columns WHERE table_schema = 'public' AND table_name = '%s' AND column_name = '%s')",
 				col.ForeignKey.Table, col.ForeignKey.Column)
 			var columnExists bool
 			if err := p.DB.QueryRow(checkColumnSQL).Scan(&columnExists); err != nil {
-				return fmt.Errorf("checking if referenced column %s.%s exists: %v", 
+				return fmt.Errorf("checking if referenced column %s.%s exists: %v",
 					col.ForeignKey.Table, col.ForeignKey.Column, err)
 			}
-			
+
 			if !columnExists {
-				p.log("Warning: Cannot add foreign key from %s.%s to non-existent column %s.%s", 
+				p.log("Warning: Cannot add foreign key from %s.%s to non-existent column %s.%s",
 					table.Name, col.Name, col.ForeignKey.Table, col.ForeignKey.Column)
 				continue
 			}
-			
+
 			// Add the foreign key constraint
 			alterSQL := fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT %s FOREIGN KEY (%s) REFERENCES %s(%s)",
 				pq.QuoteIdentifier(table.Name),
@@ -631,28 +631,28 @@ func (p *PostgresManager) addForeignKeys(table Table) error {
 				pq.QuoteIdentifier(col.Name),
 				pq.QuoteIdentifier(col.ForeignKey.Table),
 				pq.QuoteIdentifier(col.ForeignKey.Column))
-			
+
 			p.logSQL("Add Foreign Key", alterSQL)
-			
+
 			if _, err := p.DB.Exec(alterSQL); err != nil {
 				// If the constraint already exists, just log and continue
 				if strings.Contains(err.Error(), "already exists") {
-					p.log("Foreign key constraint already exists: %s.%s -> %s.%s", 
+					p.log("Foreign key constraint already exists: %s.%s -> %s.%s",
 						table.Name, col.Name, col.ForeignKey.Table, col.ForeignKey.Column)
 					continue
 				}
-				
+
 				// Log warning and continue instead of failing
-				p.log("Warning: Failed to add foreign key from %s.%s to %s.%s: %v", 
+				p.log("Warning: Failed to add foreign key from %s.%s to %s.%s: %v",
 					table.Name, col.Name, col.ForeignKey.Table, col.ForeignKey.Column, err)
 				continue
 			}
-			
-			p.log("Added foreign key: %s.%s -> %s.%s", 
+
+			p.log("Added foreign key: %s.%s -> %s.%s",
 				table.Name, col.Name, col.ForeignKey.Table, col.ForeignKey.Column)
 		}
 	}
-	
+
 	return nil
 }
 
@@ -752,23 +752,23 @@ func (p *PostgresManager) importCSV(tableName, csvPath string, schema *Schema) e
 	if table != nil {
 		for _, col := range table.Columns {
 			// Check for serial/identity columns by looking at default value
-			if strings.Contains(fmt.Sprintf("%v", col.Default), "nextval") || 
-			   strings.Contains(col.Type, "serial") {
+			if strings.Contains(fmt.Sprintf("%v", col.Default), "nextval") ||
+				strings.Contains(col.Type, "serial") {
 				seqName := fmt.Sprintf("%s_%s_seq", tableName, col.Name)
-				
+
 				// Try standard sequence name first
 				resetSQL := fmt.Sprintf("SELECT setval(pg_get_serial_sequence('%s', '%s'), COALESCE((SELECT MAX(%s) FROM %s), 0) + 1, false)",
 					tableName, col.Name, pq.QuoteIdentifier(col.Name), pq.QuoteIdentifier(tableName))
-				
+
 				p.logSQL("Reset Sequence", resetSQL)
-				
+
 				if _, err := tx.Exec(resetSQL); err != nil {
 					// If that fails, try with the simple sequence name format
 					altResetSQL := fmt.Sprintf("SELECT setval('%s', COALESCE((SELECT MAX(%s) FROM %s), 0) + 1, false)",
 						seqName, pq.QuoteIdentifier(col.Name), pq.QuoteIdentifier(tableName))
-					
+
 					p.logSQL("Alternative Reset Sequence", altResetSQL)
-					
+
 					if _, err := tx.Exec(altResetSQL); err != nil {
 						// Log but don't fail if we can't reset the sequence
 						p.log("Warning: Failed to reset sequence for %s.%s: %v", tableName, col.Name, err)
@@ -796,7 +796,7 @@ func (p *PostgresManager) processCSVValue(value string, columnType string) inter
 
 	// Convert value based on column type
 	colType := strings.ToLower(columnType)
-	
+
 	// Handle JSON and JSONB types
 	if colType == "json" || colType == "jsonb" {
 		// Try to parse as JSON
@@ -805,48 +805,48 @@ func (p *PostgresManager) processCSVValue(value string, columnType string) inter
 			// Valid JSON, return as is
 			return value
 		}
-		
+
 		// Try to fix common JSON issues
 		fixedJSON := value
-		
+
 		// Replace single quotes with double quotes if they appear to be used for JSON
 		if strings.Contains(value, "'") && !strings.Contains(value, "\"") {
 			fixedJSON = strings.ReplaceAll(value, "'", "\"")
 		}
-		
+
 		// Try again with fixed JSON
 		if err := json.Unmarshal([]byte(fixedJSON), &js); err == nil {
 			return fixedJSON
 		}
-		
+
 		// If still invalid, try more aggressive fixing
 		fixedJSON = fixSimpleJSON(fixedJSON)
-		
+
 		// Final validation attempt
 		if err := json.Unmarshal([]byte(fixedJSON), &js); err == nil {
 			return fixedJSON
 		}
-		
+
 		// Use original value if all fixes fail
 		return value
 	}
-	
+
 	// Handle array types
 	if strings.HasPrefix(colType, "array") || strings.HasSuffix(colType, "[]") {
-		if (strings.HasPrefix(value, "[") && strings.HasSuffix(value, "]")) || 
-		   (strings.HasPrefix(value, "{") && strings.HasSuffix(value, "}")) {
+		if (strings.HasPrefix(value, "[") && strings.HasSuffix(value, "]")) ||
+			(strings.HasPrefix(value, "{") && strings.HasSuffix(value, "}")) {
 			// Already in PostgreSQL array format
 			if strings.HasPrefix(value, "{") {
 				return value
 			}
-			
+
 			// Convert JSON array to PostgreSQL array
 			var jsonArray []interface{}
 			fixedArray := value
 			if strings.Contains(value, "'") && !strings.Contains(value, "\"") {
 				fixedArray = strings.ReplaceAll(value, "'", "\"")
 			}
-			
+
 			if err := json.Unmarshal([]byte(fixedArray), &jsonArray); err == nil {
 				// Convert to PostgreSQL array format
 				pgArray := make([]string, len(jsonArray))
@@ -860,17 +860,17 @@ func (p *PostgresManager) processCSVValue(value string, columnType string) inter
 				}
 				return "{" + strings.Join(pgArray, ",") + "}"
 			}
-			
+
 			// Fallback to simpler parsing
 			arrayStr := value[1 : len(value)-1]
 			elements := parseArrayString(arrayStr)
 			return "{" + strings.Join(elements, ",") + "}"
 		}
-		
+
 		// Not in array format, use as is
 		return value
 	}
-	
+
 	// Handle timestamp/date types
 	if strings.Contains(colType, "time") || strings.Contains(colType, "date") {
 		// Try various time formats
@@ -879,20 +879,20 @@ func (p *PostgresManager) processCSVValue(value string, columnType string) inter
 				return t
 			}
 		}
-		
+
 		if t, err := time.Parse(time.RFC3339Nano, value); err == nil {
 			return t
 		}
-		
+
 		if t, err := time.Parse("2006-01-02 15:04:05", value); err == nil {
 			return t
 		}
-		
+
 		if t, err := time.Parse("2006-01-02", value); err == nil {
 			return t
 		}
 	}
-	
+
 	// Handle boolean types
 	if colType == "boolean" || colType == "bool" {
 		lower := strings.ToLower(value)
@@ -903,7 +903,7 @@ func (p *PostgresManager) processCSVValue(value string, columnType string) inter
 			return false
 		}
 	}
-	
+
 	// Handle numeric types
 	if strings.Contains(colType, "int") || strings.Contains(colType, "serial") || strings.Contains(colType, "bigserial") {
 		// Try to parse as integer
@@ -911,14 +911,14 @@ func (p *PostgresManager) processCSVValue(value string, columnType string) inter
 			return i
 		}
 	}
-	
+
 	if strings.Contains(colType, "float") || strings.Contains(colType, "numeric") || strings.Contains(colType, "decimal") {
 		// Try to parse as float
 		if f, err := strconv.ParseFloat(value, 64); err == nil {
 			return f
 		}
 	}
-	
+
 	// Default: return as string
 	return value
 }
@@ -927,15 +927,15 @@ func (p *PostgresManager) processCSVValue(value string, columnType string) inter
 func fixSimpleJSON(input string) string {
 	// Replace single quotes with double quotes
 	result := strings.ReplaceAll(input, "'", "\"")
-	
+
 	// Find unquoted property names and quote them
 	// This is a very basic implementation and won't handle all cases
 	var buffer strings.Builder
 	inQuotes := false
-	
+
 	for i := 0; i < len(result); i++ {
 		char := result[i]
-		
+
 		if char == '"' {
 			// Toggle quote state
 			inQuotes = !inQuotes
@@ -948,7 +948,7 @@ func fixSimpleJSON(input string) string {
 			for j >= 0 && (result[j] == ' ' || result[j] == '\t') {
 				j--
 			}
-			
+
 			if j >= 0 && result[j] != '"' && result[j] != '}' && result[j] != ']' {
 				// We found an unquoted property name, need to go back and add quotes
 				// This is a very simplified approach and won't handle all cases
@@ -960,7 +960,7 @@ func fixSimpleJSON(input string) string {
 			buffer.WriteByte(char)
 		}
 	}
-	
+
 	return buffer.String()
 }
 
@@ -969,10 +969,10 @@ func parseArrayString(s string) []string {
 	var result []string
 	var current string
 	inQuotes := false
-	
+
 	for i := 0; i < len(s); i++ {
 		char := s[i]
-		
+
 		if char == '"' {
 			// Toggle quote state
 			inQuotes = !inQuotes
@@ -985,12 +985,12 @@ func parseArrayString(s string) []string {
 			current += string(char)
 		}
 	}
-	
+
 	// Add the last element if there is one
 	if current != "" {
 		result = append(result, strings.TrimSpace(current))
 	}
-	
+
 	return result
 }
 
@@ -1000,7 +1000,7 @@ func (p *PostgresManager) ReadSchemaFromFile(filename string) (*Schema, error) {
 	if err != nil {
 		return nil, err
 	}
-	
+
 	var schema Schema
 	if err := json.Unmarshal(data, &schema); err != nil {
 		return nil, fmt.Errorf("parsing schema file: %v", err)
@@ -1016,7 +1016,7 @@ func (p *PostgresManager) ReadSchemaFromFile(filename string) (*Schema, error) {
 		createEnumSQL := fmt.Sprintf("CREATE TYPE %s AS ENUM (%s);",
 			pq.QuoteIdentifier(enum.Name),
 			joinQuotedStrings(enum.Values))
-		
+
 		p.logSQL("Create Enum", createEnumSQL)
 		if _, err := p.DB.Exec(createEnumSQL); err != nil {
 			// Ignore if enum already exists
@@ -1133,12 +1133,12 @@ func (p *PostgresManager) exportTableToCSV(tableName, outputDir string) error {
 	for i, col := range columns {
 		quotedColumns[i] = pq.QuoteIdentifier(col)
 	}
-	
-	query := fmt.Sprintf("SELECT %s FROM %s", 
-		strings.Join(quotedColumns, ", "), 
+
+	query := fmt.Sprintf("SELECT %s FROM %s",
+		strings.Join(quotedColumns, ", "),
 		pq.QuoteIdentifier(tableName))
 	p.logSQL(fmt.Sprintf("Export Table %s", tableName), query)
-	
+
 	dataRows, err := p.DB.Query(query)
 	if err != nil {
 		return fmt.Errorf("querying data: %v", err)
@@ -1304,33 +1304,30 @@ func (p *PostgresManager) debugVarcharLengths() {
 		ORDER BY 
 			table_name, ordinal_position;
 	`
-	
+
 	rows, err := p.DB.Query(query)
 	if err != nil {
 		p.log("Error querying varchar lengths: %v", err)
 		return
 	}
 	defer rows.Close()
-	
+
 	p.log("Debugging varchar lengths:")
 	for rows.Next() {
 		var tableName, columnName, dataType string
 		var maxLength sql.NullInt64
-		
+
 		if err := rows.Scan(&tableName, &columnName, &dataType, &maxLength); err != nil {
 			p.log("Error scanning row: %v", err)
 			continue
 		}
-		
+
 		if maxLength.Valid {
-			p.log("Table: %s, Column: %s, Type: %s, MaxLength: %d", 
+			p.log("Table: %s, Column: %s, Type: %s, MaxLength: %d",
 				tableName, columnName, dataType, maxLength.Int64)
 		} else {
-			p.log("Table: %s, Column: %s, Type: %s, MaxLength: NULL", 
+			p.log("Table: %s, Column: %s, Type: %s, MaxLength: NULL",
 				tableName, columnName, dataType)
 		}
 	}
 }
-
-
-

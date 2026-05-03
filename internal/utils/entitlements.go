@@ -11,7 +11,7 @@ import (
 // service connectors. The error message is human-readable and links to the
 // upgrade page so the CLI can surface it directly.
 var ErrServiceConnectorsPro = fmt.Errorf(
-	"service connectors (Supabase Auth) require a Pro plan\n" +
+	"service connectors (Supabase Auth, Stripe) require a Pro plan\n" +
 		"  Upgrade at https://seedmancer.dev/dashboard/billing",
 )
 

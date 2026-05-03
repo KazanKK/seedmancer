@@ -127,7 +127,8 @@ func runLogin(c *cli.Context) error {
 	}()
 
 	authURL := buildAuthURL(dashboard, code, callbackURL)
-	if c.Bool("no-browser") {
+	noBrowser := c.Bool("no-browser") || isLocalURL(dashboard)
+	if noBrowser {
 		ui.Info("Open this URL in a browser to continue:\n  %s", authURL)
 	} else {
 		ui.Info("Opening your browser to sign in...")
@@ -210,6 +211,18 @@ func buildAuthURL(dashboard, code, callback string) string {
 	q.Set("callback", callback)
 	u.RawQuery = q.Encode()
 	return u.String()
+}
+
+// isLocalURL reports whether rawURL points at a loopback address so the login
+// command can skip browser-opening and print the auth URL instead (useful in
+// devcontainers and CI where no browser is available).
+func isLocalURL(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	host := u.Hostname()
+	return host == "localhost" || host == "127.0.0.1" || host == "::1"
 }
 
 func randomCode() (string, error) {

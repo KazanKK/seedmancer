@@ -92,12 +92,12 @@ func TestTruncateCSVToHeader(t *testing.T) {
 
 func TestTrimCSVSuffix(t *testing.T) {
 	cases := map[string]string{
-		"products.csv":   "products",
-		"products.CSV":   "products",
-		"product_a.csv":  "product_a",
-		"products.json":  "",
-		"products":       "",
-		"":               "",
+		"products.csv":  "products",
+		"products.CSV":  "products",
+		"product_a.csv": "product_a",
+		"products.json": "",
+		"products":      "",
+		"":              "",
 	}
 	for in, want := range cases {
 		if got := trimCSVSuffix(in); got != want {

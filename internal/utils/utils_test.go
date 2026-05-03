@@ -66,30 +66,16 @@ func TestGetBaseURL_defaults(t *testing.T) {
 		t.Fatalf("chdir: %v", err)
 	}
 	t.Setenv("HOME", dir)
-	t.Setenv("SEEDMANCER_CLOUD_API_URL", "")
+	t.Setenv("SEEDMANCER_API_URL", "")
 	if got := GetBaseURL(); got != "https://api.seedmancer.dev" {
 		t.Errorf("default base URL = %q", got)
 	}
 }
 
-func TestGetBaseURL_cloudEnvOverride(t *testing.T) {
-	dir := t.TempDir()
-	prev, _ := os.Getwd()
-	t.Cleanup(func() { _ = os.Chdir(prev) })
-	if err := os.Chdir(dir); err != nil {
-		t.Fatalf("chdir: %v", err)
-	}
-	t.Setenv("HOME", dir)
-	writeFile(t, filepath.Join(dir, "seedmancer.yaml"), "storage_path: .seedmancer\n")
-
-	t.Setenv("SEEDMANCER_CLOUD_API_URL", "https://from-env.example.com/")
-	if got := GetBaseURL(); got != "https://from-env.example.com" {
-		t.Fatalf("SEEDMANCER_CLOUD_API_URL should win: got %q", got)
-	}
-
-	t.Setenv("SEEDMANCER_CLOUD_API_URL", "")
-	if got := GetBaseURL(); got != "https://api.seedmancer.dev" {
-		t.Fatalf("default production URL when env unset: got %q", got)
+func TestGetBaseURL_apiURLOverride(t *testing.T) {
+	t.Setenv("SEEDMANCER_API_URL", "http://localhost:9999/")
+	if got := GetBaseURL(); got != "http://localhost:9999" {
+		t.Fatalf("SEEDMANCER_API_URL should be used for testing: got %q", got)
 	}
 }
 
@@ -101,7 +87,7 @@ func TestGetBaseURL_ignoresLegacyApiURLInYaml(t *testing.T) {
 		t.Fatalf("chdir: %v", err)
 	}
 	t.Setenv("HOME", dir)
-	t.Setenv("SEEDMANCER_CLOUD_API_URL", "")
+	t.Setenv("SEEDMANCER_API_URL", "")
 	writeFile(t, filepath.Join(dir, "seedmancer.yaml"), "storage_path: .seedmancer\napi_url: https://legacy-in-yaml.example\n")
 
 	if got := GetBaseURL(); got != "https://api.seedmancer.dev" {
