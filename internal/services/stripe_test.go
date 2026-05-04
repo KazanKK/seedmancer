@@ -184,11 +184,9 @@ func TestStripeSeedDeleteRecreateAndResolveGenericColumns(t *testing.T) {
 			writeJSON(t, w, map[string]interface{}{
 				"data": []map[string]interface{}{
 					{
-						"id":    "cus_old",
-						"email": "user@example.com",
-						"metadata": map[string]string{
-							stripeDefaultManagedKey: stripeDefaultManagedValue,
-						},
+						"id":       "cus_old",
+						"email":    "user@example.com",
+						"metadata": map[string]string{},
 					},
 				},
 			})
@@ -242,19 +240,15 @@ func TestStripeSeedDeleteRecreateAndResolveGenericColumns(t *testing.T) {
 				},
 			},
 		},
-		Objects: stripeObjectSpecs{
-			Customers: []stripeCustomerObjectSpec{
-				{
-					Alias:  "customer:{email}",
-					Source: stripeSourceSpec{Table: "Account", MatchColumn: "email"},
-				},
-			},
-			Subscriptions: []stripeSubscriptionObjectSpec{
-				{
-					Alias:         "subscription:{email}:pro_monthly",
-					CustomerAlias: "customer:{email}",
-					PriceKey:      "pro_monthly",
-				},
+		Customers: []stripeCustomerSnap{
+			{Email: "user@example.com", Alias: "customer:{email}"},
+		},
+		Subscriptions: []stripeSubscriptionSnap{
+			{
+				CustomerEmail: "user@example.com",
+				CustomerAlias: "customer:{email}",
+				PriceKey:      "pro_monthly",
+				Alias:         "subscription:{email}:pro_monthly",
 			},
 		},
 		ExternalIDResolution: []externalIDResolution{
@@ -326,11 +320,9 @@ func TestStripeExport_PriorityOrder_ManualBeatsAIBeatsHeuristic(t *testing.T) {
 			writeJSON(t, w, map[string]interface{}{
 				"data": []map[string]interface{}{
 					{
-						"id":    "cus_existing",
-						"email": "user@example.com",
-						"metadata": map[string]string{
-							stripeDefaultManagedKey: stripeDefaultManagedValue,
-						},
+						"id":       "cus_existing",
+						"email":    "user@example.com",
+						"metadata": map[string]string{},
 					},
 				},
 			})
@@ -478,6 +470,101 @@ func TestStripeExport_NoAIInfer_SkipsAICall(t *testing.T) {
 	}
 	if aiCalled {
 		t.Fatal("expected AI inference to be skipped when WithNoAIInfer is set")
+	}
+}
+
+func TestStripeSeedTrialingSubscriptionSendsTrialPeriodDays(t *testing.T) {
+	dir := t.TempDir()
+	csvPath := filepath.Join(dir, "Account.csv")
+	if err := os.WriteFile(csvPath, []byte("email,billing_customer_id,billing_subscription_id\nuser@example.com,,\n"), 0644); err != nil {
+		t.Fatalf("write csv: %v", err)
+	}
+
+	var trialPeriodDays string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/products/prod_1":
+			writeJSON(t, w, map[string]interface{}{"id": "prod_1", "name": "Pro", "active": true})
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/prices":
+			writeJSON(t, w, map[string]interface{}{
+				"data": []map[string]interface{}{
+					{
+						"id": "price_1", "lookup_key": "pro_monthly", "product": "prod_1",
+						"currency": "usd", "unit_amount": 2900, "active": true,
+						"recurring": map[string]interface{}{"interval": "month"},
+					},
+				},
+				"has_more": false,
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/customers":
+			writeJSON(t, w, map[string]interface{}{"data": []map[string]interface{}{}, "has_more": false})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/customers":
+			writeJSON(t, w, map[string]interface{}{"id": "cus_new", "email": "user@example.com"})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/payment_methods":
+			writeJSON(t, w, map[string]interface{}{"id": "pm_test_visa"})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/payment_methods/pm_test_visa/attach":
+			writeJSON(t, w, map[string]interface{}{"id": "pm_test_visa", "customer": "cus_new"})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/customers/cus_new":
+			writeJSON(t, w, map[string]interface{}{"id": "cus_new"})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/subscriptions":
+			if err := r.ParseForm(); err != nil {
+				t.Fatalf("parse form: %v", err)
+			}
+			trialPeriodDays = r.Form.Get("trial_period_days")
+			writeJSON(t, w, map[string]interface{}{"id": "sub_new", "customer": "cus_new", "status": "trialing"})
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	snap := stripeSnapshot{
+		Version: stripeSnapshotVersion,
+		Service: "stripe",
+		Catalog: stripeCatalogSpec{
+			Products: []stripeProductSpec{
+				{
+					Key: "pro", StripeID: "prod_1", Name: "Pro", Active: true,
+					Prices: []stripePriceSpec{
+						{
+							Key: "pro_monthly", LookupKey: "pro_monthly",
+							Currency: "usd", UnitAmount: 2900, Active: true,
+							Recurring: &stripeRecurring{Interval: "month"},
+						},
+					},
+				},
+			},
+		},
+		Customers: []stripeCustomerSnap{
+			{Email: "user@example.com", Alias: "customer:{email}"},
+		},
+		Subscriptions: []stripeSubscriptionSnap{
+			{
+				CustomerEmail:   "user@example.com",
+				CustomerAlias:   "customer:{email}",
+				PriceKey:        "pro_monthly",
+				Alias:           "subscription:{email}:pro_monthly",
+				Status:          "trialing",
+				TrialPeriodDays: 14,
+			},
+		},
+		ExternalIDResolution: []externalIDResolution{
+			{Table: "Account", MatchColumn: "email", OutputColumn: "billing_customer_id", ObjectAlias: "customer:{email}"},
+			{Table: "Account", MatchColumn: "email", OutputColumn: "billing_subscription_id", ObjectAlias: "subscription:{email}:pro_monthly"},
+		},
+	}
+	snap.withDefaults()
+	data, err := json.Marshal(snap)
+	if err != nil {
+		t.Fatalf("marshal snapshot: %v", err)
+	}
+
+	connector := testStripeConnector(server.URL)
+	if err := connector.Seed(WithDataDir(context.Background(), dir), data); err != nil {
+		t.Fatalf("Seed: %v", err)
+	}
+	if trialPeriodDays != "14" {
+		t.Fatalf("expected trial_period_days=14 for trialing subscription, got %q", trialPeriodDays)
 	}
 }
 

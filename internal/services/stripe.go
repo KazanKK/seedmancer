@@ -20,11 +20,8 @@ import (
 )
 
 const (
-	stripeDefaultAPIBase       = "https://api.stripe.com"
-	stripeDefaultManagedKey    = "seedmancer_managed"
-	stripeDefaultManagedValue  = "true"
-	stripeSnapshotVersion      = 1
-	stripeDefaultCustomerAlias = "customer:{%s}"
+	stripeDefaultAPIBase  = "https://api.stripe.com"
+	stripeSnapshotVersion = 1
 )
 
 type stripeConnector struct {
@@ -82,13 +79,10 @@ func (c *stripeConnector) Export(ctx context.Context) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("stripe export: list prices: %w", err)
 	}
-	// List all customers for inference + subscription email resolution.
-	// Managed-only filtering applies at seed reset time, not here.
 	allCustomers, err := c.listAllCustomers(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("stripe export: list customers: %w", err)
 	}
-	managedCustomers := filterManaged(allCustomers, existing.Reset.Customers.ManagedMetadataKey, existing.Reset.Customers.ManagedMetadataValue)
 	subscriptions, err := c.listSubscriptions(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("stripe export: list subscriptions: %w", err)
@@ -112,10 +106,8 @@ func (c *stripeConnector) Export(ctx context.Context) ([]byte, error) {
 		Service:              "stripe",
 		CapturedAt:           time.Now().UTC(),
 		Catalog:              catalog,
-		Reset:                existing.Reset,
-		Objects:              existing.Objects,
 		ExternalIDResolution: existing.ExternalIDResolution,
-		Customers:            customerSnapshots(managedCustomers),
+		Customers:            customerSnapshots(allCustomers),
 		Subscriptions:        subscriptionSnapshots(subscriptions, allCustomers, catalogPriceKeys),
 	}
 	snap.withDefaults()
@@ -147,7 +139,7 @@ func (c *stripeConnector) Export(ctx context.Context) ([]byte, error) {
 			aiRules,
 			heuristicRules,
 		)
-		snap.Objects = mergeObjectSpecs(snap.Objects, mergeInferred(aiObjects, heuristicObjects))
+		applyAliasesToSnapshot(&snap, mergeInferred(aiObjects, heuristicObjects))
 	}
 	out, err := json.MarshalIndent(snap, "", "  ")
 	if err != nil {
@@ -156,7 +148,7 @@ func (c *stripeConnector) Export(ctx context.Context) ([]byte, error) {
 	return out, nil
 }
 
-// Seed resets managed Stripe test objects, recreates them from CSV rows, then
+// Seed resets all Stripe test customers, recreates them from CSV rows, then
 // resolves configured external IDs in the materialized CSV directory.
 func (c *stripeConnector) Seed(ctx context.Context, snapshot []byte) error {
 	var snap stripeSnapshot
@@ -178,14 +170,14 @@ func (c *stripeConnector) Seed(ctx context.Context, snapshot []byte) error {
 	if err != nil {
 		return err
 	}
-	if err := c.resetManagedObjects(ctx, snap.Reset); err != nil {
+	if err := c.resetCustomers(ctx); err != nil {
 		return err
 	}
-	objectIDs, rows, err := c.recreateCustomers(ctx, dataDir, snap)
+	objectIDs, err := c.recreateCustomers(ctx, snap)
 	if err != nil {
 		return err
 	}
-	if err := c.recreateSubscriptions(ctx, snap, priceIDs, objectIDs, rows); err != nil {
+	if err := c.recreateSubscriptions(ctx, snap, priceIDs, objectIDs); err != nil {
 		return err
 	}
 	return resolveExternalIDs(dataDir, snap.ExternalIDResolution, objectIDs)
@@ -196,8 +188,6 @@ type stripeSnapshot struct {
 	Service              string                   `json:"service"`
 	CapturedAt           time.Time                `json:"capturedAt"`
 	Catalog              stripeCatalogSpec        `json:"catalog"`
-	Reset                stripeResetSpec          `json:"reset"`
-	Objects              stripeObjectSpecs        `json:"objects"`
 	ExternalIDResolution []externalIDResolution   `json:"externalIdResolution,omitempty"`
 	Customers            []stripeCustomerSnap     `json:"customers,omitempty"`
 	Subscriptions        []stripeSubscriptionSnap `json:"subscriptions,omitempty"`
@@ -235,20 +225,16 @@ type stripeRecurring struct {
 	IntervalCount int64  `json:"intervalCount,omitempty"`
 }
 
-type stripeResetSpec struct {
-	Customers stripeCustomerResetSpec `json:"customers"`
+type externalIDResolution struct {
+	Table        string `json:"table"`
+	MatchColumn  string `json:"matchColumn"`
+	OutputColumn string `json:"outputColumn"`
+	ObjectAlias  string `json:"objectAlias"`
 }
 
-type stripeCustomerResetSpec struct {
-	Mode                 string `json:"mode"`
-	ManagedMetadataKey   string `json:"managedMetadataKey"`
-	ManagedMetadataValue string `json:"managedMetadataValue"`
-}
-
-type stripeObjectSpecs struct {
-	Customers     []stripeCustomerObjectSpec     `json:"customers,omitempty"`
-	Subscriptions []stripeSubscriptionObjectSpec `json:"subscriptions,omitempty"`
-}
+// inferredSpecs and the spec types below are used only during Export to
+// derive alias templates from inference — they are never serialised into
+// _billing.json.
 
 type stripeSourceSpec struct {
 	Table       string `json:"table"`
@@ -266,34 +252,22 @@ type stripeSubscriptionObjectSpec struct {
 	CustomerAlias string           `json:"customerAlias"`
 	PriceKey      string           `json:"priceKey"`
 	Source        stripeSourceSpec `json:"source,omitempty"`
-	// TrialPeriodDays creates the subscription in trialing status.
-	// Takes precedence over PaymentBehavior when set.
-	TrialPeriodDays int `json:"trialPeriodDays,omitempty"`
-	// PaymentBehavior controls how Stripe handles a missing payment method.
-	// Defaults to "default_incomplete" for test mode seeding so no payment
-	// method is required. Set to "" to use Stripe's default.
-	PaymentBehavior string `json:"paymentBehavior,omitempty"`
-}
-
-type externalIDResolution struct {
-	Table        string `json:"table"`
-	MatchColumn  string `json:"matchColumn"`
-	OutputColumn string `json:"outputColumn"`
-	ObjectAlias  string `json:"objectAlias"`
 }
 
 type stripeCustomerSnap struct {
-	Email    string            `json:"email,omitempty"`
-	StripeID string            `json:"stripeId,omitempty"`
-	Metadata map[string]string `json:"metadata,omitempty"`
+	Email    string `json:"email,omitempty"`
+	StripeID string `json:"stripeId,omitempty"`
+	Alias    string `json:"alias,omitempty"`
 }
 
 type stripeSubscriptionSnap struct {
-	StripeID      string `json:"stripeId,omitempty"`
-	Customer      string `json:"customer,omitempty"`
-	CustomerEmail string `json:"customerEmail,omitempty"`
-	PriceKey      string `json:"priceKey,omitempty"`
-	Status        string `json:"status,omitempty"`
+	StripeID        string `json:"stripeId,omitempty"`
+	CustomerEmail   string `json:"customerEmail,omitempty"`
+	CustomerAlias   string `json:"customerAlias,omitempty"`
+	PriceKey        string `json:"priceKey,omitempty"`
+	Alias           string `json:"alias,omitempty"`
+	Status          string `json:"status,omitempty"`
+	TrialPeriodDays int    `json:"trialPeriodDays,omitempty"`
 }
 
 func (s *stripeSnapshot) withDefaults() {
@@ -305,15 +279,6 @@ func (s *stripeSnapshot) withDefaults() {
 	}
 	if !s.Catalog.IncludeArchived {
 		s.Catalog.ActiveOnly = true
-	}
-	if s.Reset.Customers.Mode == "" {
-		s.Reset.Customers.Mode = "delete_recreate"
-	}
-	if s.Reset.Customers.ManagedMetadataKey == "" {
-		s.Reset.Customers.ManagedMetadataKey = stripeDefaultManagedKey
-	}
-	if s.Reset.Customers.ManagedMetadataValue == "" {
-		s.Reset.Customers.ManagedMetadataValue = stripeDefaultManagedValue
 	}
 }
 
@@ -343,10 +308,12 @@ type stripeCustomer struct {
 }
 
 type stripeSubscription struct {
-	ID       string `json:"id"`
-	Customer string `json:"customer"`
-	Status   string `json:"status"`
-	Items    struct {
+	ID         string `json:"id"`
+	Customer   string `json:"customer"`
+	Status     string `json:"status"`
+	TrialStart int64  `json:"trial_start"`
+	TrialEnd   int64  `json:"trial_end"`
+	Items      struct {
 		Data []struct {
 			Price stripePrice `json:"price"`
 		} `json:"data"`
@@ -478,64 +445,43 @@ func (c *stripeConnector) archivePrice(ctx context.Context, id string) error {
 	return c.doStripe(ctx, http.MethodPost, "/v1/prices/"+url.PathEscape(id), params, nil)
 }
 
-func (c *stripeConnector) resetManagedObjects(ctx context.Context, reset stripeResetSpec) error {
-	if reset.Customers.Mode != "delete_recreate" {
-		return fmt.Errorf("stripe seed: unsupported customer reset mode %q", reset.Customers.Mode)
-	}
-	customers, err := c.listManagedCustomers(ctx, reset.Customers.ManagedMetadataKey, reset.Customers.ManagedMetadataValue)
+func (c *stripeConnector) resetCustomers(ctx context.Context) error {
+	customers, err := c.listAllCustomers(ctx)
 	if err != nil {
-		return fmt.Errorf("stripe seed: list managed customers: %w", err)
+		return fmt.Errorf("stripe seed: list customers: %w", err)
 	}
 	for _, customer := range customers {
 		if err := c.doStripe(ctx, http.MethodDelete, "/v1/customers/"+url.PathEscape(customer.ID), nil, nil); err != nil {
-			return fmt.Errorf("stripe seed: delete managed customer %s: %w", customer.ID, err)
+			return fmt.Errorf("stripe seed: delete customer %s: %w", customer.ID, err)
 		}
 	}
 	return nil
 }
 
-type stripeRow struct {
-	Table  string
-	Header []string
-	Values map[string]string
-}
-
-func (c *stripeConnector) recreateCustomers(ctx context.Context, dataDir string, snap stripeSnapshot) (map[string]string, map[string]stripeRow, error) {
+func (c *stripeConnector) recreateCustomers(ctx context.Context, snap stripeSnapshot) (map[string]string, error) {
 	objectIDs := map[string]string{}
-	rowsByAlias := map[string]stripeRow{}
-	for _, spec := range snap.Objects.Customers {
-		rows, err := readCSVRows(filepath.Join(dataDir, spec.Source.Table+".csv"))
-		if err != nil {
-			return nil, nil, fmt.Errorf("stripe seed: read %s.csv: %w", spec.Source.Table, err)
+	for _, cust := range snap.Customers {
+		if cust.Email == "" {
+			continue
 		}
-		for _, row := range rows {
-			match := strings.TrimSpace(row.Values[spec.Source.MatchColumn])
-			if match == "" || strings.EqualFold(match, "NULL") {
-				continue
-			}
-			alias := renderAlias(spec.aliasTemplate(spec.Source.MatchColumn), row.Values)
-			if alias == "" {
-				return nil, nil, fmt.Errorf("stripe seed: could not render customer alias for table %s", spec.Source.Table)
-			}
-			params := url.Values{}
-			params.Set("email", match)
-			metadata := copyStringMap(spec.Metadata)
-			if _, ok := metadata[snap.Reset.Customers.ManagedMetadataKey]; !ok {
-				metadata[snap.Reset.Customers.ManagedMetadataKey] = snap.Reset.Customers.ManagedMetadataValue
-			}
-			setMetadata(params, metadata)
+		params := url.Values{}
+		params.Set("email", cust.Email)
 		var out stripeCustomer
 		if err := c.doStripe(ctx, http.MethodPost, "/v1/customers", params, &out); err != nil {
-			return nil, nil, fmt.Errorf("stripe seed: create customer %q: %w", match, err)
+			return nil, fmt.Errorf("stripe seed: create customer %q: %w", cust.Email, err)
 		}
 		if err := c.attachTestPaymentMethod(ctx, out.ID); err != nil {
-			return nil, nil, fmt.Errorf("stripe seed: attach payment method for customer %q: %w", match, err)
+			return nil, fmt.Errorf("stripe seed: attach payment method for customer %q: %w", cust.Email, err)
 		}
-		objectIDs[alias] = out.ID
-		rowsByAlias[alias] = row
+		if cust.Alias != "" {
+			placeholder := extractPlaceholder(cust.Alias)
+			alias := renderAlias(cust.Alias, map[string]string{placeholder: cust.Email})
+			if alias != "" {
+				objectIDs[alias] = out.ID
+			}
 		}
 	}
-	return objectIDs, rowsByAlias, nil
+	return objectIDs, nil
 }
 
 // attachTestPaymentMethod creates a Visa test card, attaches it to the
@@ -564,17 +510,9 @@ func (c *stripeConnector) attachTestPaymentMethod(ctx context.Context, customerI
 	return nil
 }
 
-func (s stripeCustomerObjectSpec) aliasTemplate(matchColumn string) string {
-	if strings.TrimSpace(s.Alias) != "" {
-		return s.Alias
-	}
-	return fmt.Sprintf(stripeDefaultCustomerAlias, matchColumn)
-}
-
-func (c *stripeConnector) recreateSubscriptions(ctx context.Context, snap stripeSnapshot, priceIDs map[string]string, objectIDs map[string]string, rowsByAlias map[string]stripeRow) error {
+func (c *stripeConnector) recreateSubscriptions(ctx context.Context, snap stripeSnapshot, priceIDs map[string]string, objectIDs map[string]string) error {
 	// Build a reverse index: catalog stripeId → resolved price ID so that
-	// subscription specs written with raw Stripe IDs (instead of logical
-	// catalog keys) still resolve correctly.
+	// subscription specs written with raw Stripe IDs still resolve correctly.
 	for _, prod := range snap.Catalog.Products {
 		for _, p := range prod.Prices {
 			if p.StripeID != "" && priceIDs[p.StripeID] == "" {
@@ -585,35 +523,38 @@ func (c *stripeConnector) recreateSubscriptions(ctx context.Context, snap stripe
 		}
 	}
 
-	for _, spec := range snap.Objects.Subscriptions {
-		priceID := priceIDs[spec.PriceKey]
+	for _, sub := range snap.Subscriptions {
+		priceID := priceIDs[sub.PriceKey]
 		if priceID == "" {
-			return fmt.Errorf("stripe seed: no resolved Stripe price for priceKey %q", spec.PriceKey)
+			return fmt.Errorf("stripe seed: no resolved Stripe price for priceKey %q", sub.PriceKey)
 		}
-		for _, row := range rowsByAlias {
-			customerAlias := renderAlias(spec.CustomerAlias, row.Values)
-			customerID := objectIDs[customerAlias]
-			if customerID == "" {
-				continue
+		customerAlias := renderAlias(sub.CustomerAlias, map[string]string{extractPlaceholder(sub.CustomerAlias): sub.CustomerEmail})
+		customerID := objectIDs[customerAlias]
+		if customerID == "" {
+			return fmt.Errorf("stripe seed: no customer found for alias %q (email %s)", customerAlias, sub.CustomerEmail)
+		}
+		params := url.Values{}
+		params.Set("customer", customerID)
+		params.Set("items[0][price]", priceID)
+		if sub.Status == "trialing" {
+			days := sub.TrialPeriodDays
+			if days <= 0 {
+				days = 14
 			}
-			alias := renderAlias(spec.Alias, row.Values)
-			if alias == "" {
-				return fmt.Errorf("stripe seed: could not render subscription alias for customer alias %q", customerAlias)
+			if days > 730 {
+				days = 730
 			}
-			params := url.Values{}
-			params.Set("customer", customerID)
-			params.Set("items[0][price]", priceID)
-			params.Set("metadata["+stripeDefaultManagedKey+"]", stripeDefaultManagedValue)
-			if spec.TrialPeriodDays > 0 {
-				params.Set("trial_period_days", strconv.Itoa(spec.TrialPeriodDays))
-			} else if spec.PaymentBehavior != "" {
-				params.Set("payment_behavior", spec.PaymentBehavior)
+			params.Set("trial_period_days", strconv.Itoa(days))
+		}
+		var out stripeSubscription
+		if err := c.doStripe(ctx, http.MethodPost, "/v1/subscriptions", params, &out); err != nil {
+			return fmt.Errorf("stripe seed: create subscription for %s: %w", customerAlias, err)
+		}
+		if sub.Alias != "" {
+			alias := renderAlias(sub.Alias, map[string]string{extractPlaceholder(sub.Alias): sub.CustomerEmail})
+			if alias != "" {
+				objectIDs[alias] = out.ID
 			}
-			var out stripeSubscription
-			if err := c.doStripe(ctx, http.MethodPost, "/v1/subscriptions", params, &out); err != nil {
-				return fmt.Errorf("stripe seed: create subscription for %s: %w", customerAlias, err)
-			}
-			objectIDs[alias] = out.ID
 		}
 	}
 	return nil
@@ -670,17 +611,13 @@ func renderAlias(template string, row map[string]string) string {
 	return out
 }
 
-func readCSVRows(path string) ([]stripeRow, error) {
-	header, records, err := readCSVFile(path)
-	if err != nil {
-		return nil, err
+func extractPlaceholder(template string) string {
+	start := strings.Index(template, "{")
+	end := strings.Index(template, "}")
+	if start < 0 || end <= start {
+		return ""
 	}
-	rows := make([]stripeRow, 0, len(records))
-	table := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
-	for _, record := range records {
-		rows = append(rows, stripeRow{Table: table, Header: header, Values: recordMap(header, record)})
-	}
-	return rows, nil
+	return template[start+1 : end]
 }
 
 func readCSVFile(path string) ([]string, [][]string, error) {
@@ -801,47 +738,55 @@ func (c *stripeConnector) listPrices(ctx context.Context, activeOnly, includeArc
 	return filtered, nil
 }
 
-func (c *stripeConnector) listManagedCustomers(ctx context.Context, key, value string) ([]stripeCustomer, error) {
-	all, err := c.listAllCustomers(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return filterManaged(all, key, value), nil
-}
-
 func (c *stripeConnector) listAllCustomers(ctx context.Context) ([]stripeCustomer, error) {
-	params := url.Values{}
-	params.Set("limit", "100")
-	var out struct {
-		Data []stripeCustomer `json:"data"`
-	}
-	if err := c.doStripe(ctx, http.MethodGet, "/v1/customers", params, &out); err != nil {
-		return nil, err
-	}
-	return out.Data, nil
-}
-
-func filterManaged(customers []stripeCustomer, key, value string) []stripeCustomer {
-	out := make([]stripeCustomer, 0, len(customers))
-	for _, c := range customers {
-		if c.Metadata[key] == value {
-			out = append(out, c)
+	var all []stripeCustomer
+	startingAfter := ""
+	for {
+		params := url.Values{}
+		params.Set("limit", "100")
+		if startingAfter != "" {
+			params.Set("starting_after", startingAfter)
 		}
+		var page struct {
+			Data    []stripeCustomer `json:"data"`
+			HasMore bool             `json:"has_more"`
+		}
+		if err := c.doStripe(ctx, http.MethodGet, "/v1/customers", params, &page); err != nil {
+			return nil, err
+		}
+		all = append(all, page.Data...)
+		if !page.HasMore || len(page.Data) == 0 {
+			break
+		}
+		startingAfter = page.Data[len(page.Data)-1].ID
 	}
-	return out
+	return all, nil
 }
 
 func (c *stripeConnector) listSubscriptions(ctx context.Context) ([]stripeSubscription, error) {
-	params := url.Values{}
-	params.Set("limit", "100")
-	var out struct {
-		Data []stripeSubscription `json:"data"`
+	var all []stripeSubscription
+	startingAfter := ""
+	for {
+		params := url.Values{}
+		params.Set("limit", "100")
+		if startingAfter != "" {
+			params.Set("starting_after", startingAfter)
+		}
+		var page struct {
+			Data    []stripeSubscription `json:"data"`
+			HasMore bool                 `json:"has_more"`
+		}
+		if err := c.doStripe(ctx, http.MethodGet, "/v1/subscriptions", params, &page); err != nil {
+			return nil, err
+		}
+		all = append(all, page.Data...)
+		if !page.HasMore || len(page.Data) == 0 {
+			break
+		}
+		startingAfter = page.Data[len(page.Data)-1].ID
 	}
-	if err := c.doStripe(ctx, http.MethodGet, "/v1/subscriptions", params, &out); err != nil {
-		return nil, err
-	}
-	filtered := make([]stripeSubscription, 0, len(out.Data))
-	for _, subscription := range out.Data {
+	filtered := make([]stripeSubscription, 0, len(all))
+	for _, subscription := range all {
 		if activeLikeSubscription(subscription.Status) {
 			filtered = append(filtered, subscription)
 		}
@@ -974,7 +919,6 @@ func customerSnapshots(customers []stripeCustomer) []stripeCustomerSnap {
 		out = append(out, stripeCustomerSnap{
 			Email:    customer.Email,
 			StripeID: customer.ID,
-			Metadata: customer.Metadata,
 		})
 	}
 	return out
@@ -996,12 +940,16 @@ func subscriptionSnapshots(subscriptions []stripeSubscription, customers []strip
 				priceKey = priceID // fallback: raw ID
 			}
 		}
+		trialDays := 0
+		if subscription.TrialStart > 0 && subscription.TrialEnd > subscription.TrialStart {
+			trialDays = int((subscription.TrialEnd - subscription.TrialStart) / 86400)
+		}
 		out = append(out, stripeSubscriptionSnap{
-			StripeID:      subscription.ID,
-			Customer:      subscription.Customer,
-			CustomerEmail: customersByID[subscription.Customer].Email,
-			PriceKey:      priceKey,
-			Status:        subscription.Status,
+			StripeID:        subscription.ID,
+			CustomerEmail:   customersByID[subscription.Customer].Email,
+			PriceKey:        priceKey,
+			Status:          subscription.Status,
+			TrialPeriodDays: trialDays,
 		})
 	}
 	return out
@@ -1049,14 +997,11 @@ func inferStripeResolution(dataDir string, snap stripeSnapshot) ([]externalIDRes
 						continue
 					}
 					alias := "customer:{" + matchColumn + "}"
-					rules = append(rules, externalIDResolution{Table: table, MatchColumn: matchColumn, OutputColumn: column, ObjectAlias: alias})
-					specs.Customers = append(specs.Customers, stripeCustomerObjectSpec{
-						Alias:  alias,
-						Source: stripeSourceSpec{Table: table, MatchColumn: matchColumn},
-						Metadata: map[string]string{
-							stripeDefaultManagedKey: stripeDefaultManagedValue,
-						},
-					})
+				rules = append(rules, externalIDResolution{Table: table, MatchColumn: matchColumn, OutputColumn: column, ObjectAlias: alias})
+				specs.Customers = append(specs.Customers, stripeCustomerObjectSpec{
+					Alias:  alias,
+					Source: stripeSourceSpec{Table: table, MatchColumn: matchColumn},
+				})
 				}
 				if subscription, ok := subByID[value]; ok && subscription.CustomerEmail != "" && subscription.PriceKey != "" {
 					matchColumn := findColumnWithValue(row, subscription.CustomerEmail)
@@ -1152,29 +1097,27 @@ func resolutionKey(rule externalIDResolution) string {
 	return strings.Join([]string{rule.Table, rule.MatchColumn, rule.OutputColumn, rule.ObjectAlias}, "\x00")
 }
 
-func mergeObjectSpecs(existing stripeObjectSpecs, inferred inferredSpecs) stripeObjectSpecs {
-	out := existing
-	customerSeen := map[string]bool{}
-	for _, spec := range out.Customers {
-		customerSeen[spec.Alias] = true
-	}
-	for _, spec := range inferred.Customers {
-		if !customerSeen[spec.Alias] {
-			out.Customers = append(out.Customers, spec)
-			customerSeen[spec.Alias] = true
+func applyAliasesToSnapshot(snap *stripeSnapshot, specs inferredSpecs) {
+	if len(specs.Customers) > 0 {
+		customerAlias := specs.Customers[0].Alias
+		for i := range snap.Customers {
+			if snap.Customers[i].Alias == "" {
+				snap.Customers[i].Alias = customerAlias
+			}
 		}
 	}
-	subSeen := map[string]bool{}
-	for _, spec := range out.Subscriptions {
-		subSeen[spec.Alias] = true
+	subByPriceKey := map[string]stripeSubscriptionObjectSpec{}
+	for _, spec := range specs.Subscriptions {
+		subByPriceKey[spec.PriceKey] = spec
 	}
-	for _, spec := range inferred.Subscriptions {
-		if !subSeen[spec.Alias] {
-			out.Subscriptions = append(out.Subscriptions, spec)
-			subSeen[spec.Alias] = true
+	for i := range snap.Subscriptions {
+		if snap.Subscriptions[i].Alias == "" {
+			if spec, ok := subByPriceKey[snap.Subscriptions[i].PriceKey]; ok {
+				snap.Subscriptions[i].Alias = spec.Alias
+				snap.Subscriptions[i].CustomerAlias = spec.CustomerAlias
+			}
 		}
 	}
-	return out
 }
 
 // logAIInferWarning prints a single-line warning when the AI inference
@@ -1190,12 +1133,4 @@ func setMetadata(params url.Values, metadata map[string]string) {
 	for key, value := range metadata {
 		params.Set("metadata["+key+"]", value)
 	}
-}
-
-func copyStringMap(in map[string]string) map[string]string {
-	out := make(map[string]string, len(in))
-	for key, value := range in {
-		out[key] = value
-	}
-	return out
 }

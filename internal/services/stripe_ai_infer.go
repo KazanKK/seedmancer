@@ -70,7 +70,6 @@ type inferMappingCustomer struct {
 
 type inferMappingSubscription struct {
 	StripeID      string `json:"stripeId,omitempty"`
-	Customer      string `json:"customer,omitempty"`
 	CustomerEmail string `json:"customerEmail,omitempty"`
 	PriceKey      string `json:"priceKey,omitempty"`
 	Status        string `json:"status,omitempty"`
@@ -225,7 +224,6 @@ func buildSnapshotPayload(snap stripeSnapshot) inferMappingSnapshot {
 	for _, s := range snap.Subscriptions {
 		out.Subscriptions = append(out.Subscriptions, inferMappingSubscription{
 			StripeID:      s.StripeID,
-			Customer:      s.Customer,
 			CustomerEmail: s.CustomerEmail,
 			PriceKey:      s.PriceKey,
 			Status:        s.Status,

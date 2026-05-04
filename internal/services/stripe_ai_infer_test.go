@@ -27,9 +27,8 @@ func TestRealAIInferStripeMapping_HappyPath(t *testing.T) {
 		ObjectAlias:  "customer:{email}",
 	}
 	wantCustomer := stripeCustomerObjectSpec{
-		Alias:    "customer:{email}",
-		Source:   stripeSourceSpec{Table: "Account", MatchColumn: "email"},
-		Metadata: map[string]string{"seedmancer_managed": "true"},
+		Alias:  "customer:{email}",
+		Source: stripeSourceSpec{Table: "Account", MatchColumn: "email"},
 	}
 
 	var receivedAuth string
