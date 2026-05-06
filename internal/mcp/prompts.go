@@ -88,7 +88,7 @@ Steps:
 1. Call 'describe_schema' with ref=%q to confirm the tables/columns match expectations.
 2. Call 'generate_dataset' with prompt=%q, schemaRef=%q%s.
 3. After it returns, call 'describe_dataset' on the resulting dataset id to preview the generated rows.
-4. Optionally call 'sync_dataset' to publish the result to the connected Seedmancer account.
+4. Optionally call 'push_dataset' to publish the result to the connected Seedmancer account.
 
 Success criteria:
 - 'generate_dataset' returns with a non-empty Path and JobID.

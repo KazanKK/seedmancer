@@ -249,7 +249,7 @@ func runSchemasList(c *cli.Context) error {
 	if remoteFlag && remoteReachable {
 		ui.Title("Remote")
 		if len(remoteSchemas) == 0 {
-			ui.Info("No remote schemas yet. Run `seedmancer sync` after an export to create one.")
+			ui.Info("No remote schemas yet. Run `seedmancer push` after an export to create one.")
 		} else {
 			renderRemoteSchemaTable(remoteSchemas)
 		}
@@ -441,7 +441,7 @@ func runSchemasRename(c *cli.Context) error {
 			if errors.Is(err, utils.ErrMissingAPIToken) && !scope.explicit {
 				// Local-side worked; server update silently skipped.
 				if touched {
-					ui.Warn("Skipped remote rename — not signed in. Run `seedmancer login` to sync.")
+					ui.Warn("Skipped remote rename — not signed in. Run `seedmancer login` to push changes.")
 				}
 			} else {
 				return err

@@ -123,7 +123,7 @@ func setupLogging(logFile string) (func(), error) {
 // agent a short primer on what Seedmancer does. Keep it brief — long
 // prose just burns context; the details belong in the docs resources.
 const serverInstructions = `Seedmancer is a schema-first database seeding tool.
-It dumps Postgres schemas + data into content-addressed folders, syncs them
+It dumps Postgres schemas + data into content-addressed folders, pushes them
 to a cloud account, and restores them back on any target environment — the
 foundation of "reset the DB before each test run".
 
@@ -138,11 +138,11 @@ Workflow when the user wants test data:
   2. describe_schema — get the exact table and column names.
   3. generate_dataset_local — write a Go script, run it locally, no cloud needed.
   4. seed_database — Optional. If user wants to load the new dataset into the database.
-  5. sync_dataset — Optional. If user wants to sync the new dataset to the cloud.
+  5. push_dataset — Optional. If user wants to upload the new dataset to the cloud.
 
 Typical workflows:
   • Before running tests: call seed_database with the configured dataset id.
-  • Snapshot current state: export_database → optionally sync_dataset.
+  • Snapshot current state: export_database → optionally push_dataset.
   • Try new data (cloud):  generate_dataset with a prompt (requires API token + quota).
   • Try new data (local):  read seedmancer://docs/local-generation, write a Go script,
                            then call generate_dataset_local — no API, no quota needed.

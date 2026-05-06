@@ -45,7 +45,7 @@ Run this sequence once to set everything up:
    or quota is consumed. Read seedmancer://docs/local-generation for the contract.
 3. OR ` + "`generate_dataset`" + ` with a prompt — uses the Seedmancer cloud service
    (requires API token; consumes monthly quota).
-4. ` + "`sync_dataset`" + ` — optionally publish the result to your cloud account.
+4. ` + "`push_dataset`" + ` — optionally publish the result to your cloud account.
 
 ## Safety rails already enforced
 

@@ -1646,7 +1646,7 @@ func RunGenerateLocal(ctx context.Context, in GenerateLocalInput) (GenerateLocal
 	}, nil
 }
 
-// ─── sync ─────────────────────────────────────────────────────────────────────
+// ─── push (sync) ─────────────────────────────────────────────────────────────
 
 type SyncInput struct {
 	DatasetID string `json:"datasetId" jsonschema:"Dataset id to upload"`
@@ -1689,7 +1689,7 @@ func RunSync(ctx context.Context, in SyncInput) (SyncOutput, error) {
 	return SyncOutput{Dataset: datasetName, Schema: schema.FingerprintShort, ID: result.ID}, nil
 }
 
-// ─── fetch ────────────────────────────────────────────────────────────────────
+// ─── pull (fetch) ────────────────────────────────────────────────────────────
 
 type FetchInput struct {
 	DatasetID string `json:"datasetId" jsonschema:"Dataset id to download"`

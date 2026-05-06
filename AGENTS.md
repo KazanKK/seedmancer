@@ -6,7 +6,7 @@ this repository.
 ## What Seedmancer is
 
 Schema-first PostgreSQL seeding CLI. Given a database, it dumps the schema
-+ data into content-addressed folders, lets users sync datasets to a cloud
++ data into content-addressed folders, lets users push datasets to a cloud
 account, and restores them back on any target environment. The unit of
 reuse is a **dataset** (schema fingerprint + CSV files).
 
@@ -19,7 +19,7 @@ supports MCP, **use the tools instead of shelling out**:
 - `seed_database` instead of `seedmancer seed --id X --yes`
 - `list_datasets` / `describe_dataset` / `describe_schema` instead of
   parsing the CLI's human-readable output
-- `export_database`, `generate_dataset`, `sync_dataset`, `fetch_dataset`
+- `export_database`, `generate_dataset`, `push_dataset`, `pull_dataset`
   for the snapshot/generate/push/pull flow
 
 Call `login_info` first when you're unsure whether the host has an API

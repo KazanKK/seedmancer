@@ -82,7 +82,7 @@ func KeyValue(key, value string) {
 
 // PrintLoginHint renders the "how to sign in" guide shown whenever a command
 // cannot resolve an API token. Keeping this in one place guarantees every
-// command (generate, sync, fetch, list, schemas) shows the exact same copy
+// command (generate, push, pull, list, schemas) shows the exact same copy
 // and highlights `seedmancer login` as the recommended path.
 func PrintLoginHint() {
 	fmt.Fprintln(os.Stderr)

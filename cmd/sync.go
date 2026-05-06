@@ -3,6 +3,7 @@ package cmd
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -18,17 +19,18 @@ import (
 	"github.com/urfave/cli/v2"
 )
 
-// SyncCommand uploads a local dataset to the cloud.
+// PushCommand uploads a local dataset to the cloud.
 //
 // The server identifies the target schema from the fingerprint of the
 // zip's `schema.json`, so we never send a schema name — it's fully
 // derived. Dataset ids must be unique across local schemas; if the same
 // dataset id exists under two schemas, rename one via `seedmancer schemas
 // rename` first.
-func SyncCommand() *cli.Command {
+func PushCommand() *cli.Command {
 	return &cli.Command{
-		Name:  "sync",
-		Usage: "Upload a single local dataset to the cloud",
+		Name:    "push",
+		Aliases: []string{"sync"},
+		Usage:   "Upload a single local dataset to the cloud",
 		Description: "Zips the schema sidecars + CSVs for one local dataset and uploads\n" +
 			"them to your Seedmancer cloud account. The target schema is derived\n" +
 			"from schema.json's fingerprint — no need to pass a schema id.",
@@ -103,58 +105,29 @@ func syncOne(schema utils.LocalSchema, datasetDir, datasetName, baseURL, token s
 	}
 	sp.Stop(true, fmt.Sprintf("Compressed (%.1f MB)", float64(zipData.Len())/1024/1024))
 
+	ctx := context.Background()
+
 	sp = ui.StartSpinner("Uploading...")
-	q := url.Values{}
-	q.Set("name", datasetName)
-	apiURL := fmt.Sprintf("%s/v1.0/datasets/sync?%s", baseURL, q.Encode())
-	ui.Debug("POST %s", apiURL)
-
-	req, err := http.NewRequest("POST", apiURL, bytes.NewReader(zipData.Bytes()))
+	ui.Debug("POST %s/v1.0/datasets/sync/upload-url?name=%s", baseURL, datasetName)
+	uploadURLResp, err := requestUploadURL(ctx, token, baseURL, datasetName)
 	if err != nil {
 		sp.Stop(false, "Upload failed")
-		return fmt.Errorf("creating request: %v", err)
+		return err
 	}
-	req.Header.Set("Content-Type", "application/zip")
-	req.Header.Set("Authorization", utils.BearerAPIToken(token))
-	req.ContentLength = int64(zipData.Len())
 
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
+	if err := putToStorage(ctx, uploadURLResp.UploadURL, zipData); err != nil {
 		sp.Stop(false, "Upload failed")
-		return fmt.Errorf("uploading: %v", err)
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode == http.StatusUnauthorized {
-		sp.Stop(false, "Upload failed")
-		return utils.ErrInvalidAPIToken
-	}
-	if resp.StatusCode == http.StatusPaymentRequired {
-		sp.Stop(false, "Upload blocked")
-		return formatLimitError(body)
-	}
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		sp.Stop(false, "Upload failed")
-		return fmt.Errorf("server responded %s: %s", resp.Status, string(body))
+		return err
 	}
 	sp.Stop(true, "Uploaded")
 
-	var result struct {
-		ID               string `json:"id"`
-		Name             string `json:"name"`
-		SchemaID         string `json:"schemaId"`
-		Fingerprint      string `json:"fingerprint"`
-		FingerprintShort string `json:"fingerprintShort"`
-		SchemaCreated    bool   `json:"schemaCreated"`
-		Updated          bool   `json:"updated"`
-		FileCount        int    `json:"fileCount"`
+	sp = ui.StartSpinner("Processing...")
+	result, err := confirmUpload(ctx, token, baseURL, datasetName, uploadURLResp.Path)
+	if err != nil {
+		sp.Stop(false, "Processing failed")
+		return err
 	}
-	if err := json.Unmarshal(body, &result); err != nil || result.ID == "" {
-		// Non-fatal — the server returned 2xx, just print what we got.
-		ui.Success("Sync complete!")
-		return nil
-	}
+	sp.Stop(true, "Done")
 
 	verb := "Uploaded"
 	if result.Updated {
@@ -167,6 +140,100 @@ func syncOne(schema utils.LocalSchema, datasetDir, datasetName, baseURL, token s
 	fmt.Println()
 	ui.Info("View it at https://seedmancer.dev/dashboard/schemas")
 	return nil
+}
+
+// requestUploadURL calls POST /v1.0/datasets/sync/upload-url and returns
+// the presigned storage URL and staging path.
+func requestUploadURL(ctx context.Context, token, baseURL, datasetName string) (uploadURLResponse, error) {
+	q := url.Values{}
+	q.Set("name", datasetName)
+	endpoint := fmt.Sprintf("%s/v1.0/datasets/sync/upload-url?%s", baseURL, q.Encode())
+
+	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, nil)
+	if err != nil {
+		return uploadURLResponse{}, fmt.Errorf("creating upload-url request: %v", err)
+	}
+	req.Header.Set("Authorization", utils.BearerAPIToken(token))
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return uploadURLResponse{}, fmt.Errorf("requesting upload URL: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == http.StatusUnauthorized {
+		return uploadURLResponse{}, utils.ErrInvalidAPIToken
+	}
+	if resp.StatusCode == http.StatusPaymentRequired {
+		return uploadURLResponse{}, formatLimitError(body)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return uploadURLResponse{}, fmt.Errorf("server responded %s: %s", resp.Status, string(body))
+	}
+
+	var result uploadURLResponse
+	if err := json.Unmarshal(body, &result); err != nil || result.UploadURL == "" {
+		return uploadURLResponse{}, fmt.Errorf("parsing upload-url response: %v", err)
+	}
+	return result, nil
+}
+
+// putToStorage PUTs the zip bytes directly to the presigned storage URL.
+func putToStorage(ctx context.Context, signedURL string, zipData *bytes.Buffer) error {
+	req, err := http.NewRequestWithContext(ctx, "PUT", signedURL, bytes.NewReader(zipData.Bytes()))
+	if err != nil {
+		return fmt.Errorf("creating storage PUT request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/zip")
+	req.ContentLength = int64(zipData.Len())
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("uploading to storage: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		return fmt.Errorf("storage upload failed (HTTP %d)", resp.StatusCode)
+	}
+	return nil
+}
+
+// confirmUpload calls POST /v1.0/datasets/sync/confirm and returns the result.
+func confirmUpload(ctx context.Context, token, baseURL, datasetName, stagingPath string) (syncUploadResult, error) {
+	q := url.Values{}
+	q.Set("name", datasetName)
+	q.Set("path", stagingPath)
+	endpoint := fmt.Sprintf("%s/v1.0/datasets/sync/confirm?%s", baseURL, q.Encode())
+
+	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, nil)
+	if err != nil {
+		return syncUploadResult{}, fmt.Errorf("creating confirm request: %v", err)
+	}
+	req.Header.Set("Authorization", utils.BearerAPIToken(token))
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return syncUploadResult{}, fmt.Errorf("confirming upload: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == http.StatusUnauthorized {
+		return syncUploadResult{}, utils.ErrInvalidAPIToken
+	}
+	if resp.StatusCode == http.StatusPaymentRequired {
+		return syncUploadResult{}, formatLimitError(body)
+	}
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		return syncUploadResult{}, fmt.Errorf("server responded %s: %s", resp.Status, string(body))
+	}
+
+	var result syncUploadResult
+	if err := json.Unmarshal(body, &result); err != nil {
+		return syncUploadResult{}, fmt.Errorf("parsing confirm response: %v", err)
+	}
+	return result, nil
 }
 
 func newSchemaBadge(created bool) string {

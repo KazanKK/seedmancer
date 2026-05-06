@@ -64,10 +64,10 @@ func main() {
 	listCmd := cmd.ListCommand()
 	listCmd.Category = "Local"
 
-	syncCmd := cmd.SyncCommand()
-	syncCmd.Category = "Remote"
-	fetchCmd := cmd.FetchCommand()
-	fetchCmd.Category = "Remote"
+	pushCmd := cmd.PushCommand()
+	pushCmd.Category = "Remote"
+	pullCmd := cmd.PullCommand()
+	pullCmd.Category = "Remote"
 	schemasCmd := cmd.SchemasCommand()
 	schemasCmd.Category = "Remote"
 	schemasCmd.Hidden = true
@@ -80,15 +80,15 @@ func main() {
 
 	app := &cli.App{
 		Name:            "seedmancer",
-		Usage:           "Schema-first database seeding — export, AI-generate, sync, restore.",
+		Usage:           "Schema-first database seeding — export, AI-generate, push, pull, restore.",
 		HideHelpCommand: true, // every subcommand still has -h / --help
 		Description: "Seedmancer dumps your database schema + data into content-addressed\n" +
-			"schema folders and syncs datasets to the cloud so teammates can pull them back.\n\n" +
+			"schema folders and pushes datasets to the cloud so teammates can pull them back.\n\n" +
 			"Typical flow:\n" +
 			"  seedmancer init                     # one-time project setup\n" +
 			"  seedmancer export --id baseline     # dump schema + data to .seedmancer/\n" +
-			"  seedmancer sync  --id baseline      # upload to cloud\n" +
-			"  seedmancer fetch --id baseline      # (on another machine)\n" +
+			"  seedmancer push  --id baseline      # upload to cloud (alias: sync)\n" +
+			"  seedmancer pull  --id baseline      # download on another machine (alias: fetch)\n" +
 			"  seedmancer seed  --id baseline      # restore into DB",
 		Flags: []cli.Flag{
 			&cli.BoolFlag{
@@ -111,8 +111,8 @@ func main() {
 			generateLocalCmd,
 			seedCmd,
 			listCmd,
-			syncCmd,
-			fetchCmd,
+			pushCmd,
+			pullCmd,
 			schemasCmd,
 			mcpCmd,
 		},

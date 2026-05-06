@@ -149,7 +149,7 @@ func SchemaMetaPath(schemaDir string) string {
 
 // LocalDataset is one dataset folder under a schema, with its latest mtime so
 // callers can sort by recency. A dataset can be written by `export`,
-// `generate`, or `fetch` — all three land at `<schemaDir>/datasets/<name>/`.
+// `generate`, or `pull` — all three land at `<schemaDir>/datasets/<name>/`.
 type LocalDataset struct {
 	Name      string
 	UpdatedAt time.Time
@@ -172,7 +172,7 @@ type LocalSchema struct {
 	Datasets []LocalDataset
 	// max(schema.json mtime, newest dataset mtime). Drives sort order in
 	// `seedmancer list` so the most-recently-touched schema bubbles to the
-	// top, regardless of whether it was touched by export / generate / fetch.
+	// top, regardless of whether it was touched by export / generate / pull.
 	UpdatedAt time.Time
 }
 
@@ -452,7 +452,7 @@ func SchemaFiles(schemaDir string) ([]string, error) {
 
 // IsSchemaSidecarName reports whether the given filename is a schema-level
 // file (the per-schema JSON or a function / trigger SQL sidecar) rather than
-// a dataset payload. The same rule is shared by export, fetch, and sync so
+// a dataset payload. The same rule is shared by export, pull, and push so
 // files end up in the right folder regardless of entry point.
 func IsSchemaSidecarName(name string) bool {
 	if name == "schema.json" {

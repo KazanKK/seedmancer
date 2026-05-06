@@ -18,7 +18,7 @@ import (
 //   - DestructiveHint: tool can destroy or replace data (`*bool` because
 //     the default for non-read-only tools is `true`; we
 //     pin it explicitly to avoid ambiguity).
-//   - IdempotentHint:  same input → same end state (seed + fetch both
+//   - IdempotentHint:  same input → same end state (seed + pull both
 //     overwrite, so they qualify).
 //
 // We lean on generic AddTool + `jsonschema` struct tags on the Run*Input
@@ -215,8 +215,8 @@ func registerTools(s *mcp.Server) {
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
-		Name:        "sync_dataset",
-		Title:       "Sync dataset to cloud",
+		Name:        "push_dataset",
+		Title:       "Push dataset to cloud",
 		Description: "Upload a local dataset + its schema sidecars to the connected Seedmancer account.",
 		Annotations: &mcp.ToolAnnotations{DestructiveHint: falsePtr(), IdempotentHint: true},
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in cmd.SyncInput) (*mcp.CallToolResult, cmd.SyncOutput, error) {
@@ -225,8 +225,8 @@ func registerTools(s *mcp.Server) {
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
-		Name:        "fetch_dataset",
-		Title:       "Fetch dataset from cloud",
+		Name:        "pull_dataset",
+		Title:       "Pull dataset from cloud",
 		Description: "Download a remote dataset into the local schema-first layout; overwrites any existing folder.",
 		Annotations: &mcp.ToolAnnotations{DestructiveHint: truePtr(), IdempotentHint: true},
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in cmd.FetchInput) (*mcp.CallToolResult, cmd.FetchOutput, error) {

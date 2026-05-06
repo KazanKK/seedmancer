@@ -32,7 +32,7 @@ func Command() *cli.Command {
 		Name:  "mcp",
 		Usage: "Run Seedmancer as a Model Context Protocol server.",
 		Description: "Start an MCP server that exposes Seedmancer's tools (seed, export, " +
-			"generate, sync, …) to AI agents.\n\n" +
+			"generate, push, pull, …) to AI agents.\n\n" +
 			"Default transport is stdio, matching how Cursor and Claude Desktop spawn\n" +
 			"local MCP servers. Use --transport http for hosted setups.\n\n" +
 			"Important: stdio mode owns stdout for JSON-RPC; pass --log-file to see logs.",

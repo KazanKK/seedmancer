@@ -29,7 +29,7 @@ import (
 //
 // The `<fp-short>` folder name is derived from the schema.json fingerprint — two
 // exports against the same DB shape always land in the same folder, which keeps
-// repeated syncs idempotent.
+// repeated pushes idempotent.
 func ExportCommand() *cli.Command {
 	return &cli.Command{
 		Name:  "export",
@@ -223,7 +223,7 @@ func ExportCommand() *cli.Command {
 			ui.KeyValue("Dataset: ", datasetName)
 			ui.KeyValue("Path: ", datasetDir)
 			fmt.Println()
-			ui.Info("Next: `seedmancer sync --id %s`", datasetName)
+			ui.Info("Next: `seedmancer push --id %s`", datasetName)
 			return nil
 		},
 	}

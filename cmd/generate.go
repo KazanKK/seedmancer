@@ -206,7 +206,7 @@ func runGenerate(c *cli.Context) error {
 	ui.Success("Generated dataset → %s", outputDir)
 	ui.Info("%d CSV file(s): %s", len(csvNames), strings.Join(csvNames, ", "))
 	ui.Info("Run 'seedmancer seed --dataset-id %s' to import locally,", datasetName)
-	ui.Info("or 'seedmancer sync --dataset-id %s' to upload.", datasetName)
+	ui.Info("or 'seedmancer push --dataset-id %s' to upload.", datasetName)
 	return nil
 }
 

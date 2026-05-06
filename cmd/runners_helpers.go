@@ -15,7 +15,7 @@ import (
 	utils "github.com/KazanKK/seedmancer/internal/utils"
 )
 
-// These helpers mirror the HTTP flows used by the CLI sync/fetch/generate
+// These helpers mirror the HTTP flows used by the CLI push/pull/generate
 // actions, but without any spinners, stdout logging, or interactive
 // prompts. They exist to back the Run* functions that the MCP server
 // calls. Keeping them here instead of inline in runners.go keeps that
@@ -32,8 +32,108 @@ type syncUploadResult struct {
 	FileCount        int    `json:"fileCount"`
 }
 
-// syncDatasetUpload zips the schema sidecars + dataset CSVs and POSTs
-// them to /v1.0/datasets/sync. It is the quiet counterpart to syncOne.
+// uploadURLResponse is returned by POST /v1.0/datasets/sync/upload-url.
+type uploadURLResponse struct {
+	UploadURL string `json:"uploadUrl"`
+	Path      string `json:"path"`
+}
+
+// syncUploadPresigned uploads zipData via the three-step presigned URL flow:
+//  1. POST /v1.0/datasets/sync/upload-url  → receive { uploadUrl, path }
+//  2. PUT  uploadUrl                       → stream bytes directly to storage
+//  3. POST /v1.0/datasets/sync/confirm     → process ZIP + register dataset
+//
+// This bypasses the Vercel function body-size limit (≈4.5 MB) so datasets
+// of any size can be synced.
+func syncUploadPresigned(ctx context.Context, token, baseURL, datasetName string, zipData *bytes.Buffer) (syncUploadResult, error) {
+	// Step 1: request a presigned upload URL.
+	q1 := url.Values{}
+	q1.Set("name", datasetName)
+	uploadURLEndpoint := fmt.Sprintf("%s/v1.0/datasets/sync/upload-url?%s", baseURL, q1.Encode())
+
+	req1, err := http.NewRequestWithContext(ctx, "POST", uploadURLEndpoint, nil)
+	if err != nil {
+		return syncUploadResult{}, fmt.Errorf("creating upload-url request: %v", err)
+	}
+	req1.Header.Set("Authorization", utils.BearerAPIToken(token))
+
+	resp1, err := http.DefaultClient.Do(req1)
+	if err != nil {
+		return syncUploadResult{}, fmt.Errorf("requesting upload URL: %v", err)
+	}
+	defer resp1.Body.Close()
+
+	body1, _ := io.ReadAll(resp1.Body)
+	if resp1.StatusCode == http.StatusUnauthorized {
+		return syncUploadResult{}, utils.ErrInvalidAPIToken
+	}
+	if resp1.StatusCode == http.StatusPaymentRequired {
+		return syncUploadResult{}, formatLimitError(body1)
+	}
+	if resp1.StatusCode != http.StatusOK {
+		return syncUploadResult{}, fmt.Errorf("server responded %s: %s", resp1.Status, string(body1))
+	}
+
+	var uploadURLResp uploadURLResponse
+	if err := json.Unmarshal(body1, &uploadURLResp); err != nil || uploadURLResp.UploadURL == "" {
+		return syncUploadResult{}, fmt.Errorf("parsing upload-url response: %v", err)
+	}
+
+	// Step 2: PUT the zip directly to storage (presigned URL — no auth header).
+	req2, err := http.NewRequestWithContext(ctx, "PUT", uploadURLResp.UploadURL, bytes.NewReader(zipData.Bytes()))
+	if err != nil {
+		return syncUploadResult{}, fmt.Errorf("creating storage PUT request: %v", err)
+	}
+	req2.Header.Set("Content-Type", "application/zip")
+	req2.ContentLength = int64(zipData.Len())
+
+	resp2, err := http.DefaultClient.Do(req2)
+	if err != nil {
+		return syncUploadResult{}, fmt.Errorf("uploading to storage: %v", err)
+	}
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK && resp2.StatusCode != http.StatusCreated {
+		return syncUploadResult{}, fmt.Errorf("storage upload failed (HTTP %d)", resp2.StatusCode)
+	}
+
+	// Step 3: confirm — server parses the ZIP, resolves schema, and upserts the dataset row.
+	q3 := url.Values{}
+	q3.Set("name", datasetName)
+	q3.Set("path", uploadURLResp.Path)
+	confirmEndpoint := fmt.Sprintf("%s/v1.0/datasets/sync/confirm?%s", baseURL, q3.Encode())
+
+	req3, err := http.NewRequestWithContext(ctx, "POST", confirmEndpoint, nil)
+	if err != nil {
+		return syncUploadResult{}, fmt.Errorf("creating confirm request: %v", err)
+	}
+	req3.Header.Set("Authorization", utils.BearerAPIToken(token))
+
+	resp3, err := http.DefaultClient.Do(req3)
+	if err != nil {
+		return syncUploadResult{}, fmt.Errorf("confirming upload: %v", err)
+	}
+	defer resp3.Body.Close()
+
+	body3, _ := io.ReadAll(resp3.Body)
+	if resp3.StatusCode == http.StatusUnauthorized {
+		return syncUploadResult{}, utils.ErrInvalidAPIToken
+	}
+	if resp3.StatusCode == http.StatusPaymentRequired {
+		return syncUploadResult{}, formatLimitError(body3)
+	}
+	if resp3.StatusCode != http.StatusOK && resp3.StatusCode != http.StatusCreated {
+		return syncUploadResult{}, fmt.Errorf("server responded %s: %s", resp3.Status, string(body3))
+	}
+
+	var result syncUploadResult
+	if err := json.Unmarshal(body3, &result); err != nil {
+		return syncUploadResult{}, fmt.Errorf("parsing confirm response: %v", err)
+	}
+	return result, nil
+}
+
+// syncDatasetUpload zips the schema sidecars + dataset CSVs and uploads
+// them via the presigned URL flow. It is the quiet counterpart to syncOne.
 func syncDatasetUpload(ctx context.Context, token string, schema utils.LocalSchema, datasetDir, datasetName, baseURL string) (syncUploadResult, error) {
 	schemaFiles, err := utils.SchemaFiles(schema.Path)
 	if err != nil {
@@ -56,40 +156,7 @@ func syncDatasetUpload(ctx context.Context, token string, schema utils.LocalSche
 		return syncUploadResult{}, fmt.Errorf("compressing files: %v", err)
 	}
 
-	q := url.Values{}
-	q.Set("name", datasetName)
-	apiURL := fmt.Sprintf("%s/v1.0/datasets/sync?%s", baseURL, q.Encode())
-
-	req, err := http.NewRequestWithContext(ctx, "POST", apiURL, bytes.NewReader(zipData.Bytes()))
-	if err != nil {
-		return syncUploadResult{}, fmt.Errorf("creating request: %v", err)
-	}
-	req.Header.Set("Content-Type", "application/zip")
-	req.Header.Set("Authorization", utils.BearerAPIToken(token))
-	req.ContentLength = int64(zipData.Len())
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return syncUploadResult{}, fmt.Errorf("uploading: %v", err)
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode == http.StatusUnauthorized {
-		return syncUploadResult{}, utils.ErrInvalidAPIToken
-	}
-	if resp.StatusCode == http.StatusPaymentRequired {
-		return syncUploadResult{}, formatLimitError(body)
-	}
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		return syncUploadResult{}, fmt.Errorf("server responded %s: %s", resp.Status, string(body))
-	}
-
-	var result syncUploadResult
-	if err := json.Unmarshal(body, &result); err != nil {
-		return syncUploadResult{}, fmt.Errorf("parsing sync response: %v", err)
-	}
-	return result, nil
+	return syncUploadPresigned(ctx, token, baseURL, datasetName, zipData)
 }
 
 type fetchDownloadResult struct {

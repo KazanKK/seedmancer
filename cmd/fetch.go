@@ -41,11 +41,12 @@ type datasetListResponse struct {
 	Datasets []datasetAPI `json:"datasets"`
 }
 
-func FetchCommand() *cli.Command {
+func PullCommand() *cli.Command {
 	return &cli.Command{
-		Name:  "fetch",
-		Usage: "Download a dataset from the cloud into local storage",
-		Description: "Downloads one previously-synced dataset and unpacks it under\n" +
+		Name:    "pull",
+		Aliases: []string{"fetch"},
+		Usage:   "Download a dataset from the cloud into local storage",
+		Description: "Downloads one cloud-backed dataset and unpacks it under\n" +
 			"<storagePath>/schemas/<fp-short>/datasets/<name>/, matching the\n" +
 			"layout used by `seedmancer export` so `seedmancer seed` can load\n" +
 			"it straight away.",
@@ -91,17 +92,17 @@ func FetchCommand() *cli.Command {
 			}
 
 			label := displayLabelForSchema(match.Schema)
-			sp := ui.StartSpinner(fmt.Sprintf("Fetching %s  (schema %s)...", datasetName, label))
+			sp := ui.StartSpinner(fmt.Sprintf("Pulling %s  (schema %s)...", datasetName, label))
 
 			downloadURL, err := getDownloadURL(baseURL, token, match.ID)
 			if err != nil {
-				sp.Stop(false, "Fetch failed")
+				sp.Stop(false, "Pull failed")
 				return err
 			}
 
 			extracted, err := downloadAndExtractZip(downloadURL, outputDir)
 			if err != nil {
-				sp.Stop(false, "Fetch failed")
+				sp.Stop(false, "Pull failed")
 				return err
 			}
 
@@ -113,11 +114,11 @@ func FetchCommand() *cli.Command {
 			schemaDir := filepath.Dir(filepath.Dir(outputDir))
 			lifted, err := liftSchemaSidecars(outputDir, schemaDir)
 			if err != nil {
-				sp.Stop(false, "Fetch failed")
+				sp.Stop(false, "Pull failed")
 				return fmt.Errorf("placing schema files: %v", err)
 			}
 			ui.Debug("Lifted %d schema sidecar(s) into %s", lifted, schemaDir)
-			sp.Stop(true, fmt.Sprintf("Fetched %s → %s (%d files)", datasetName, outputDir, len(extracted)))
+			sp.Stop(true, fmt.Sprintf("Pulled %s → %s (%d files)", datasetName, outputDir, len(extracted)))
 
 			return nil
 		},
