@@ -6,9 +6,10 @@ package mcp
 
 const docQuickstart = `# Seedmancer quickstart (for agents)
 
-Seedmancer is a Postgres seeding tool. Its unit of reuse is a *dataset*:
-a snapshot of CSVs + a JSON schema sidecar, content-addressed by the
-schema fingerprint.
+Seedmancer is a Postgres seeding tool. Test data lives in **scenarios**
+(slash-separated paths like ` + "`basic`" + ` or ` + "`billing/pro`" + `). Every export creates
+a new immutable **revision** (` + "`r001`" + `, ` + "`r002`" + `, …) under the scenario.
+Pointers ` + "`latest`" + ` and ` + "`stable`" + ` decide which revision a seed loads.
 
 ## First time in a new project
 
@@ -17,35 +18,50 @@ Run this sequence once to set everything up:
 1. ` + "`init_project`" + ` — creates seedmancer.yaml, .seedmancer/, and writes agent
    rule files (.cursor/rules/seedmancer.mdc + CLAUDE.md) so future AI
    conversations in this project automatically use Seedmancer.
-2. ` + "`export_database`" + ` — captures the current schema + data as a baseline dataset.
+2. ` + "`export_database scenario=\"basic\"`" + ` — captures the current schema + data as
+   ` + "`basic/r001`" + ` and advances pointers.latest.
 3. ` + "`install_agent_rules`" + ` — if adopting Seedmancer in an existing project that
    was not created with init_project, run this to write the rule files manually.
 
 ## Typical loop (project already set up)
 
-1. ` + "`list_schemas`" + ` — check whether a schema has been exported.
-   - **If no schemas exist**: call ` + "`export_database`" + ` first. The database is already
-     running (it is in seedmancer.yaml). This creates the schema.json that all
-     other tools depend on.
+1. ` + "`list_datasets`" + ` — see existing scenarios + their pointers.
+   - **If no scenarios exist**: call ` + "`export_database`" + ` first with a scenario
+     name. The database is already running (configured in seedmancer.yaml).
 2. ` + "`describe_schema`" + ` — get the exact table and column names.
-3. ` + "`generate_dataset_local`" + ` — write a Go script that produces CSVs locally.
-   For partial updates (e.g. "regenerate only products"), pass
-   ` + "`inherit: \"baseline\"`" + ` so the result is a complete, seedable dataset.
+3. ` + "`generate_dataset_local scenario=\"<new>\" inherit=\"<base>\"`" + ` — write a Go
+   script that produces CSVs locally. Inherit pre-fills the new revision from
+   the base scenario; the script overwrites only the table(s) it cares about.
    Read seedmancer://docs/local-generation for the contract.
-4. ` + "`seed_database`" + ` with ` + "`yes: true`" + ` — resets the env and loads the dataset.
+4. ` + "`seed_database scenario=\"<new>\" yes=true`" + ` — loads the latest revision
+   into the target env.
 5. Run the actual test command outside MCP (e.g. Playwright, pytest).
+
+## Pinning for CI
+
+Once a revision is known-good, pin it as stable:
+
+1. ` + "`pin_scenario scenario=\"basic\"`" + ` — points pointers.stable at the current latest.
+2. CI runs ` + "`seed_database scenario=\"basic\" useStable=true`" + ` to lock onto
+   that revision regardless of newer exports.
+
+## Schema drift
+
+If the live DB schema changes, ` + "`seed_database`" + ` refuses to load mismatched
+revisions unless ` + "`force: true`" + ` is set. Use ` + "`check_scenario`" + ` to inspect
+the diff and ` + "`export_database`" + ` again to create a new compatible revision.
 
 ## Need new data?
 
-1. ` + "`list_datasets`" + ` — check if an existing dataset has ` + "`hasGeneratorScript: true`" + `.
+1. ` + "`list_history scenario=\"<scenario>\"`" + ` — see existing revisions.
+2. ` + "`describe_dataset`" + ` — check if an existing dataset has ` + "`hasGeneratorScript: true`" + `.
    If so, use ` + "`get_dataset_script`" + ` to retrieve the source and **modify it** instead
-   of writing a new script from scratch. The saved script already has the correct
-   column names, FK order, and enum values.
-2. ` + "`generate_dataset_local`" + ` — pass the (modified) script and a ` + "`schemaRef`" + `; no cloud API
-   or quota is consumed. Read seedmancer://docs/local-generation for the contract.
-3. OR ` + "`generate_dataset`" + ` with a prompt — uses the Seedmancer cloud service
-   (requires API token; consumes monthly quota).
-4. ` + "`push_dataset`" + ` — optionally publish the result to your cloud account.
+   of writing a new script from scratch.
+3. ` + "`generate_dataset_local`" + ` with the modified script — creates a fresh
+   revision under the same scenario.
+4. OR ` + "`generate_dataset`" + ` with a prompt — uses the Seedmancer cloud service.
+5. ` + "`push_dataset scenario=\"<scenario>\"`" + ` — optionally publish the latest
+   revision to your cloud account.
 
 ## Safety rails already enforced
 
@@ -92,7 +108,7 @@ export default async function globalSetup() {
   if (process.env.SEEDMANCER_RESET_DATABASE === "false") return;
   const res = spawnSync(
     "seedmancer",
-    ["seed", "--dataset-id", "api-test", "--yes"],
+    ["seed", "api-test", "--stable", "--yes"],
     { stdio: "inherit" },
   );
   if (res.status !== 0) throw new Error("seedmancer seed failed");
@@ -103,7 +119,9 @@ export default async function globalSetup() {
 
 Prefer the ` + "`seed_database`" + ` tool over shelling out. Pass:
 
-- ` + "`datasetId: \"api-test\"`" + ` (or whichever dataset you keep for tests).
+- ` + "`scenario: \"api-test\"`" + ` (the scenario you keep for tests).
+- ` + "`useStable: true`" + ` to load the pinned revision (CI should never seed an
+  un-pinned scenario).
 - ` + "`yes: true`" + ` so the prod-guard is acknowledged but not bypassed.
 
 On success the tool returns ` + "`anyError: false`" + `; only then should the
@@ -136,23 +154,23 @@ step will take time proportional to index rebuilding on the target DB.
 - **One-off "I just need to insert this row" hacks.** Use plain SQL or your
   ORM seeders.
 
-## Recommended workflow: ` + "`inherit`" + ` from baseline
+## Recommended workflow: ` + "`inherit`" + ` from a base scenario
 
 The ` + "`inherit`" + ` parameter is the safe default for any partial generation.
-It pre-fills the new dataset with all CSVs from a base dataset, lets your
-script overwrite only the tables it cares about, and **automatically clears
-any descendant table that FKs to an overwritten table** so seeding can never
-produce orphan foreign keys.
+It pre-fills the new revision with all CSVs from the base scenario's latest
+revision, lets your script overwrite only the tables it cares about, and
+**automatically clears any descendant table that FKs to an overwritten table**
+so seeding can never produce orphan foreign keys.
 
-1. ` + "`list_schemas`" + ` — confirm a schema exists. If not, ` + "`export_database`" + `
-   first to capture the live DB as a ` + "`baseline`" + ` dataset.
+1. ` + "`list_datasets`" + ` — confirm a base scenario exists. If not,
+   ` + "`export_database scenario=\"basic\"`" + ` to capture the live DB.
 2. ` + "`describe_schema`" + ` — get exact table and column names.
-3. ` + "`generate_dataset_local`" + ` with ` + "`inherit: \"baseline\"`" + ` — write a tiny script that
-   only emits the table(s) you actually want to change.
-4. ` + "`seed_database`" + ` with ` + "`yes: true`" + `.
+3. ` + "`generate_dataset_local scenario=\"<new>\" inherit=\"basic\"`" + ` — write a
+   tiny script that only emits the table(s) you actually want to change.
+4. ` + "`seed_database scenario=\"<new>\" yes=true`" + `.
 
-**No more "gen vs merged" datasets.** A single inherit call produces a complete,
-seedable dataset.
+**A single inherit call produces a complete, seedable revision** — no manual
+merge step.
 
 ## Go script contract
 
@@ -203,15 +221,14 @@ Call:
 
 ` + "```" + `
 generate_dataset_local
-  schemaRef: <fp>
-  datasetId: products-v2
-  inherit: baseline
+  scenario: products/v2
+  inherit: basic
   script: <the Go source above>
 ` + "```" + `
 
-The result has full ` + "`brands`" + `/` + "`categories`" + ` from baseline, the new ` + "`products`" + `,
-and header-only ` + "`product_images`" + `/` + "`inventory`" + `/` + "`order_items`" + ` so the seed never
-produces orphan FKs.
+The result has full ` + "`brands`" + `/` + "`categories`" + ` from the basic scenario, the new
+` + "`products`" + `, and header-only ` + "`product_images`" + `/` + "`inventory`" + `/` + "`order_items`" + ` so
+the seed never produces orphan FKs.
 
 ## Common pitfalls
 
@@ -220,19 +237,22 @@ produces orphan FKs.
 - **No ` + "`csv.Writer.Flush()`" + ` call**: buffered rows won't reach the file without ` + "`Flush()`" + `.
 - **External imports**: the script runs without a module — only stdlib is available. Third-party packages are not supported.
 - **Forgetting ` + "`inherit`" + `**: a partial generation without ` + "`inherit`" + ` produces a thin
-  dataset that, when seeded, wipes every table the script didn't write. Always pass
-  ` + "`inherit: \"baseline\"`" + ` (or the most relevant existing dataset) for partial updates.
+  revision that, when seeded, wipes every table the script didn't write. Always pass
+  ` + "`inherit: \"<base-scenario>\"`" + ` for partial updates.
 
 ## Incremental edits to existing generated data
 
-Every time ` + "`generate_dataset_local`" + ` succeeds, the source script is stored privately.
-Before writing a script from scratch:
+Every time ` + "`generate_dataset_local`" + ` succeeds, the source script is stored privately
+under the resulting ` + "`scenario@rNNN`" + `. Before writing a script from scratch:
 
-1. ` + "`describe_dataset datasetId=<id>`" + ` — if ` + "`hasGeneratorScript: true`" + `, a saved script exists.
-2. ` + "`get_dataset_script datasetId=<id>`" + ` — returns the full source as ` + "`script`" + `.
-3. Modify the source (bump row counts, change values, add columns, …).
-4. ` + "`generate_dataset_local script=<modified> schemaRef=<fp> datasetId=<new-id> inherit=baseline`" + `.
-5. ` + "`seed_database datasetId=<new-id> yes=true`" + `.
+1. ` + "`list_history scenario=<scenario>`" + ` — see existing revisions.
+2. ` + "`describe_dataset datasetId=<scenario@rNNN>`" + ` — if ` + "`hasGeneratorScript: true`" + `,
+   a saved script exists.
+3. ` + "`get_dataset_script`" + ` — returns the full source as ` + "`script`" + `.
+4. Modify the source.
+5. ` + "`generate_dataset_local script=<modified> scenario=<scenario> inherit=<base>`" + ` —
+   creates a new ` + "`rNNN`" + ` revision.
+6. ` + "`seed_database scenario=<scenario> yes=true`" + `.
 `
 
 const docSupabaseAuthConnector = `# Supabase Auth service connector (Pro)

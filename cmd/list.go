@@ -3,13 +3,12 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
-	"time"
+	"strings"
 
+	"github.com/KazanKK/seedmancer/internal/scenario"
 	"github.com/KazanKK/seedmancer/internal/ui"
 	utils "github.com/KazanKK/seedmancer/internal/utils"
 
@@ -17,208 +16,150 @@ import (
 	"github.com/urfave/cli/v2"
 )
 
-// listEntry is one row in the rendered table — a dataset scoped under a
-// schema's 12-char fingerprint prefix. Display names (if any) are the
-// domain of `seedmancer schemas list`; `seedmancer list` uses the
-// fingerprint everywhere so local + remote columns line up.
-//
-// UpdatedAt is the machine-readable ISO-8601 timestamp (preserved for JSON
-// consumers); Updated is the humanized relative string shown in the TTY
-// table. updatedAtTime is an internal-only parsed timestamp used for
-// sorting; it's excluded from JSON output.
+// listEntry is one row in the list output. Each row corresponds to a
+// scenario that has at least one revision (or a manifest, in the case
+// of an empty scenario).
 type listEntry struct {
-	Schema        string    `json:"schema"`
-	Dataset       string    `json:"dataset"`
-	SourceEnv     string    `json:"sourceEnv,omitempty"`
-	FileCount     int       `json:"fileCount,omitempty"`
-	UpdatedAt     string    `json:"updatedAt,omitempty"`
-	Updated       string    `json:"-"`
-	updatedAtTime time.Time `json:"-"`
+	Scenario string `json:"scenario"`
+	Latest   string `json:"latest,omitempty"`
+	Stable   string `json:"stable,omitempty"`
+	Schema   string `json:"schema,omitempty"`
+	Updated  string `json:"updated,omitempty"`
+	Services string `json:"services,omitempty"`
 }
 
-type listOutput struct {
-	Local  []listEntry `json:"local,omitempty"`
-	Remote []listEntry `json:"remote,omitempty"`
-}
-
+// ListCommand prints every scenario known on disk, grouped by name with
+// its latest/stable revision pointers and schema fingerprint.
 func ListCommand() *cli.Command {
 	return &cli.Command{
 		Name:  "list",
-		Usage: "List datasets, grouped by schema fingerprint",
-		Description: "Shows one row per dataset with its schema fingerprint and last-updated\n" +
-			"time, newest first. Both local and remote datasets are shown.\n\n" +
-			"To see schema-level details (display names, sizes, table counts)\n" +
-			"use `seedmancer schemas list` instead.",
+		Usage: "List scenarios and their pointers",
+		Description: "Walks <storagePath>/scenarios/** and prints a table with one row\n" +
+			"per scenario: latest revision, stable revision, schema fingerprint,\n" +
+			"updated time, and the service connectors snapshotted with the\n" +
+			"latest revision.",
 		ArgsUsage: " ",
 		Flags: []cli.Flag{
-			&cli.StringFlag{
-				Name:  "token",
-				Usage: "API token (falls back to ~/.seedmancer/credentials, then SEEDMANCER_API_TOKEN)",
+			&cli.BoolFlag{
+				Name:  "json",
+				Usage: "Emit JSON for CI/CD pipelines",
 			},
 		},
 		Action: func(c *cli.Context) error {
-			// Local
-			entries, err := listLocalEntries()
-			if err != nil {
-				ui.Title("Local")
-				ui.Warn("%v", err)
-			} else {
-				ui.Title("Local")
-				if len(entries) == 0 {
-					ui.Info("No local schemas found. Run `seedmancer export` first.")
-				} else {
-					renderTable(entries)
-				}
-			}
-
-			// Remote — show a login hint when unauthenticated but keep going
-			token, tokenErr := utils.ResolveAPIToken(c.String("token"))
-			if tokenErr != nil {
-				ui.Title("Remote")
-				ui.PrintLoginHint()
-				return nil
-			}
-
-			remoteEntries, err := listRemoteEntries(token)
+			entries, badManifests, err := collectListEntries()
 			if err != nil {
 				return err
 			}
-			ui.Title("Remote")
-			if len(remoteEntries) == 0 {
-				ui.Info("No remote schemas found.")
-			} else {
-				renderTable(remoteEntries)
+			if c.Bool("json") {
+				return outputJSON(struct {
+					Scenarios []listEntry            `json:"scenarios"`
+					BadPaths  map[string]string      `json:"badPaths,omitempty"`
+				}{Scenarios: entries, BadPaths: stringifyBadPaths(badManifests)})
 			}
-
+			ui.Title("Scenarios")
+			if len(entries) == 0 {
+				ui.Info("No scenarios yet. Run `seedmancer export <scenario>` to create one.")
+				return nil
+			}
+			renderScenarioTable(entries)
+			for path, err := range badManifests {
+				ui.Warn("scenario %q has a corrupt manifest: %v", path, err)
+			}
 			return nil
 		},
 	}
 }
 
-func listLocalEntries() ([]listEntry, error) {
+// collectListEntries walks the scenarios root and returns one row per
+// scenario plus any unreadable manifests so the caller can warn the user.
+func collectListEntries() ([]listEntry, map[string]error, error) {
 	configPath, err := utils.FindConfigFile()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-
-	projectRoot := filepath.Dir(configPath)
 	cfg, err := utils.LoadConfig(configPath)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-
-	schemas, err := utils.ListLocalSchemas(projectRoot, cfg.StoragePath)
+	projectRoot := filepath.Dir(configPath)
+	paths, badManifests, err := scenario.WalkScenarios(projectRoot, cfg.StoragePath)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-
-	var entries []listEntry
-	for _, s := range schemas {
-		if len(s.Datasets) == 0 {
-			entries = append(entries, listEntry{
-				Schema:        s.FingerprintShort,
-				Dataset:       "—",
-				UpdatedAt:     s.UpdatedAt.Format(time.RFC3339),
-				Updated:       utils.HumanizeAgo(s.UpdatedAt),
-				updatedAtTime: s.UpdatedAt,
-			})
+	out := make([]listEntry, 0, len(paths))
+	for _, p := range paths {
+		entry, entryErr := buildListEntry(projectRoot, cfg.StoragePath, p)
+		if entryErr != nil {
+			badManifests[p] = entryErr
 			continue
 		}
-		for _, d := range s.Datasets {
-			meta := utils.ReadDatasetMeta(utils.DatasetPath(filepath.Dir(configPath), cfg.StoragePath, s.FingerprintShort, d.Name))
-			entries = append(entries, listEntry{
-				Schema:        s.FingerprintShort,
-				Dataset:       d.Name,
-				SourceEnv:     meta.SourceEnv,
-				UpdatedAt:     d.UpdatedAt.Format(time.RFC3339),
-				Updated:       utils.HumanizeAgo(d.UpdatedAt),
-				updatedAtTime: d.UpdatedAt,
-			})
-		}
+		out = append(out, entry)
 	}
-	return entries, nil
+	return out, badManifests, nil
 }
 
-func listRemoteEntries(token string) ([]listEntry, error) {
-	baseURL := utils.GetBaseURL()
-	reqURL := fmt.Sprintf("%s/v1.0/datasets", baseURL)
-	ui.Debug("GET %s", reqURL)
-
-	req, err := http.NewRequest("GET", reqURL, nil)
+func buildListEntry(projectRoot, storagePath, scenarioPath string) (listEntry, error) {
+	scenarioDir := scenario.ScenarioDir(projectRoot, storagePath, scenarioPath)
+	manifest, err := scenario.ReadManifest(scenarioDir)
 	if err != nil {
-		return nil, fmt.Errorf("creating request: %v", err)
+		return listEntry{}, err
 	}
-	req.Header.Set("Authorization", utils.BearerAPIToken(token))
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("making request: %v", err)
+	pointers, _ := scenario.ReadPointers(scenarioDir)
+	entry := listEntry{
+		Scenario: scenarioPath,
+		Latest:   pointers.Latest,
+		Stable:   pointers.Stable,
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusUnauthorized {
-		return nil, utils.ErrInvalidAPIToken
+	if !manifest.UpdatedAt.IsZero() {
+		entry.Updated = utils.HumanizeAgo(manifest.UpdatedAt)
 	}
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API request failed: %s - %s", resp.Status, string(body))
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("reading response body: %v", err)
-	}
-
-	var dsResp datasetListResponse
-	if err := json.Unmarshal(body, &dsResp); err != nil {
-		return nil, fmt.Errorf("parsing response JSON: %v", err)
-	}
-
-	var entries []listEntry
-	for _, ds := range dsResp.Datasets {
-		// Server-provided ISO-8601 strings → parse once so we can sort, then
-		// keep the original string for JSON consumers. Unparseable timestamps
-		// fall back to the zero time, which sorts to the bottom.
-		t, _ := time.Parse(time.RFC3339, ds.UpdatedAt)
-		e := listEntry{
-			Dataset:       ds.Name,
-			FileCount:     ds.FileCount,
-			UpdatedAt:     ds.UpdatedAt,
-			Updated:       utils.HumanizeAgo(t),
-			updatedAtTime: t,
+	if pointers.Latest != "" {
+		revDir := scenario.RevisionDir(projectRoot, storagePath, scenarioPath, pointers.Latest)
+		if rev, err := scenario.ReadRevisionManifest(revDir); err == nil {
+			entry.Schema = utils.FingerprintShort(rev.SchemaFingerprint)
+			entry.Services = strings.Join(rev.Services, ",")
 		}
-		if ds.Schema != nil {
-			e.Schema = ds.Schema.FingerprintShort
-		} else {
-			e.Schema = "(orphan)"
-		}
-		entries = append(entries, e)
 	}
-	// Newest first — the whole point of this command is "what did I just do?".
-	sort.SliceStable(entries, func(i, j int) bool {
-		if entries[i].updatedAtTime.Equal(entries[j].updatedAtTime) {
-			return entries[i].Dataset < entries[j].Dataset
-		}
-		return entries[i].updatedAtTime.After(entries[j].updatedAtTime)
-	})
-	return entries, nil
+	return entry, nil
 }
 
-func renderTable(entries []listEntry) {
+func renderScenarioTable(entries []listEntry) {
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Scenario < entries[j].Scenario })
 	table := tablewriter.NewWriter(os.Stdout)
-	table.SetHeader([]string{"Schema ID", "Dataset ID", "Source", "Updated"})
+	table.SetHeader([]string{"Scenario", "Latest", "Stable", "Schema", "Updated", "Services"})
 	table.SetBorder(false)
 	table.SetColumnSeparator("  ")
 	table.SetHeaderAlignment(tablewriter.ALIGN_LEFT)
 	table.SetAlignment(tablewriter.ALIGN_LEFT)
 	for _, e := range entries {
-		src := e.SourceEnv
-		if src == "" {
-			src = "—"
-		}
-		table.Append([]string{e.Schema, e.Dataset, src, e.Updated})
+		table.Append([]string{
+			e.Scenario,
+			defaultDash(e.Latest),
+			defaultDash(e.Stable),
+			defaultDash(e.Schema),
+			defaultDash(e.Updated),
+			defaultDash(e.Services),
+		})
 	}
 	table.Render()
+}
+
+func defaultDash(s string) string {
+	if strings.TrimSpace(s) == "" {
+		return "—"
+	}
+	return s
+}
+
+func stringifyBadPaths(in map[string]error) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v.Error()
+	}
+	return out
 }
 
 func outputJSON(v interface{}) error {
@@ -226,3 +167,14 @@ func outputJSON(v interface{}) error {
 	enc.SetIndent("", "  ")
 	return enc.Encode(v)
 }
+
+// listLocalEntries kept for the MCP runner; returns the same scenarios as
+// the table view.
+func listLocalEntries() ([]listEntry, error) {
+	entries, _, err := collectListEntries()
+	return entries, err
+}
+
+// silence unused-import warning when `fmt` isn't needed by stub paths.
+var _ = fmt.Sprintf
+

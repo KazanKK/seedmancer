@@ -1,54 +1,53 @@
 package cmd
 
 import (
-	"errors"
+	"context"
 	"fmt"
 	"io"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
-	db "github.com/KazanKK/seedmancer/database"
-	svc "github.com/KazanKK/seedmancer/internal/services"
 	"github.com/KazanKK/seedmancer/internal/ui"
-	utils "github.com/KazanKK/seedmancer/internal/utils"
 
 	"github.com/urfave/cli/v2"
 )
 
-// ExportCommand dumps the current database into a fingerprint-keyed folder.
+// ExportCommand dumps the current database into a brand-new revision of
+// the named scenario.
 //
-// Layout after a successful export:
+// On-disk layout after a successful export:
 //
 //	<storagePath>/schemas/<fp-short>/
-//	  ├── schema.json              # source of truth; fingerprint is SHA-256 of this
-//	  ├── *_func.sql / *_trigger.sql  (schema-level sidecars)
-//	  └── datasets/<name>/*.csv    # per-dataset payload
+//	  schema.json                   # source of truth for fingerprint
+//	  *_func.sql / *_trigger.sql    # function/trigger sidecars
 //
-// The `<fp-short>` folder name is derived from the schema.json fingerprint — two
-// exports against the same DB shape always land in the same folder, which keeps
-// repeated pushes idempotent.
+//	<storagePath>/scenarios/<scenario>/
+//	  manifest.json                 # createdAt/updatedAt/latest/stable
+//	  pointers.json                 # { latest, stable }
+//	  revisions/<rNNN>/
+//	    manifest.json               # rev id, schema fp, source, tables, ...
+//	    data/<table>.csv            # CSV payload + service sidecars
+//
+// Every export creates a new immutable revision. There is no overwrite
+// path — the previous revisions stay on disk untouched and `pointers.latest`
+// flips to the freshly created one.
 func ExportCommand() *cli.Command {
 	return &cli.Command{
-		Name:  "export",
-		Usage: "Export current database schema and data as a dataset",
-		Description: "Dumps the current database into a content-addressed folder under\n" +
-			"<storagePath>/schemas/<fp-short>/. The folder name is derived from\n" +
-			"the SHA-256 fingerprint of schema.json, so two exports with the\n" +
-			"same shape always land in the same schema folder.\n\n" +
-			"Layout after a successful export:\n" +
-			"  <storagePath>/schemas/<fp-short>/\n" +
-			"    schema.json                         (source of truth)\n" +
-			"    *_func.sql / *_trigger.sql         (sidecars)\n" +
-			"    datasets/<name>/*.csv               (per-dataset rows)",
-		ArgsUsage: " ",
+		Name:      "export",
+		Usage:     "Export current database state as a new revision of a scenario",
+		ArgsUsage: "<scenario>",
+		Description: "Dumps the current database schema + data into a new revision of\n" +
+			"the given scenario. Scenario names may be nested with `/`:\n\n" +
+			"  seedmancer export basic\n" +
+			"  seedmancer export billing/pro\n" +
+			"  seedmancer export checkout/payment/failed\n\n" +
+			"Each export creates a new revision (r001, r002, ...) under\n" +
+			"<storagePath>/scenarios/<scenario>/revisions/. Previous revisions\n" +
+			"are never overwritten; the scenario's `latest` pointer always\n" +
+			"points to the most recent export.",
 		Flags: []cli.Flag{
-			&cli.StringFlag{
-				Name:  "id",
-				Usage: "Dataset id for the new dump (defaults to \"baseline\" — matches the docs and `--inherit baseline`)",
-			},
 			&cli.StringFlag{
 				Name:    "env",
 				Aliases: []string{"e"},
@@ -59,12 +58,6 @@ func ExportCommand() *cli.Command {
 				Usage: "Source database URL (ad-hoc override; takes precedence over --env)",
 			},
 			&cli.BoolFlag{
-				Name:    "force",
-				Aliases: []string{"y"},
-				Usage:   "Overwrite an existing dataset without confirmation",
-				Value:   false,
-			},
-			&cli.BoolFlag{
 				Name:  "no-services",
 				Usage: "Skip 3rd-party service connector exports (Supabase Auth, etc.)",
 			},
@@ -73,157 +66,48 @@ func ExportCommand() *cli.Command {
 				Usage: "Skip backend AI inference for service connector mapping (Stripe externalIdResolution)",
 			},
 			&cli.StringFlag{
+				Name:  "description",
+				Usage: "Optional human-readable description stored in the revision manifest",
+			},
+			&cli.StringFlag{
 				Name:  "token",
 				Usage: "API token for plan checks (falls back to ~/.seedmancer/credentials, then SEEDMANCER_API_TOKEN)",
 			},
 		},
 		Action: func(c *cli.Context) error {
-			configPath, err := utils.FindConfigFile()
+			scenarioArg := strings.TrimSpace(c.Args().First())
+			if scenarioArg == "" {
+				return fmt.Errorf("usage: seedmancer export <scenario>")
+			}
+
+			out, err := RunExport(c.Context, ExportInput{
+				Scenario:    scenarioArg,
+				Env:         c.String("env"),
+				DBURL:       c.String("db-url"),
+				NoServices:  c.Bool("no-services"),
+				NoAIInfer:   c.Bool("no-ai-infer"),
+				Token:       c.String("token"),
+				Description: c.String("description"),
+			})
 			if err != nil {
 				return err
-			}
-			projectRoot := filepath.Dir(configPath)
-
-			cfg, err := utils.LoadConfig(configPath)
-			if err != nil {
-				return err
-			}
-
-			target, err := resolveSingleDB(c, cfg)
-			if err != nil {
-				return err
-			}
-			dbURL := target.DatabaseURL
-			ui.Step("using env: %s", targetDisplay(target))
-
-			datasetName := strings.TrimSpace(c.String("id"))
-			if datasetName == "" {
-				// Default to a timestamp so repeated exports don't silently
-				// overwrite each other. Use "baseline" explicitly when you want
-				// the canonical "reset to this point" snapshot.
-				datasetName = time.Now().Format("20060102150405")
-				ui.Info("Using default dataset id: %s (override with --id)", datasetName)
-			}
-			datasetName = utils.SanitizeDatasetSegment(datasetName)
-
-			manager, normalizedURL, err := db.NewManager(dbURL)
-			if err != nil {
-				return err
-			}
-			if err := manager.ConnectWithDSN(normalizedURL); err != nil {
-				return fmt.Errorf("connecting to database: %v", err)
-			}
-
-			// Phase 1: dump the schema into a temp folder so we can fingerprint
-			// it before deciding which on-disk folder it belongs to.
-			tmpSchema, err := os.MkdirTemp("", "seedmancer-schema-*")
-			if err != nil {
-				return fmt.Errorf("creating temp directory: %v", err)
-			}
-			defer os.RemoveAll(tmpSchema)
-
-			sp := ui.StartSpinner("Exporting schema...")
-			if err := manager.ExportSchema(tmpSchema); err != nil {
-				sp.Stop(false, "Schema export failed")
-				return fmt.Errorf("exporting schema: %v", err)
-			}
-			sp.Stop(true, "Schema exported")
-
-			fingerprint, err := utils.FingerprintSchemaFile(filepath.Join(tmpSchema, "schema.json"))
-			if err != nil {
-				return fmt.Errorf("fingerprinting schema: %v", err)
-			}
-			fpShort := utils.FingerprintShort(fingerprint)
-
-			// Phase 2: materialize the schema folder (or verify the existing one
-			// still matches the fingerprint, then refresh its files so hand-edits
-			// aren't possible drift sources).
-			schemaDir := utils.SchemaDir(projectRoot, cfg.StoragePath, fpShort)
-			if err := os.MkdirAll(schemaDir, 0755); err != nil {
-				return fmt.Errorf("creating schema directory: %v", err)
-			}
-			if err := refreshSchemaFolder(tmpSchema, schemaDir); err != nil {
-				return err
-			}
-			ui.KeyValue("Schema fingerprint: ", fpShort)
-			ui.Debug("Schema folder: %s", schemaDir)
-
-			// Phase 3: export CSVs into the dataset folder under this schema.
-			datasetDir := utils.DatasetPath(projectRoot, cfg.StoragePath, fpShort, datasetName)
-			if info, statErr := os.Stat(datasetDir); statErr == nil && info.IsDir() {
-				ui.Warn("Dataset %q already exists at %s", datasetName, datasetDir)
-				if !c.Bool("force") {
-					if !ui.Confirm("Overwrite existing dataset?", false) {
-						ui.Info("Export cancelled.")
-						return nil
-					}
-				}
-				if err := os.RemoveAll(datasetDir); err != nil {
-					return fmt.Errorf("removing existing dataset directory: %v", err)
-				}
-			}
-			if err := os.MkdirAll(datasetDir, 0755); err != nil {
-				return fmt.Errorf("creating dataset directory: %v", err)
-			}
-
-			sp = ui.StartSpinner("Exporting table data...")
-			if err := manager.ExportToCSV(datasetDir); err != nil {
-				sp.Stop(false, "Data export failed")
-				return fmt.Errorf("exporting data: %v", err)
-			}
-			sp.Stop(true, "Data exported")
-
-			if err := utils.WriteDatasetMeta(datasetDir, utils.DatasetMeta{SourceEnv: target.Name}); err != nil {
-				ui.Warn("could not write dataset metadata: %v", err)
-			}
-
-			// Phase 4: service connectors (Pro gate)
-			if !c.Bool("no-services") && len(cfg.ServicesForEnv(target.Name)) > 0 {
-				baseURL := utils.GetBaseURL()
-				token, _ := utils.ResolveAPIToken(c.String("token"))
-				if err := utils.CheckServiceConnectorEntitlement(baseURL, token); err != nil {
-					// If the user isn't logged in, warn but skip rather than block
-					// the export entirely — the DB dump succeeded and is usable.
-					if errors.Is(err, utils.ErrMissingAPIToken) || errors.Is(err, utils.ErrInvalidAPIToken) {
-						ui.Warn("Skipping service connectors: not logged in (run `seedmancer login` to enable Pro features)")
-					} else {
-						ui.Warn("Skipping service connectors: %v", err)
-					}
-				} else {
-					connectors, buildErr := svc.BuildAll(cfg.ServicesForEnv(target.Name))
-					if buildErr != nil {
-						ui.Warn("service connectors unavailable: %v", buildErr)
-					} else {
-						svcCtx := svc.WithDataDir(c.Context, datasetDir)
-						svcCtx = svc.WithAICredentials(svcCtx, svc.AICredentials{BaseURL: baseURL, Token: token})
-						if c.Bool("no-ai-infer") {
-							svcCtx = svc.WithNoAIInfer(svcCtx)
-						}
-						for _, nc := range connectors {
-							sp2 := ui.StartSpinner(fmt.Sprintf("Exporting %s...", nc.Name))
-							data, err := nc.Connector.Export(svcCtx)
-							if err != nil {
-								sp2.Stop(false, fmt.Sprintf("%s export failed: %v", nc.Name, err))
-							} else {
-								if err := os.WriteFile(filepath.Join(datasetDir, nc.SidecarFilename()), data, 0644); err != nil {
-									sp2.Stop(false, fmt.Sprintf("%s write failed: %v", nc.Name, err))
-								} else {
-									sp2.Stop(true, fmt.Sprintf("%s exported", nc.Name))
-								}
-							}
-						}
-					}
-				}
 			}
 
 			fmt.Println()
-			ui.Success("Export complete")
-			ui.KeyValue("Env: ", targetDisplay(target))
-			ui.KeyValue("Schema: ", fpShort)
-			ui.KeyValue("Dataset: ", datasetName)
-			ui.KeyValue("Path: ", datasetDir)
-			fmt.Println()
-			ui.Info("Next: `seedmancer push --id %s`", datasetName)
+			ui.Success("Exported scenario: %s", out.Scenario)
+			ui.KeyValue("Revision: ", out.Revision)
+			ui.KeyValue("Schema fingerprint: ", out.SchemaShort)
+			if len(out.Tables) > 0 {
+				parts := make([]string, 0, len(out.Tables))
+				for _, t := range out.Tables {
+					parts = append(parts, fmt.Sprintf("%s(%d)", t, out.RowCounts[t]))
+				}
+				ui.KeyValue("Tables: ", strings.Join(parts, ", "))
+			}
+			if len(out.ServicesExported) > 0 {
+				ui.KeyValue("Services: ", strings.Join(out.ServicesExported, ", "))
+			}
+			ui.KeyValue("Latest now points to: ", out.Revision)
 			return nil
 		},
 	}
@@ -271,12 +155,9 @@ func copyFile(src, dst string) error {
 	return nil
 }
 
-// normalizePostgresDSN applies the fixups that every command needs:
-//   - `postgresql://` → `postgres://` (pgx expects the latter)
-//   - appends `sslmode=disable` when the URL is local and sslmode wasn't set
-//
-// Returns (dsn, scheme, err). scheme is the first URL scheme Seedmancer saw
-// so callers can reject non-postgres URLs cleanly.
+// normalizePostgresDSN is kept for tests (helpers_test.go exercises the
+// same fixups) so Postgres URLs from --db-url and seedmancer.yaml
+// always reach pgx in the form it expects.
 func normalizePostgresDSN(dbURL string) (string, string, error) {
 	u, err := url.Parse(dbURL)
 	if err != nil {
@@ -296,3 +177,6 @@ func normalizePostgresDSN(dbURL string) (string, string, error) {
 	}
 	return dbURL, scheme, nil
 }
+
+// silence unused-import warning when no command body uses ctx directly
+var _ = context.Background

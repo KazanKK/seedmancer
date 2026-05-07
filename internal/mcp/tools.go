@@ -31,9 +31,10 @@ func registerTools(s *mcp.Server) {
 
 	// ── Introspection (read-only) ─────────────────────────────────────
 	mcp.AddTool(s, &mcp.Tool{
-		Name:        "list_datasets",
-		Title:       "List datasets",
-		Description: "List datasets available locally and/or in the connected cloud account.",
+		Name:  "list_datasets",
+		Title: "List scenarios",
+		Description: "List every scenario known on disk along with its latest/stable pointers, " +
+			"schema fingerprint, and the service connectors snapshotted with the latest revision.",
 		Annotations: readOnly,
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in cmd.ListInput) (*mcp.CallToolResult, cmd.ListOutput, error) {
 		out, err := cmd.RunList(ctx, in)
@@ -161,13 +162,13 @@ func registerTools(s *mcp.Server) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name:  "seed_database",
 		Title: "Seed database",
-		Description: "Truncate the target env(s) and reload the named dataset. " +
-			"This overwrites existing data — intended for test/dev resets.",
+		Description: "Truncate the target env(s) and reload a scenario revision into them. " +
+			"Defaults to the scenario's latest revision; pass `useStable: true` for the pinned " +
+			"revision or `revision: \"rNNN\"` for a specific one. " +
+			"Refuses to seed when the database schema fingerprint differs from the revision's, " +
+			"unless `force: true` is set. This overwrites existing data — intended for test/dev resets.",
 		Annotations: &mcp.ToolAnnotations{DestructiveHint: truePtr(), IdempotentHint: true},
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in cmd.SeedInput) (*mcp.CallToolResult, cmd.SeedOutput, error) {
-		// Agents can't answer interactive prompts, so we force the "yes"
-		// confirmation path. The prod-guard inside seedOneEnvQuiet still
-		// refuses to seed prod-like envs without an explicit Yes:true.
 		if !in.Yes {
 			in.Yes = true
 		}
@@ -176,9 +177,11 @@ func registerTools(s *mcp.Server) {
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
-		Name:        "export_database",
-		Title:       "Export database",
-		Description: "Dump the current schema + data from an env into a new content-addressed dataset folder.",
+		Name:  "export_database",
+		Title: "Export database",
+		Description: "Dump the current schema + data into a new revision under the given scenario. " +
+			"Every export creates a new immutable rNNN revision and advances pointers.latest. " +
+			"Schema sidecars live in a content-addressed folder shared across scenarios.",
 		Annotations: &mcp.ToolAnnotations{DestructiveHint: falsePtr(), IdempotentHint: false},
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in cmd.ExportInput) (*mcp.CallToolResult, cmd.ExportOutput, error) {
 		out, err := cmd.RunExport(ctx, in)
@@ -187,9 +190,11 @@ func registerTools(s *mcp.Server) {
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:  "generate_dataset",
-		Title: "Generate dataset",
-		Description: "Ask the Seedmancer cloud to synthesize a dataset that matches an existing schema, " +
-			"using a natural-language prompt.",
+		Title: "Generate scenario revision via cloud AI",
+		Description: "Ask the Seedmancer cloud to synthesize a new revision under the given scenario, " +
+			"using a natural-language prompt. The schema is pinned to the scenario's existing latest " +
+			"revision, or to the `inherit` scenario when given; one of those must exist so the cloud " +
+			"knows which schema.json to consume.",
 		Annotations: &mcp.ToolAnnotations{DestructiveHint: falsePtr(), IdempotentHint: false},
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in cmd.GenerateInput) (*mcp.CallToolResult, cmd.GenerateOutput, error) {
 		out, err := cmd.RunGenerate(ctx, in)
@@ -198,16 +203,17 @@ func registerTools(s *mcp.Server) {
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:  "generate_dataset_local",
-		Title: "Generate dataset locally",
-		Description: "Run an agent-written Go script locally to synthesise a dataset. " +
-			"No cloud API, no quota, and no internet connection are needed. " +
+		Title: "Generate scenario revision locally",
+		Description: "Run an agent-written Go script locally to synthesise a new revision under the " +
+			"given scenario. No cloud API, no quota, and no internet connection are needed. " +
 			"Read seedmancer://docs/local-generation first to learn the Go script contract, " +
 			"then call describe_schema to get the exact column names before writing the script. " +
 			"For partial updates (e.g. regenerating only products without touching users/orders), " +
-			"pass `inherit: \"baseline\"` (or any other dataset id under the same schema). The new " +
-			"dataset is pre-filled from the base, the script overwrites the table(s) it cares about, " +
-			"and any descendant table that FKs to an overwritten table is auto-cleared so the result " +
-			"is always safe to seed without orphan foreign keys.",
+			"pass `inherit: \"<base-scenario>\"`. The new revision is pre-filled from the base " +
+			"scenario's latest revision, the script overwrites the table(s) it cares about, and any " +
+			"descendant table that FKs to an overwritten table is auto-cleared so the result is " +
+			"always safe to seed without orphan foreign keys. Pointers.latest advances to the new " +
+			"revision automatically.",
 		Annotations: &mcp.ToolAnnotations{DestructiveHint: falsePtr(), IdempotentHint: false},
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in cmd.GenerateLocalInput) (*mcp.CallToolResult, cmd.GenerateLocalOutput, error) {
 		out, err := cmd.RunGenerateLocal(ctx, in)
@@ -216,8 +222,8 @@ func registerTools(s *mcp.Server) {
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "push_dataset",
-		Title:       "Push dataset to cloud",
-		Description: "Upload a local dataset + its schema sidecars to the connected Seedmancer account.",
+		Title:       "Push scenario to cloud",
+		Description: "Upload a scenario's latest revision (CSVs + schema sidecars) to the connected Seedmancer account. The scenario path is used as the cloud dataset name.",
 		Annotations: &mcp.ToolAnnotations{DestructiveHint: falsePtr(), IdempotentHint: true},
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in cmd.SyncInput) (*mcp.CallToolResult, cmd.SyncOutput, error) {
 		out, err := cmd.RunSync(ctx, in)
@@ -226,11 +232,42 @@ func registerTools(s *mcp.Server) {
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "pull_dataset",
-		Title:       "Pull dataset from cloud",
-		Description: "Download a remote dataset into the local schema-first layout; overwrites any existing folder.",
-		Annotations: &mcp.ToolAnnotations{DestructiveHint: truePtr(), IdempotentHint: true},
+		Title:       "Pull scenario from cloud",
+		Description: "Download a cloud-stored scenario as a new local revision. Pointers.latest advances to the new revision so seed_database picks it up immediately.",
+		Annotations: &mcp.ToolAnnotations{DestructiveHint: falsePtr(), IdempotentHint: false},
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in cmd.FetchInput) (*mcp.CallToolResult, cmd.FetchOutput, error) {
 		out, err := cmd.RunFetch(ctx, in)
+		return nil, out, err
+	})
+
+	// ── Scenario revisions ───────────────────────────────────────────
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "list_history",
+		Title:       "List scenario revisions",
+		Description: "Show every revision of a scenario newest-first, marking which is latest/stable.",
+		Annotations: readOnly,
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in cmd.HistoryInput) (*mcp.CallToolResult, cmd.HistoryOutput, error) {
+		out, err := cmd.RunHistory(ctx, in)
+		return nil, out, err
+	})
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "pin_scenario",
+		Title:       "Pin a scenario revision as stable",
+		Description: "Update pointers.stable for a scenario. Default pins the current latest revision; pass `revision` to pin a specific one.",
+		Annotations: &mcp.ToolAnnotations{DestructiveHint: falsePtr(), IdempotentHint: true},
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in cmd.PinInput) (*mcp.CallToolResult, cmd.PinOutput, error) {
+		out, err := cmd.RunPin(ctx, in)
+		return nil, out, err
+	})
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "check_scenario",
+		Title:       "Check scenario schema vs. live DB",
+		Description: "Compare a scenario revision's stored schema with the live database schema and return a structured diff.",
+		Annotations: readOnly,
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in cmd.CheckInput) (*mcp.CallToolResult, cmd.CheckOutput, error) {
+		out, err := cmd.RunCheck(ctx, in)
 		return nil, out, err
 	})
 

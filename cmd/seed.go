@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	db "github.com/KazanKK/seedmancer/database"
+	"github.com/KazanKK/seedmancer/internal/scenario"
 	svc "github.com/KazanKK/seedmancer/internal/services"
 	"github.com/KazanKK/seedmancer/internal/ui"
 	utils "github.com/KazanKK/seedmancer/internal/utils"
@@ -17,40 +19,38 @@ import (
 	"github.com/urfave/cli/v2"
 )
 
-// SeedCommand restores a local dataset into one or more target databases.
+// SeedCommand restores a revision of a scenario into one or more
+// target databases.
 //
-// The multi-target use case is load-bearing: the primary reason for named
-// environments is "apply the same dataset to local and staging with one
-// command". Passing `--env local,staging` runs the restore sequentially
-// against each target, with per-env banners, prod confirmations, and a
-// summary at the end.
+// Revision resolution rules (highest priority first):
+//  1. --revision rNNN
+//  2. --stable
+//  3. pointers.latest
 //
-// Implementation note: `RestoreFromCSV` expects `schema.json` (plus any
-// `*_func.sql` / `*_trigger.sql` sidecars) to sit next to the CSV files,
-// but our on-disk layout keeps them one level up (in the schema folder) so
-// multiple datasets can share a schema. We materialize a temp directory
-// once, then reuse it for every target to avoid redundant I/O.
+// Before any data is written we fingerprint the target database's
+// schema and compare it with the revision's stored fingerprint. A
+// mismatch is fatal unless --force is passed: the schema has drifted
+// since the export and seeding will most likely fail with FK/column
+// errors that are easier to triage as "you need to re-export".
 func SeedCommand() *cli.Command {
 	return &cli.Command{
-		Name:  "seed",
-		Usage: "Restore a dataset into one or more environments",
-		Description: "Loads a local dataset's CSVs + schema sidecars into each target\n" +
-			"Postgres database. Tables are truncated and reloaded; functions\n" +
-			"and triggers are replayed from their SQL sidecars.\n\n" +
+		Name:      "seed",
+		Usage:     "Restore a scenario revision into one or more environments",
+		ArgsUsage: "<scenario>",
+		Description: "Loads a scenario's CSVs + schema sidecars into each target Postgres\n" +
+			"database. The chosen revision is resolved as follows:\n\n" +
+			"  --revision rNNN  → exact revision\n" +
+			"  --stable         → pointers.stable (set via `seedmancer pin`)\n" +
+			"  (default)        → pointers.latest\n\n" +
 			"Targets:\n" +
-			"  --env local           single env\n" +
-			"  --env local,staging   many envs, sequentially, same dataset\n" +
-			"  (no --env)            the default_env in seedmancer.yaml\n\n" +
-			"Ad-hoc override: --db-url <url> or $SEEDMANCER_DATABASE_URL point at\n" +
-			"a single target without touching the config.",
-		ArgsUsage: " ",
+			"  --env local            single env\n" +
+			"  --env local,staging    many envs sequentially\n" +
+			"  (no --env)             the default_env in seedmancer.yaml\n\n" +
+			"Schema safety: if the database's current schema fingerprint\n" +
+			"differs from the revision's, the seed is blocked unless\n" +
+			"--force is passed. Use `seedmancer check <scenario>` to see\n" +
+			"the diff.",
 		Flags: []cli.Flag{
-			&cli.StringFlag{
-				Name:     "dataset-id",
-				Aliases:  []string{"d", "id"},
-				Required: true,
-				Usage:    "(required) Dataset id to restore (the name given at export/generate time)",
-			},
 			&cli.StringFlag{
 				Name:    "env",
 				Aliases: []string{"e"},
@@ -60,10 +60,24 @@ func SeedCommand() *cli.Command {
 				Name:  "db-url",
 				Usage: "Single ad-hoc target URL (mutually exclusive with --env)",
 			},
+			&cli.StringFlag{
+				Name:    "revision",
+				Aliases: []string{"r"},
+				Usage:   "Specific revision id (e.g. r002); defaults to latest",
+			},
+			&cli.BoolFlag{
+				Name:  "stable",
+				Usage: "Use the scenario's stable revision (set via `seedmancer pin`)",
+			},
+			&cli.BoolFlag{
+				Name:    "force",
+				Aliases: []string{"f"},
+				Usage:   "Seed even when the database schema fingerprint differs",
+			},
 			&cli.BoolFlag{
 				Name:    "yes",
-				Aliases: []string{"y", "f"},
-				Usage:   "Skip confirmation prompt",
+				Aliases: []string{"y"},
+				Usage:   "Skip confirmation prompts",
 			},
 			&cli.BoolFlag{
 				Name:  "continue-on-error",
@@ -79,6 +93,11 @@ func SeedCommand() *cli.Command {
 			},
 		},
 		Action: func(c *cli.Context) error {
+			scenarioArg := strings.TrimSpace(c.Args().First())
+			if scenarioArg == "" {
+				return fmt.Errorf("usage: seedmancer seed <scenario>")
+			}
+
 			configPath, err := utils.FindConfigFile()
 			if err != nil {
 				return err
@@ -89,72 +108,59 @@ func SeedCommand() *cli.Command {
 				return err
 			}
 
+			scenarioPath, err := scenario.Normalize(scenarioArg)
+			if err != nil {
+				return err
+			}
+
 			targets, err := resolveSeedTargets(c, cfg)
 			if err != nil {
 				return err
 			}
 
-			datasetName := strings.TrimSpace(c.String("dataset-id"))
-			schema, datasetDir, err := utils.FindLocalDataset(projectRoot, cfg.StoragePath, "", datasetName)
+			rev, err := resolveScenarioRevision(projectRoot, cfg.StoragePath, scenarioPath, c.String("revision"), c.Bool("stable"))
 			if err != nil {
 				return err
 			}
 
-			meta := utils.ReadDatasetMeta(datasetDir)
+			ui.Step("seed %s @ %s (schema %s) → %s",
+				rev.Scenario, rev.RevID,
+				utils.FingerprintShort(rev.Manifest.SchemaFingerprint),
+				strings.Join(targetNames(targets), ", "))
 
-			targetNames := make([]string, len(targets))
-			for i, t := range targets {
-				targetNames[i] = t.Name
-			}
-			ui.Step("seed %s (schema %s) → %s", datasetName, schema.FingerprintShort, strings.Join(targetNames, ", "))
-			if meta.SourceEnv != "" {
-				ui.Info("source: %s", meta.SourceEnv)
-			}
-
-			// Build the merged restore dir ONCE and reuse across targets.
-			// Each RestoreFromCSV call is read-only against this dir, so
-			// this is both correct and a meaningful perf win when seeding
-			// several envs.
-			merged, cleanup, err := materializeRestoreDir(schema.Path, datasetDir)
+			schemaDir := scenario.SchemaStoreDir(projectRoot, cfg.StoragePath, utils.FingerprintShort(rev.Manifest.SchemaFingerprint))
+			merged, cleanup, err := materializeRestoreDir(schemaDir, rev.DataDir)
 			if err != nil {
 				return err
 			}
 			defer cleanup()
 			ui.Debug("Merged restore dir: %s", merged)
 
-		// Confirm all targets up front — before any destructive work — so
-		// the user can cancel cleanly without partial state changes.
-		skipConfirm := c.Bool("yes")
-		if !skipConfirm {
-			for _, t := range targets {
-				dest := targetDisplay(t)
-				msg := fmt.Sprintf("Seed %q into %q?", datasetName, dest)
-				if meta.SourceEnv != "" && meta.SourceEnv != adHocEnvName {
-					msg = fmt.Sprintf("Seed %q (exported from %q) into %q?", datasetName, meta.SourceEnv, dest)
-				}
-				if isProdLike(t.Name) {
-					ui.Title(fmt.Sprintf("→ %s", dest))
-				}
-				if !ui.Confirm(msg, false) {
-					ui.Info("Skipped.")
-					return nil
+			// Fingerprint guard runs against each target separately so a
+			// matching local env can succeed even if a sibling drifts.
+			force := c.Bool("force")
+			skipConfirm := c.Bool("yes")
+			if !skipConfirm {
+				for _, t := range targets {
+					dest := targetDisplay(t)
+					msg := fmt.Sprintf("Seed %q @ %s into %q?", rev.Scenario, rev.RevID, dest)
+					if isProdLike(t.Name) {
+						ui.Title(fmt.Sprintf("→ %s", dest))
+					}
+					if !ui.Confirm(msg, false) {
+						ui.Info("Skipped.")
+						return nil
+					}
 				}
 			}
-		}
 
-		// Service connectors run BEFORE the DB restore so that auth triggers
-		// (e.g. on_auth_user_created → insert into public.users) fire on an
-		// empty table. The subsequent DB restore truncates and refills public.*
-		// from CSV, landing in the exact same state either way.
-		if !c.Bool("no-services") && len(cfg.ServicesForEnv(targets[0].Name)) > 0 {
+			if !c.Bool("no-services") && len(cfg.ServicesForEnv(targets[0].Name)) > 0 {
 				baseURL := utils.GetBaseURL()
 				token, _ := utils.ResolveAPIToken(c.String("token"))
 				if entErr := utils.CheckServiceConnectorEntitlement(baseURL, token); entErr != nil {
 					if errors.Is(entErr, utils.ErrMissingAPIToken) || errors.Is(entErr, utils.ErrInvalidAPIToken) {
 						ui.Warn("Skipping service connectors: not logged in (run `seedmancer login` to enable Pro features)")
 					} else {
-						// ErrServiceConnectorsPro or a network error — surface the
-						// full message so the user knows what to do.
 						ui.Warn("Skipping service connectors: %v", entErr)
 					}
 				} else {
@@ -162,8 +168,6 @@ func SeedCommand() *cli.Command {
 					if err != nil {
 						ui.Warn("service connectors unavailable: %v", err)
 					} else {
-						// Pass the first available DB URL so the auth connector can
-						// clean mirror rows before creating new auth users.
 						svcCtx := c.Context
 						svcCtx = svc.WithDataDir(svcCtx, merged)
 						for _, t := range targets {
@@ -173,7 +177,7 @@ func SeedCommand() *cli.Command {
 							}
 						}
 						for _, nc := range connectors {
-							sidecarPath := filepath.Join(datasetDir, nc.SidecarFilename())
+							sidecarPath := filepath.Join(rev.DataDir, nc.SidecarFilename())
 							data, err := os.ReadFile(sidecarPath)
 							if err != nil {
 								if !os.IsNotExist(err) {
@@ -192,17 +196,27 @@ func SeedCommand() *cli.Command {
 				}
 			}
 
-		results := make([]seedResult, 0, len(targets))
-		for i, t := range targets {
-			if i > 0 {
-				fmt.Fprintln(os.Stderr)
-			}
-			res := seedOneEnv(t, merged, datasetName, meta.SourceEnv, true) // confirmed above
+			results := make([]seedResult, 0, len(targets))
+			for i, t := range targets {
+				if i > 0 {
+					fmt.Fprintln(os.Stderr)
+				}
+				if !force {
+					if err := guardSchemaMatch(t, rev); err != nil {
+						ui.Error("%v", err)
+						results = append(results, seedResult{Env: targetDisplay(t), Err: err})
+						if !c.Bool("continue-on-error") {
+							for _, rest := range targets[i+1:] {
+								results = append(results, seedResult{Env: rest.Name, Skipped: true})
+							}
+							break
+						}
+						continue
+					}
+				}
+				res := seedOneEnv(t, merged, rev.RevID, rev.Scenario, true)
 				results = append(results, res)
 				if res.Err != nil && !c.Bool("continue-on-error") {
-					// Fill remaining targets as "skipped" so the summary
-					// tells the whole story instead of pretending the rest
-					// succeeded or silently vanished.
 					for _, rest := range targets[i+1:] {
 						results = append(results, seedResult{Env: rest.Name, Skipped: true})
 					}
@@ -221,31 +235,69 @@ func SeedCommand() *cli.Command {
 	}
 }
 
-// seedResult captures the outcome of one target-env seed so the summary at
-// the end of `seed --env local,staging` can tell the whole story even
-// after a partial failure.
+// guardSchemaMatch fingerprints the target database and compares with
+// the revision's stored fingerprint. Returns nil when they match (or
+// when the target's URL is empty, e.g. a misconfigured ad-hoc env).
+//
+// On mismatch returns the spec §10 message verbatim so users get the
+// same diagnostic whether the failure came from CLI or MCP.
+func guardSchemaMatch(t utils.NamedEnv, rev resolvedRevision) error {
+	if strings.TrimSpace(t.DatabaseURL) == "" {
+		return nil
+	}
+	currentFP, _, err := fingerprintCurrentDB(t)
+	if err != nil {
+		return fmt.Errorf("checking schema for %s: %w", targetDisplay(t), err)
+	}
+	if currentFP == rev.Manifest.SchemaFingerprint {
+		return nil
+	}
+	return fmt.Errorf(
+		"schema fingerprint mismatch on %s\n"+
+			"  Scenario: %s\n"+
+			"  Revision: %s\n"+
+			"  Dataset schema: %s\n"+
+			"  Current schema: %s\n\n"+
+			"This dataset may fail to seed because the database schema has changed.\n"+
+			"Run:\n"+
+			"  seedmancer check %s\n"+
+			"\n"+
+			"Or force anyway:\n"+
+			"  seedmancer seed %s --force",
+		targetDisplay(t), rev.Scenario, rev.RevID,
+		utils.FingerprintShort(rev.Manifest.SchemaFingerprint),
+		utils.FingerprintShort(currentFP),
+		rev.Scenario, rev.Scenario,
+	)
+}
+
+func targetNames(targets []utils.NamedEnv) []string {
+	out := make([]string, len(targets))
+	for i, t := range targets {
+		out[i] = t.Name
+	}
+	return out
+}
+
+// seedResult captures the outcome of one target-env seed so the
+// summary at the end of `seed --env local,staging` can tell the whole
+// story even after a partial failure.
 type seedResult struct {
 	Env      string
 	Err      error
 	Duration time.Duration
-	Skipped  bool // true when the user declined the prod prompt or --continue-on-error bailed
+	Skipped  bool
 }
 
-// seedOneEnv does the work of applying `merged` to a single database URL.
-// Extracted so the Action loop stays readable and so tests can exercise
-// the per-target orchestration (prompts, duration timing, error shaping)
-// independent of the CLI framework.
-func seedOneEnv(target utils.NamedEnv, mergedDir, datasetName, sourceEnv string, skipConfirm bool) seedResult {
+// seedOneEnv applies merged into a single database URL.
+func seedOneEnv(target utils.NamedEnv, mergedDir, revID, scenarioPath string, skipConfirm bool) seedResult {
 	start := time.Now()
 
 	ui.Title(fmt.Sprintf("→ %s", targetDisplay(target)))
 
 	if !skipConfirm {
 		dest := targetDisplay(target)
-		msg := fmt.Sprintf("Seed %q into %q?", datasetName, dest)
-		if sourceEnv != "" && sourceEnv != adHocEnvName {
-			msg = fmt.Sprintf("Seed %q (exported from %q) into %q?", datasetName, sourceEnv, dest)
-		}
+		msg := fmt.Sprintf("Seed %q @ %s into %q?", scenarioPath, revID, dest)
 		if !ui.Confirm(msg, false) {
 			return seedResult{Env: targetDisplay(target), Skipped: true, Duration: time.Since(start)}
 		}
@@ -269,9 +321,7 @@ func seedOneEnv(target utils.NamedEnv, mergedDir, datasetName, sourceEnv string,
 	return seedResult{Env: targetDisplay(target), Duration: time.Since(start)}
 }
 
-// printSeedSummary renders a table of target outcomes. Matters most after a
-// partial failure or `--continue-on-error`, where the user needs a single
-// place to see "what worked and what didn't" without re-reading the log.
+// printSeedSummary renders a table of target outcomes.
 func printSeedSummary(results []seedResult) {
 	if len(results) <= 1 {
 		return
@@ -303,11 +353,12 @@ func anyFailed(results []seedResult) bool {
 	return false
 }
 
-// materializeRestoreDir builds a single flat temp directory containing the
-// schema sidecars (schema.json + *.sql) symlinked in from `schemaDir` and the
-// CSV/JSON files from `datasetDir`. The returned cleanup removes the temp dir.
-// When symlinks fail (Windows, exotic filesystems) we fall back to copying.
-func materializeRestoreDir(schemaDir, datasetDir string) (string, func(), error) {
+// materializeRestoreDir builds a single flat temp directory containing
+// the schema sidecars (schema.json + *.sql) symlinked in from
+// schemaDir and the CSV/JSON files from dataDir. The returned cleanup
+// removes the temp dir. When symlinks fail (Windows, exotic
+// filesystems) we fall back to copying.
+func materializeRestoreDir(schemaDir, dataDir string) (string, func(), error) {
 	tmp, err := os.MkdirTemp("", "seedmancer-restore-*")
 	if err != nil {
 		return "", func() {}, fmt.Errorf("creating temp dir: %v", err)
@@ -319,14 +370,14 @@ func materializeRestoreDir(schemaDir, datasetDir string) (string, func(), error)
 		cleanup()
 		return "", func() {}, err
 	}
-	dataFiles, err := utils.DatasetFiles(datasetDir)
+	dataFiles, err := utils.DatasetFiles(dataDir)
 	if err != nil {
 		cleanup()
 		return "", func() {}, err
 	}
 	if len(dataFiles) == 0 {
 		cleanup()
-		return "", func() {}, fmt.Errorf("no CSV or JSON files in %s", datasetDir)
+		return "", func() {}, fmt.Errorf("no CSV or JSON files in %s", dataDir)
 	}
 
 	for _, src := range append(append([]string{}, schemaFiles...), dataFiles...) {
@@ -356,3 +407,6 @@ func linkOrCopy(src, dst string) error {
 	_, err = io.Copy(out, in)
 	return err
 }
+
+// silence unused-import warning
+var _ = context.Background

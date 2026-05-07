@@ -1,0 +1,211 @@
+package cmd
+
+import (
+	"bufio"
+	"encoding/csv"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
+
+	db "github.com/KazanKK/seedmancer/database"
+	"github.com/KazanKK/seedmancer/internal/scenario"
+	utils "github.com/KazanKK/seedmancer/internal/utils"
+)
+
+// resolvedRevision describes the revision a command picked, after the
+// --revision / --stable / latest precedence rules. It carries the
+// loaded manifest so callers don't need a second read.
+type resolvedRevision struct {
+	Scenario string
+	RevID    string
+	RevDir   string
+	DataDir  string
+	Manifest scenario.RevisionManifest
+}
+
+// resolveScenarioRevision picks one revision for a scenario. Precedence:
+//  1. explicit revID (--revision)
+//  2. useStable=true (pointers.stable)
+//  3. pointers.latest
+//
+// Errors are user-friendly so they can be surfaced verbatim by the CLI.
+func resolveScenarioRevision(projectRoot, storagePath, scenarioPath, revID string, useStable bool) (resolvedRevision, error) {
+	scenarioDir := scenario.ScenarioDir(projectRoot, storagePath, scenarioPath)
+	if _, err := os.Stat(scenarioDir); os.IsNotExist(err) {
+		return resolvedRevision{}, fmt.Errorf("scenario %q does not exist — run `seedmancer export %s` first", scenarioPath, scenarioPath)
+	}
+
+	pointers, _ := scenario.ReadPointers(scenarioDir)
+
+	target := strings.TrimSpace(revID)
+	switch {
+	case target != "":
+		// explicit — caller already chose
+	case useStable:
+		if pointers.Stable == "" {
+			return resolvedRevision{}, fmt.Errorf(
+				"scenario %q has no stable revision yet — run `seedmancer pin %s` first",
+				scenarioPath, scenarioPath,
+			)
+		}
+		target = pointers.Stable
+	default:
+		if pointers.Latest == "" {
+			return resolvedRevision{}, fmt.Errorf(
+				"scenario %q has no revisions yet — run `seedmancer export %s` first",
+				scenarioPath, scenarioPath,
+			)
+		}
+		target = pointers.Latest
+	}
+
+	revDir := scenario.RevisionDir(projectRoot, storagePath, scenarioPath, target)
+	if st, err := os.Stat(revDir); err != nil || !st.IsDir() {
+		return resolvedRevision{}, fmt.Errorf(
+			"scenario %q has no revision %q (looked in %s)",
+			scenarioPath, target, revDir,
+		)
+	}
+
+	manifest, err := scenario.ReadRevisionManifest(revDir)
+	if err != nil {
+		return resolvedRevision{}, fmt.Errorf("reading revision manifest: %w", err)
+	}
+
+	return resolvedRevision{
+		Scenario: scenarioPath,
+		RevID:    target,
+		RevDir:   revDir,
+		DataDir:  filepath.Join(revDir, "data"),
+		Manifest: manifest,
+	}, nil
+}
+
+// fingerprintCurrentDB connects to target, dumps the schema to a temp
+// dir, and returns its fingerprint along with the raw schema.json bytes.
+// The temp dir is cleaned up before return so callers don't have to.
+func fingerprintCurrentDB(target utils.NamedEnv) (fingerprint string, schemaJSON []byte, err error) {
+	manager, normalizedURL, err := db.NewManager(target.DatabaseURL)
+	if err != nil {
+		return "", nil, err
+	}
+	if err := manager.ConnectWithDSN(normalizedURL); err != nil {
+		return "", nil, fmt.Errorf("connecting to database: %v", err)
+	}
+	tmp, err := os.MkdirTemp("", "seedmancer-schema-*")
+	if err != nil {
+		return "", nil, fmt.Errorf("creating temp directory: %v", err)
+	}
+	defer os.RemoveAll(tmp)
+
+	if err := manager.ExportSchema(tmp); err != nil {
+		return "", nil, fmt.Errorf("exporting schema: %v", err)
+	}
+	schemaPath := filepath.Join(tmp, "schema.json")
+	fp, err := utils.FingerprintSchemaFile(schemaPath)
+	if err != nil {
+		return "", nil, fmt.Errorf("fingerprinting schema: %v", err)
+	}
+	raw, err := os.ReadFile(schemaPath)
+	if err != nil {
+		return "", nil, fmt.Errorf("reading temp schema.json: %v", err)
+	}
+	return fp, raw, nil
+}
+
+// listCSVTablesAndRowCounts walks dataDir, returns the sorted list of
+// tables (.csv basename) and their data-row counts (header excluded).
+// Files larger than the row scan threshold report rowCount=-1 so callers
+// can decide how to display.
+func listCSVTablesAndRowCounts(dataDir string) (tables []string, rowCounts map[string]int, err error) {
+	entries, err := os.ReadDir(dataDir)
+	if err != nil {
+		return nil, nil, fmt.Errorf("reading %s: %w", dataDir, err)
+	}
+	rowCounts = map[string]int{}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if !strings.HasSuffix(strings.ToLower(name), ".csv") {
+			continue
+		}
+		table := name[:len(name)-len(".csv")]
+		count, err := countCSVDataRows(filepath.Join(dataDir, name))
+		if err != nil {
+			return nil, nil, fmt.Errorf("counting rows in %s: %w", name, err)
+		}
+		tables = append(tables, table)
+		rowCounts[table] = count
+	}
+	sort.Strings(tables)
+	return tables, rowCounts, nil
+}
+
+// countCSVDataRows returns the number of data rows (excluding the
+// header) in a CSV file. Uses csv.Reader so quoted multi-line cells
+// don't get miscounted.
+func countCSVDataRows(path string) (int, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	r := csv.NewReader(bufio.NewReader(f))
+	r.FieldsPerRecord = -1 // tolerate ragged rows from hand-edited CSVs
+	r.LazyQuotes = true
+	count := -1
+	for {
+		_, err := r.Read()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return 0, err
+		}
+		count++
+	}
+	if count < 0 {
+		count = 0 // empty file → 0 data rows
+	}
+	return count, nil
+}
+
+// servicesForRevision returns the sorted list of service connector
+// names that should be considered for a given env. Always includes
+// "postgres" first so the seed/export manifests carry the same
+// canonical baseline regardless of plugins.
+func servicesForRevision(cfg utils.Config, envName string) []string {
+	out := []string{"postgres"}
+	for _, n := range cfg.SortedServiceNamesForEnv(envName) {
+		out = append(out, n)
+	}
+	return out
+}
+
+// formatExportTime renders a manifest timestamp as the human-readable
+// "YYYY-MM-DD HH:MM" form used by `list` and `history`.
+func formatExportTime(t time.Time) string {
+	if t.IsZero() {
+		return "—"
+	}
+	return t.UTC().Format("2006-01-02 15:04")
+}
+
+// pointerLabel returns the comma-joined pointer summary for a revision
+// (e.g. "latest,stable", "latest", "stable", or "").
+func pointerLabel(revID string, p scenario.Pointers) string {
+	var parts []string
+	if revID == p.Latest {
+		parts = append(parts, "latest")
+	}
+	if revID == p.Stable {
+		parts = append(parts, "stable")
+	}
+	return strings.Join(parts, ",")
+}

@@ -8,36 +8,36 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/KazanKK/seedmancer/internal/ui"
 	"github.com/KazanKK/seedmancer/internal/utils"
 	"github.com/urfave/cli/v2"
 )
 
-// GenerateLocalCommand runs a Go script to produce CSV files, without calling
-// any cloud API or consuming any monthly quota.
+// GenerateLocalCommand runs a Go script that produces CSV files for a
+// new revision of a scenario. The script is interpreted by an embedded
+// Go interpreter (yaegi) — no Go toolchain needed.
 //
-// The script is interpreted by an embedded Go interpreter (yaegi) bundled
-// inside the Seedmancer binary — no Go toolchain needs to be installed.
+// Recommended invocation (script piped via stdin so it never touches disk):
 //
-// Pass the script via stdin (recommended — no file written to disk):
-//
-//	seedmancer generate-local --schema-id <ref> --id <id> --inherit baseline <<'EOF'
+//	seedmancer generate-local <scenario> --inherit <base-scenario> <<'EOF'
 //	package main
 //	...
 //	EOF
 //
-// `--inherit baseline` pre-fills the new dataset with the baseline's CSVs and
-// auto-clears descendant tables that FK to whatever the script overwrites.
-// This is the recommended way to do partial updates (e.g. "regenerate only
-// products") without manually copying CSVs around.
+// `--inherit baseline-scenario` pre-fills the new revision with the
+// inherit base's latest CSVs. The script overwrites whichever tables it
+// cares about; descendant tables (FK descendants of the overwritten
+// tables) are auto-cleared so the result is always safe to seed.
 func GenerateLocalCommand() *cli.Command {
 	return &cli.Command{
-		Name:  "generate-local",
-		Usage: "Generate CSV test data from a Go script (no cloud, no quota, no Go toolchain needed)",
+		Name:      "generate-local",
+		Usage:     "Generate a scenario revision from a Go script (no cloud, no quota)",
+		ArgsUsage: "<scenario>",
 		Description: "Interprets a Go program via the embedded engine inside the binary.\n" +
-			"The script receives the output directory as os.Args[1] and must\n" +
+			"The script receives the data directory as os.Args[1] and must\n" +
 			"write <table>.csv files there using only stdlib.\n\n" +
 			"Recommended: pipe the script via stdin so nothing is written to disk:\n\n" +
-			"  seedmancer generate-local --schema-id <fp> --id mydata --inherit baseline <<'EOF'\n" +
+			"  seedmancer generate-local billing/pro --inherit basic <<'EOF'\n" +
 			"  package main\n" +
 			"  import (\"encoding/csv\"; \"fmt\"; \"os\")\n" +
 			"  func main() {\n" +
@@ -49,13 +49,10 @@ func GenerateLocalCommand() *cli.Command {
 			"    w.Flush(); f.Close()\n" +
 			"  }\n" +
 			"  EOF\n\n" +
-			"--inherit <base> copies the base dataset's CSVs in first, lets the\n" +
-			"script overwrite the tables it cares about, and auto-clears any\n" +
-			"descendant table that FKs to an overwritten table — so partial\n" +
-			"datasets are always safe to seed.\n\n" +
-			"--script-file paths must live outside the project directory; use\n" +
-			"stdin (or --script-file -) so nothing is committed to the repo.",
-		ArgsUsage: " ",
+			"--inherit <base-scenario> copies the latest revision of the base\n" +
+			"scenario in first, lets the script overwrite the tables it cares\n" +
+			"about, and auto-clears any descendant table that FKs to an\n" +
+			"overwritten table — so partial datasets are always safe to seed.",
 		Flags: []cli.Flag{
 			&cli.StringFlag{
 				Name:    "script-file",
@@ -63,90 +60,67 @@ func GenerateLocalCommand() *cli.Command {
 				Usage:   "Path to the Go source file (use \"-\" for stdin; omit to read stdin automatically). Project-relative paths are rejected.",
 			},
 			&cli.StringFlag{
-				Name:    "schema-id",
-				Aliases: []string{"s"},
-				Usage:   "Schema fingerprint prefix or display name (defaults to the sole local schema)",
-			},
-			&cli.StringFlag{
-				Name:    "id",
-				Aliases: []string{"d", "dataset-id"},
-				Usage:   "Dataset id for the result (auto-generated timestamp when empty)",
-			},
-			&cli.StringFlag{
 				Name:    "inherit",
 				Aliases: []string{"b"},
-				Usage:   "Pre-fill from <base-dataset-id>; descendants of overwritten tables are auto-cleared",
+				Usage:   "Base scenario whose latest revision pre-fills the new revision",
 			},
-			&cli.BoolFlag{
-				Name:    "force",
-				Aliases: []string{"y"},
-				Usage:   "Overwrite an existing dataset folder with the same id",
+			&cli.StringFlag{
+				Name:  "description",
+				Usage: "Optional description stored on the new revision manifest",
 			},
 		},
 		Action: func(c *cli.Context) error {
-			return runGenerateLocal(c)
+			scenarioArg := strings.TrimSpace(c.Args().First())
+			if scenarioArg == "" {
+				return fmt.Errorf("usage: seedmancer generate-local <scenario>")
+			}
+
+			scriptFile := strings.TrimSpace(c.String("script-file"))
+			var script []byte
+			var err error
+			switch {
+			case scriptFile == "" || scriptFile == "-":
+				script, err = io.ReadAll(os.Stdin)
+				if err != nil {
+					return fmt.Errorf("reading script from stdin: %w", err)
+				}
+			default:
+				if err := rejectProjectRelativeScriptPath(scriptFile); err != nil {
+					return err
+				}
+				script, err = os.ReadFile(scriptFile)
+				if err != nil {
+					return fmt.Errorf("reading script file %q: %w", scriptFile, err)
+				}
+			}
+			if strings.TrimSpace(string(script)) == "" {
+				return fmt.Errorf("script is empty (pass via stdin or --script-file)")
+			}
+
+			out, err := RunGenerateLocal(context.Background(), GenerateLocalInput{
+				Script:      string(script),
+				Scenario:    scenarioArg,
+				Inherit:     strings.TrimSpace(c.String("inherit")),
+				Description: strings.TrimSpace(c.String("description")),
+			})
+			if err != nil {
+				return err
+			}
+
+			fmt.Println()
+			ui.Success("Generated revision: %s @ %s", out.Scenario, out.Revision)
+			ui.KeyValue("Schema: ", out.Schema)
+			ui.KeyValue("Tables: ", strings.Join(out.Tables, ", "))
+			if out.InheritedFrom != "" {
+				ui.KeyValue("Inherited from: ", fmt.Sprintf("%s @ %s", out.InheritedFrom, out.InheritedRevision))
+				if len(out.ClearedTables) > 0 {
+					ui.KeyValue("Auto-cleared FK descendants: ", strings.Join(out.ClearedTables, ", "))
+				}
+			}
+			ui.KeyValue("Run: ", fmt.Sprintf("seedmancer seed %s", out.Scenario))
+			return nil
 		},
 	}
-}
-
-func runGenerateLocal(c *cli.Context) error {
-	scriptFile := strings.TrimSpace(c.String("script-file"))
-
-	var script []byte
-	var err error
-
-	switch {
-	case scriptFile == "" || scriptFile == "-":
-		// Read from stdin — nothing is written to disk. This is the
-		// recommended path for agents: pipe the script via a heredoc.
-		script, err = io.ReadAll(os.Stdin)
-		if err != nil {
-			return fmt.Errorf("reading script from stdin: %w", err)
-		}
-	default:
-		// Reject scripts that live inside the project directory. The whole
-		// point of generate-local is that scripts are throwaway artifacts —
-		// committing them to the repo defeats the design and creates noisy
-		// diffs (e.g. scripts/seedmancer-go/...).
-		if err := rejectProjectRelativeScriptPath(scriptFile); err != nil {
-			return err
-		}
-		script, err = os.ReadFile(scriptFile)
-		if err != nil {
-			return fmt.Errorf("reading script file %q: %w", scriptFile, err)
-		}
-	}
-
-	if strings.TrimSpace(string(script)) == "" {
-		return fmt.Errorf("script is empty (pass via stdin or --script-file)")
-	}
-
-	out, err := RunGenerateLocal(context.Background(), GenerateLocalInput{
-		Script:    string(script),
-		SchemaRef: strings.TrimSpace(c.String("schema-id")),
-		DatasetID: strings.TrimSpace(c.String("id")),
-		Force:     c.Bool("force"),
-		Inherit:   strings.TrimSpace(c.String("inherit")),
-	})
-	if err != nil {
-		return err
-	}
-
-	fmt.Printf("\nGenerated dataset → %s\n", out.Path)
-	fmt.Printf("Tables: %s\n", strings.Join(out.Tables, ", "))
-	if out.InheritedFrom != "" {
-		if out.InheritFallback {
-			fmt.Printf("Inherited from: %s (fallback — requested base not found)", out.InheritedFrom)
-		} else {
-			fmt.Printf("Inherited from: %s", out.InheritedFrom)
-		}
-		if len(out.ClearedTables) > 0 {
-			fmt.Printf(" (auto-cleared FK descendants: %s)", strings.Join(out.ClearedTables, ", "))
-		}
-		fmt.Println()
-	}
-	fmt.Printf("Run: seedmancer seed --id %s\n", out.Dataset)
-	return nil
 }
 
 // rejectProjectRelativeScriptPath returns an error when scriptFile resolves
@@ -156,7 +130,6 @@ func runGenerateLocal(c *cli.Context) error {
 func rejectProjectRelativeScriptPath(scriptFile string) error {
 	configPath, err := utils.FindConfigFile()
 	if err != nil {
-		// No project root resolved → nothing to defend against.
 		return nil
 	}
 	projectRoot, err := filepath.Abs(filepath.Dir(configPath))

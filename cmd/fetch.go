@@ -41,93 +41,48 @@ type datasetListResponse struct {
 	Datasets []datasetAPI `json:"datasets"`
 }
 
+// PullCommand downloads the cloud dataset whose name matches the
+// scenario path and lands it as a fresh local revision under that
+// scenario.
 func PullCommand() *cli.Command {
 	return &cli.Command{
-		Name:    "pull",
-		Aliases: []string{"fetch"},
-		Usage:   "Download a dataset from the cloud into local storage",
-		Description: "Downloads one cloud-backed dataset and unpacks it under\n" +
-			"<storagePath>/schemas/<fp-short>/datasets/<name>/, matching the\n" +
-			"layout used by `seedmancer export` so `seedmancer seed` can load\n" +
-			"it straight away.",
-		ArgsUsage: " ",
+		Name:      "pull",
+		Aliases:   []string{"fetch"},
+		Usage:     "Download a scenario from the cloud as a new local revision",
+		ArgsUsage: "<scenario>",
+		Description: "Looks up the cloud dataset whose name matches <scenario>, downloads\n" +
+			"it, and writes the result as a new revision under the local\n" +
+			"scenario. Pointers.latest advances to the new revision so\n" +
+			"`seedmancer seed <scenario>` picks it up immediately.",
 		Flags: []cli.Flag{
-			&cli.StringFlag{
-				Name:     "dataset-id",
-				Aliases:  []string{"d", "id"},
-				Required: true,
-				Usage:    "(required) Dataset id to download",
-			},
 			&cli.StringFlag{
 				Name:  "token",
 				Usage: "API token (falls back to ~/.seedmancer/credentials, then SEEDMANCER_API_TOKEN)",
 			},
 		},
 		Action: func(c *cli.Context) error {
-			datasetName := strings.TrimSpace(c.String("dataset-id"))
-
-			token, err := utils.ResolveAPIToken(c.String("token"))
+			scenarioArg := strings.TrimSpace(c.Args().First())
+			if scenarioArg == "" {
+				return fmt.Errorf("usage: seedmancer pull <scenario>")
+			}
+			out, err := RunFetch(c.Context, FetchInput{
+				Scenario: scenarioArg,
+				Token:    c.String("token"),
+			})
 			if err != nil {
 				return err
 			}
-			baseURL := utils.GetBaseURL()
-
-			match, err := findRemoteDataset(baseURL, token, datasetName, "")
-			if err != nil {
-				return err
-			}
-
-			outputDir, err := resolveFetchOutput(match, datasetName)
-			if err != nil {
-				return err
-			}
-
-			if _, err := os.Stat(outputDir); err == nil {
-				if err := os.RemoveAll(outputDir); err != nil {
-					return fmt.Errorf("removing existing directory: %v", err)
-				}
-			}
-			if err := os.MkdirAll(outputDir, 0755); err != nil {
-				return fmt.Errorf("creating output directory: %v", err)
-			}
-
-			label := displayLabelForSchema(match.Schema)
-			sp := ui.StartSpinner(fmt.Sprintf("Pulling %s  (schema %s)...", datasetName, label))
-
-			downloadURL, err := getDownloadURL(baseURL, token, match.ID)
-			if err != nil {
-				sp.Stop(false, "Pull failed")
-				return err
-			}
-
-			extracted, err := downloadAndExtractZip(downloadURL, outputDir)
-			if err != nil {
-				sp.Stop(false, "Pull failed")
-				return err
-			}
-
-			// The server zips schema sidecars (schema.json + *_func.sql +
-			// *_trigger.sql) alongside dataset CSVs, but our on-disk layout
-			// keeps sidecars one level up so multiple datasets share one
-			// schema folder. Split them so `seedmancer seed` can find the
-			// sidecars without rebuilding a merge-dir every time.
-			schemaDir := filepath.Dir(filepath.Dir(outputDir))
-			lifted, err := liftSchemaSidecars(outputDir, schemaDir)
-			if err != nil {
-				sp.Stop(false, "Pull failed")
-				return fmt.Errorf("placing schema files: %v", err)
-			}
-			ui.Debug("Lifted %d schema sidecar(s) into %s", lifted, schemaDir)
-			sp.Stop(true, fmt.Sprintf("Pulled %s → %s (%d files)", datasetName, outputDir, len(extracted)))
-
+			ui.Success("Pulled %s @ %s", out.Scenario, out.Revision)
+			ui.KeyValue("Schema: ", out.SchemaShort)
+			ui.KeyValue("Files: ", fmt.Sprintf("%d", len(out.Files)))
+			ui.KeyValue("Path: ", out.Path)
 			return nil
 		},
 	}
 }
 
-// findRemoteDataset looks up a dataset by name, optionally narrowed to a
-// specific schema fingerprint prefix. Returns the resolved dataset metadata
-// (including schema info) or an error explaining why the match is unclear.
+// findRemoteDataset looks up a dataset by name. Returns the resolved
+// dataset metadata or a friendly error.
 func findRemoteDataset(baseURL, token, datasetName, schemaPrefix string) (datasetAPI, error) {
 	q := url.Values{}
 	if schemaPrefix != "" {
@@ -177,15 +132,9 @@ func findRemoteDataset(baseURL, token, datasetName, schemaPrefix string) (datase
 
 	switch len(hits) {
 	case 0:
-		if schemaPrefix != "" {
-			return datasetAPI{}, fmt.Errorf(
-				"no remote dataset named %q under schema prefix %q\n  Run 'seedmancer list' to see available datasets",
-				datasetName, schemaPrefix,
-			)
-		}
 		return datasetAPI{}, fmt.Errorf(
-			"no remote dataset named %q\n  Run 'seedmancer list' to see available datasets",
-			datasetName,
+			"no remote scenario named %q\n  Run `seedmancer push %s` first or check the spelling",
+			datasetName, datasetName,
 		)
 	case 1:
 		return hits[0], nil
@@ -197,37 +146,10 @@ func findRemoteDataset(baseURL, token, datasetName, schemaPrefix string) (datase
 			}
 		}
 		return datasetAPI{}, fmt.Errorf(
-			"dataset name %q exists under multiple schemas (%s) — rename the duplicates in the dashboard so ids are unique",
+			"scenario %q exists under multiple schemas (%s) — rename the duplicates in the dashboard so ids are unique",
 			datasetName, strings.Join(fps, ", "),
 		)
 	}
-}
-
-// resolveFetchOutput picks the destination directory for extracted CSVs.
-//
-// Uses the schema-first layout: <storagePath>/schemas/<fp-short>/datasets/<name>
-func resolveFetchOutput(match datasetAPI, datasetName string) (string, error) {
-	configPath, err := utils.FindConfigFile()
-	if err != nil {
-		return "", fmt.Errorf(
-			"no seedmancer.yaml found.\n" +
-				"  Run 'seedmancer init' to create a seedmancer.yaml",
-		)
-	}
-	projectRoot := filepath.Dir(configPath)
-	cfg, err := utils.LoadConfig(configPath)
-	if err != nil {
-		return "", fmt.Errorf("reading config: %v", err)
-	}
-
-	if match.Schema == nil {
-		return "", fmt.Errorf(
-			"remote dataset %q has no attached schema",
-			datasetName,
-		)
-	}
-
-	return utils.DatasetPath(projectRoot, cfg.StoragePath, match.Schema.FingerprintShort, datasetName), nil
 }
 
 func displayLabelForSchema(s *schemaRefShort) string {
@@ -274,15 +196,15 @@ func getDownloadURL(baseURL, token, datasetID string) (string, error) {
 }
 
 // liftSchemaSidecars moves schema-level files (schema.json plus any
-// *_func.sql / *_trigger.sql SQL sidecars) from a freshly-extracted dataset
-// folder up into the shared schema folder. Two datasets that share a schema
-// produce byte-identical sidecars (fingerprint is derived from schema.json),
-// so we overwrite unconditionally rather than sniffing for changes.
-// Returns the number of files moved.
-func liftSchemaSidecars(datasetDir, schemaDir string) (int, error) {
-	entries, err := os.ReadDir(datasetDir)
+// *_func.sql / *_trigger.sql) from a freshly-extracted revision data
+// folder up into the shared schema folder. Two scenarios that share a
+// schema produce byte-identical sidecars (fingerprint is derived from
+// schema.json), so we overwrite unconditionally rather than sniffing
+// for changes. Returns the number of files moved.
+func liftSchemaSidecars(dataDir, schemaDir string) (int, error) {
+	entries, err := os.ReadDir(dataDir)
 	if err != nil {
-		return 0, fmt.Errorf("reading %s: %v", datasetDir, err)
+		return 0, fmt.Errorf("reading %s: %v", dataDir, err)
 	}
 	if err := os.MkdirAll(schemaDir, 0755); err != nil {
 		return 0, fmt.Errorf("creating %s: %v", schemaDir, err)
@@ -296,10 +218,8 @@ func liftSchemaSidecars(datasetDir, schemaDir string) (int, error) {
 		if !utils.IsSchemaSidecarName(name) {
 			continue
 		}
-		src := filepath.Join(datasetDir, name)
+		src := filepath.Join(dataDir, name)
 		dst := filepath.Join(schemaDir, name)
-		// os.Rename is atomic on the same FS; fall back to copy+remove for
-		// cross-device (e.g. tmpfs vs. ext4) edge cases.
 		if err := os.Rename(src, dst); err != nil {
 			if err := copyFile(src, dst); err != nil {
 				return moved, err

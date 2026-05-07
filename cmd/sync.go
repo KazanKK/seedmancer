@@ -13,34 +13,32 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/KazanKK/seedmancer/internal/scenario"
 	"github.com/KazanKK/seedmancer/internal/ui"
 	utils "github.com/KazanKK/seedmancer/internal/utils"
 
 	"github.com/urfave/cli/v2"
 )
 
-// PushCommand uploads a local dataset to the cloud.
-//
-// The server identifies the target schema from the fingerprint of the
-// zip's `schema.json`, so we never send a schema name — it's fully
-// derived. Dataset ids must be unique across local schemas; if the same
-// dataset id exists under two schemas, rename one via `seedmancer schemas
-// rename` first.
+// PushCommand uploads the latest (or selected) revision of a scenario to the cloud.
+// The scenario path is the dataset name; the local revision id (rNNN) is sent so
+// the server stores an immutable row under that label.
 func PushCommand() *cli.Command {
 	return &cli.Command{
-		Name:    "push",
-		Aliases: []string{"sync"},
-		Usage:   "Upload a single local dataset to the cloud",
-		Description: "Zips the schema sidecars + CSVs for one local dataset and uploads\n" +
-			"them to your Seedmancer cloud account. The target schema is derived\n" +
-			"from schema.json's fingerprint — no need to pass a schema id.",
-		ArgsUsage: " ",
+		Name:      "push",
+		Aliases:   []string{"sync"},
+		Usage:     "Upload a scenario's latest revision to the cloud",
+		ArgsUsage: "[scenario]",
+		Description: "Zips the schema sidecars + the chosen revision's CSVs and uploads\n" +
+			"them to your Seedmancer cloud account. The scenario path is the cloud name;\n" +
+			"the revision label (e.g. r002) is preserved on the server.\n\n" +
+			"With --all, every scenario under <storagePath>/scenarios/ that has a valid\n" +
+			"manifest is pushed using its latest revision (same as a single push without\n" +
+			"--revision / --stable).",
 		Flags: []cli.Flag{
-			&cli.StringFlag{
-				Name:     "dataset-id",
-				Aliases:  []string{"d", "id"},
-				Required: true,
-				Usage:    "(required) Dataset id to upload (the name given at export/generate time)",
+			&cli.BoolFlag{
+				Name:  "all",
+				Usage: "Push every local scenario (latest revision each)",
 			},
 			&cli.StringFlag{
 				Name:  "token",
@@ -57,42 +55,77 @@ func PushCommand() *cli.Command {
 			if err != nil {
 				return err
 			}
-
 			token, err := utils.ResolveAPIToken(c.String("token"))
 			if err != nil {
 				return err
 			}
 
-			datasetName := strings.TrimSpace(c.String("dataset-id"))
+			scenarioArg := strings.TrimSpace(c.Args().First())
+			useAll := c.Bool("all")
+			if useAll && scenarioArg != "" {
+				return fmt.Errorf("cannot combine --all with a scenario name")
+			}
+			if !useAll && scenarioArg == "" {
+				return fmt.Errorf("usage: seedmancer push <scenario>\n   or: seedmancer push --all")
+			}
 
-			schema, datasetDir, err := utils.FindLocalDataset(projectRoot, cfg.StoragePath, "", datasetName)
+			baseURL := utils.GetBaseURL()
+
+			if useAll {
+				paths, badManifests, walkErr := scenario.WalkScenarios(projectRoot, cfg.StoragePath)
+				if walkErr != nil {
+					return walkErr
+				}
+				for path, manifestErr := range badManifests {
+					ui.Warn("skipping scenario %q (unreadable manifest): %v", path, manifestErr)
+				}
+				if len(paths) == 0 {
+					return fmt.Errorf("no scenarios to push — run `seedmancer export <scenario>` first")
+				}
+				for _, scenarioPath := range paths {
+					rev, revErr := resolveScenarioRevision(projectRoot, cfg.StoragePath, scenarioPath, "", false)
+					if revErr != nil {
+						return fmt.Errorf("push %s: %w", scenarioPath, revErr)
+					}
+					schemaDir := scenario.SchemaStoreDir(projectRoot, cfg.StoragePath, utils.FingerprintShort(rev.Manifest.SchemaFingerprint))
+					ui.Step("%s @ %s  (schema %s)", scenarioPath, rev.RevID, utils.FingerprintShort(rev.Manifest.SchemaFingerprint))
+					if err := syncOne(schemaDir, rev.DataDir, scenarioPath, rev.RevID, baseURL, token); err != nil {
+						return fmt.Errorf("push %s: %w", scenarioPath, err)
+					}
+				}
+				return nil
+			}
+
+			scenarioPath, err := scenario.Normalize(scenarioArg)
 			if err != nil {
 				return err
 			}
-
-			ui.Step("%s / %s  (schema %s)", datasetName, filepath.Base(schema.Path), schema.FingerprintShort)
-
-			baseURL := utils.GetBaseURL()
-			return syncOne(schema, datasetDir, datasetName, baseURL, token)
+			rev, err := resolveScenarioRevision(projectRoot, cfg.StoragePath, scenarioPath, "", false)
+			if err != nil {
+				return err
+			}
+			schemaDir := scenario.SchemaStoreDir(projectRoot, cfg.StoragePath, utils.FingerprintShort(rev.Manifest.SchemaFingerprint))
+			ui.Step("%s @ %s  (schema %s)", scenarioPath, rev.RevID, utils.FingerprintShort(rev.Manifest.SchemaFingerprint))
+			return syncOne(schemaDir, rev.DataDir, scenarioPath, rev.RevID, baseURL, token)
 		},
 	}
 }
 
-func syncOne(schema utils.LocalSchema, datasetDir, datasetName, baseURL, token string) error {
-	schemaFiles, err := utils.SchemaFiles(schema.Path)
+// syncOne uploads schema sidecars + revision CSVs for a single scenario.
+// revisionID is sent as `revision=rNNN` so the cloud stores under that label.
+func syncOne(schemaDir, dataDir, datasetName, revisionID, baseURL, token string) error {
+	schemaFiles, err := utils.SchemaFiles(schemaDir)
 	if err != nil {
 		return err
 	}
-	dataFiles, err := utils.DatasetFiles(datasetDir)
+	dataFiles, err := utils.DatasetFiles(dataDir)
 	if err != nil {
 		return err
 	}
 	if len(dataFiles) == 0 {
-		return fmt.Errorf("no CSV or JSON files in %s", datasetDir)
+		return fmt.Errorf("no CSV or JSON files in %s", dataDir)
 	}
 
-	// Zip entries: schema sidecars + data CSVs, all flat at the root so the
-	// server sees `schema.json` and `<table>.csv` as siblings.
 	entries := make([]string, 0, len(schemaFiles)+len(dataFiles))
 	entries = append(entries, schemaFiles...)
 	entries = append(entries, dataFiles...)
@@ -109,12 +142,11 @@ func syncOne(schema utils.LocalSchema, datasetDir, datasetName, baseURL, token s
 
 	sp = ui.StartSpinner("Uploading...")
 	ui.Debug("POST %s/v1.0/datasets/sync/upload-url?name=%s", baseURL, datasetName)
-	uploadURLResp, err := requestUploadURL(ctx, token, baseURL, datasetName)
+	uploadURLResp, err := requestUploadURL(ctx, token, baseURL, datasetName, revisionID)
 	if err != nil {
 		sp.Stop(false, "Upload failed")
 		return err
 	}
-
 	if err := putToStorage(ctx, uploadURLResp.UploadURL, zipData); err != nil {
 		sp.Stop(false, "Upload failed")
 		return err
@@ -122,7 +154,7 @@ func syncOne(schema utils.LocalSchema, datasetDir, datasetName, baseURL, token s
 	sp.Stop(true, "Uploaded")
 
 	sp = ui.StartSpinner("Processing...")
-	result, err := confirmUpload(ctx, token, baseURL, datasetName, uploadURLResp.Path)
+	result, err := confirmUpload(ctx, token, baseURL, datasetName, uploadURLResp.Path, revisionID)
 	if err != nil {
 		sp.Stop(false, "Processing failed")
 		return err
@@ -133,10 +165,10 @@ func syncOne(schema utils.LocalSchema, datasetDir, datasetName, baseURL, token s
 	if result.Updated {
 		verb = "Updated"
 	}
-	ui.Success("%s dataset %q", verb, result.Name)
+	ui.Success("%s scenario %q", verb, result.Name)
 	ui.KeyValue("  Schema: ", fmt.Sprintf("%s%s", result.FingerprintShort, newSchemaBadge(result.SchemaCreated)))
-	ui.KeyValue("  Dataset ID: ", result.ID)
-	ui.KeyValue("  Files: ", fmt.Sprintf("%d", result.FileCount))
+	ui.KeyValue("  ID:     ", result.ID)
+	ui.KeyValue("  Files:  ", fmt.Sprintf("%d", result.FileCount))
 	fmt.Println()
 	ui.Info("View it at https://seedmancer.dev/dashboard/schemas")
 	return nil
@@ -144,9 +176,12 @@ func syncOne(schema utils.LocalSchema, datasetDir, datasetName, baseURL, token s
 
 // requestUploadURL calls POST /v1.0/datasets/sync/upload-url and returns
 // the presigned storage URL and staging path.
-func requestUploadURL(ctx context.Context, token, baseURL, datasetName string) (uploadURLResponse, error) {
+func requestUploadURL(ctx context.Context, token, baseURL, datasetName, revisionID string) (uploadURLResponse, error) {
 	q := url.Values{}
 	q.Set("name", datasetName)
+	if strings.TrimSpace(revisionID) != "" {
+		q.Set("revision", strings.TrimSpace(revisionID))
+	}
 	endpoint := fmt.Sprintf("%s/v1.0/datasets/sync/upload-url?%s", baseURL, q.Encode())
 
 	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, nil)
@@ -200,10 +235,13 @@ func putToStorage(ctx context.Context, signedURL string, zipData *bytes.Buffer) 
 }
 
 // confirmUpload calls POST /v1.0/datasets/sync/confirm and returns the result.
-func confirmUpload(ctx context.Context, token, baseURL, datasetName, stagingPath string) (syncUploadResult, error) {
+func confirmUpload(ctx context.Context, token, baseURL, datasetName, stagingPath, revisionID string) (syncUploadResult, error) {
 	q := url.Values{}
 	q.Set("name", datasetName)
 	q.Set("path", stagingPath)
+	if strings.TrimSpace(revisionID) != "" {
+		q.Set("revision", strings.TrimSpace(revisionID))
+	}
 	endpoint := fmt.Sprintf("%s/v1.0/datasets/sync/confirm?%s", baseURL, q.Encode())
 
 	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, nil)

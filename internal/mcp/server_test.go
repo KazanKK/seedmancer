@@ -189,7 +189,7 @@ func TestListDatasetsHappyPath(t *testing.T) {
 
 	res, err := session.CallTool(ctx, &sdk.CallToolParams{
 		Name:      "list_datasets",
-		Arguments: map[string]any{"local": true},
+		Arguments: map[string]any{},
 	})
 	if err != nil {
 		t.Fatalf("CallTool: %v", err)
@@ -197,8 +197,6 @@ func TestListDatasetsHappyPath(t *testing.T) {
 	if res.IsError {
 		t.Fatalf("unexpected error: %+v", res.Content)
 	}
-	// StructuredContent is set by the SDK when the tool has an output
-	// schema (which our Run* types produce via jsonschema tags).
 	if res.StructuredContent == nil {
 		t.Fatalf("expected structured content for list_datasets")
 	}
@@ -206,8 +204,8 @@ func TestListDatasetsHappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	if !strings.Contains(string(raw), `"local"`) {
-		t.Errorf("structured content missing \"local\" key: %s", raw)
+	if !strings.Contains(string(raw), `"scenarios"`) {
+		t.Errorf("structured content missing \"scenarios\" key: %s", raw)
 	}
 }
 

@@ -32,47 +32,6 @@ func TestDisplayLabelForSchema(t *testing.T) {
 	}
 }
 
-func TestResolveFetchOutput_noConfigNoFlagErrors(t *testing.T) {
-	dir := t.TempDir()
-	prev, _ := os.Getwd()
-	t.Cleanup(func() { _ = os.Chdir(prev) })
-	if err := os.Chdir(dir); err != nil {
-		t.Fatalf("chdir: %v", err)
-	}
-	// Stub HOME so no ~/.seedmancer/config.yaml lookup interferes with the test.
-	t.Setenv("HOME", dir)
-
-	_, err := resolveFetchOutput(datasetAPI{Name: "ds1"}, "ds1")
-	if err == nil {
-		t.Fatal("expected error when seedmancer.yaml is missing")
-	}
-}
-
-func TestResolveFetchOutput_usesConfigStoragePath(t *testing.T) {
-	dir := t.TempDir()
-	prev, _ := os.Getwd()
-	t.Cleanup(func() { _ = os.Chdir(prev) })
-	if err := os.Chdir(dir); err != nil {
-		t.Fatalf("chdir: %v", err)
-	}
-	t.Setenv("HOME", dir)
-
-	writeFile(t, filepath.Join(dir, "seedmancer.yaml"), "storage_path: .seedmancer\n")
-
-	got, err := resolveFetchOutput(datasetAPI{
-		Name:   "ds1",
-		Schema: &schemaRefShort{FingerprintShort: "abcd12345678"},
-	}, "ds1")
-	if err != nil {
-		t.Fatalf("unexpected err: %v", err)
-	}
-
-	want := utils.DatasetPath(dir, ".seedmancer", "abcd12345678", "ds1")
-	if got != want {
-		t.Fatalf("got %q, want %q", got, want)
-	}
-}
-
 func TestFindRemoteDataset_singleMatch(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1.0/datasets" {

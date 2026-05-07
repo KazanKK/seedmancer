@@ -473,6 +473,124 @@ func TestStripeExport_NoAIInfer_SkipsAICall(t *testing.T) {
 	}
 }
 
+func TestStripeSeed_SubscriptionRawPriceIDResolvesViaRetrieve(t *testing.T) {
+	dir := t.TempDir()
+	csvPath := filepath.Join(dir, "Account.csv")
+	if err := os.WriteFile(csvPath, []byte("email,billing_customer_id,billing_subscription_id\nuser@example.com,cus_old,sub_old\n"), 0644); err != nil {
+		t.Fatalf("write csv: %v", err)
+	}
+
+	var gotSubscriptionPrice string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/customers":
+			writeJSON(t, w, map[string]interface{}{
+				"data": []map[string]interface{}{
+					{"id": "cus_old", "email": "user@example.com", "metadata": map[string]string{}},
+				},
+				"has_more": false,
+			})
+		case r.Method == http.MethodDelete && r.URL.Path == "/v1/customers/cus_old":
+			writeJSON(t, w, map[string]interface{}{"id": "cus_old", "deleted": true})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/customers":
+			writeJSON(t, w, map[string]interface{}{"id": "cus_new", "email": "user@example.com"})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/payment_methods":
+			writeJSON(t, w, map[string]interface{}{"id": "pm_test_visa"})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/payment_methods/pm_test_visa/attach":
+			writeJSON(t, w, map[string]interface{}{"id": "pm_test_visa", "customer": "cus_new"})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/customers/cus_new":
+			writeJSON(t, w, map[string]interface{}{"id": "cus_new"})
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/prices/price_direct":
+			writeJSON(t, w, map[string]interface{}{
+				"id": "price_direct", "active": true, "product": "prod_x", "currency": "usd", "unit_amount": 100,
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/subscriptions":
+			if err := r.ParseForm(); err != nil {
+				t.Fatalf("parse form: %v", err)
+			}
+			gotSubscriptionPrice = r.Form.Get("items[0][price]")
+			writeJSON(t, w, map[string]interface{}{"id": "sub_new", "customer": "cus_new", "status": "active"})
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	snap := stripeSnapshot{
+		Version: stripeSnapshotVersion,
+		Service: "stripe",
+		Catalog: stripeCatalogSpec{
+			Products: nil,
+		},
+		Customers: []stripeCustomerSnap{
+			{Email: "user@example.com", Alias: "customer:{email}"},
+		},
+		Subscriptions: []stripeSubscriptionSnap{
+			{
+				CustomerEmail: "user@example.com",
+				CustomerAlias: "customer:{email}",
+				PriceKey:      "price_direct",
+				Alias:         "subscription:{email}:direct",
+			},
+		},
+		ExternalIDResolution: []externalIDResolution{
+			{Table: "Account", MatchColumn: "email", OutputColumn: "billing_customer_id", ObjectAlias: "customer:{email}"},
+			{Table: "Account", MatchColumn: "email", OutputColumn: "billing_subscription_id", ObjectAlias: "subscription:{email}:direct"},
+		},
+	}
+	snap.withDefaults()
+	data, err := json.Marshal(snap)
+	if err != nil {
+		t.Fatalf("marshal snapshot: %v", err)
+	}
+
+	connector := testStripeConnector(server.URL)
+	if err := connector.Seed(WithDataDir(context.Background(), dir), data); err != nil {
+		t.Fatalf("Seed: %v", err)
+	}
+	if gotSubscriptionPrice != "price_direct" {
+		t.Fatalf("expected subscription items[0][price]=price_direct, got %q", gotSubscriptionPrice)
+	}
+}
+
+func TestStripeListProductsPaginates(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/products" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		calls++
+		if calls == 1 {
+			writeJSON(t, w, map[string]interface{}{
+				"data": []map[string]interface{}{
+					{"id": "prod_a", "name": "A", "active": true},
+				},
+				"has_more": true,
+			})
+			return
+		}
+		writeJSON(t, w, map[string]interface{}{
+			"data": []map[string]interface{}{
+				{"id": "prod_b", "name": "B", "active": true},
+			},
+			"has_more": false,
+		})
+	}))
+	defer server.Close()
+
+	connector := testStripeConnector(server.URL)
+	products, err := connector.listProducts(context.Background(), true, false)
+	if err != nil {
+		t.Fatalf("listProducts: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("expected 2 API pages, got %d", calls)
+	}
+	if len(products) != 2 || products[0].ID != "prod_a" || products[1].ID != "prod_b" {
+		t.Fatalf("unexpected products: %#v", products)
+	}
+}
+
 func TestStripeSeedTrialingSubscriptionSendsTrialPeriodDays(t *testing.T) {
 	dir := t.TempDir()
 	csvPath := filepath.Join(dir, "Account.csv")

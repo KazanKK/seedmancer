@@ -15,8 +15,18 @@ import (
 
 	db "github.com/KazanKK/seedmancer/database"
 	"github.com/KazanKK/seedmancer/internal/gointerp"
+	"github.com/KazanKK/seedmancer/internal/scenario"
+	"github.com/KazanKK/seedmancer/internal/schemadiff"
 	svc "github.com/KazanKK/seedmancer/internal/services"
 	utils "github.com/KazanKK/seedmancer/internal/utils"
+)
+
+// silence unused-import warning in environments that haven't wired the
+// new packages everywhere yet — they are real dependencies of RunCheck
+// and the scenario-aware paths below.
+var (
+	_ = scenario.Normalize
+	_ = schemadiff.Diff
 )
 
 // This file exposes the same logic the CLI `Action` bodies run, but as
@@ -33,63 +43,31 @@ import (
 
 // ─── list ─────────────────────────────────────────────────────────────────────
 
-// ListInput controls which side(s) `RunList` walks. Zero-value (both
-// flags false) is interpreted as "both sides", matching the CLI default.
-type ListInput struct {
-	Token  string `json:"token,omitempty" jsonschema:"API token override (falls back to credentials / SEEDMANCER_API_TOKEN)"`
-	Local  bool   `json:"local,omitempty" jsonschema:"only list local datasets (skips the API call)"`
-	Remote bool   `json:"remote,omitempty" jsonschema:"only list remote datasets (skips the local walk)"`
-}
+// ListInput is currently empty — the new scenario layout makes the
+// local/remote split meaningless because cloud sync only carries the
+// latest revision of each scenario as a single dataset id. We keep the
+// type so the MCP tool surface stays stable.
+type ListInput struct{}
 
-// ListOutput mirrors the JSON shape emitted by `seedmancer list --json`, so
-// MCP clients get the same schema whether they use the tool or pipe the
-// CLI into jq.
+// ListOutput mirrors `seedmancer list --json`: scenarios known on disk,
+// each with its latest/stable pointers and schema fingerprint.
 type ListOutput struct {
-	Local  []listEntry `json:"local"`
-	Remote []listEntry `json:"remote"`
+	Scenarios []listEntry `json:"scenarios"`
 }
 
-// RunList returns the list of datasets on either or both sides. Errors
-// from one side (e.g. missing API token) do not fail the whole call when
-// both sides are requested — they surface as an empty slice on that side.
-func RunList(_ context.Context, in ListInput) (ListOutput, error) {
-	localWanted, remoteWanted := in.Local, in.Remote
-	if !localWanted && !remoteWanted {
-		localWanted, remoteWanted = true, true
+// RunList returns the scenarios known on disk. Cloud-side discovery is
+// intentionally not performed here — cloud entries don't carry pointers
+// or revisions, so mixing them into the same shape would just confuse
+// callers.
+func RunList(_ context.Context, _ ListInput) (ListOutput, error) {
+	entries, err := listLocalEntries()
+	if err != nil {
+		return ListOutput{Scenarios: []listEntry{}}, err
 	}
-
-	out := ListOutput{Local: []listEntry{}, Remote: []listEntry{}}
-
-	if localWanted {
-		entries, err := listLocalEntries()
-		if err == nil {
-			if entries != nil {
-				out.Local = entries
-			}
-		} else if !remoteWanted {
-			return out, err
-		}
+	if entries == nil {
+		entries = []listEntry{}
 	}
-
-	if remoteWanted {
-		token, tokenErr := utils.ResolveAPIToken(in.Token)
-		if tokenErr != nil {
-			if !localWanted {
-				return out, tokenErr
-			}
-		} else {
-			entries, err := listRemoteEntries(token)
-			if err != nil {
-				if !localWanted {
-					return out, err
-				}
-			} else if entries != nil {
-				out.Remote = entries
-			}
-		}
-	}
-
-	return out, nil
+	return ListOutput{Scenarios: entries}, nil
 }
 
 // ─── describe_dataset ─────────────────────────────────────────────────────────
@@ -702,7 +680,11 @@ alwaysApply: true
 
 # Seedmancer test data rules
 
-This project uses **Seedmancer** for test data management.
+This project uses **Seedmancer** for test data management. Test data lives in
+**scenarios** (slash-separated paths like ` + "`basic`" + ` or ` + "`billing/pro`" + `). Every
+` + "`export_database`" + ` creates a new immutable **revision** under the scenario
+(e.g. ` + "`r001`" + `, ` + "`r002`" + `). The ` + "`latest`" + ` revision is used by default; pin a
+revision as ` + "`stable`" + ` for CI.
 
 **Never** write CSV files to ` + "`.seedmancer/`" + ` by hand.
 **Never** create seed.sql or similar workarounds.
@@ -713,39 +695,52 @@ This project uses **Seedmancer** for test data management.
 ## Standard workflow for generating test data:
 
 1. ` + "`get_status`" + ` — confirm project config and default env are set.
-2. ` + "`list_schemas`" + ` — check whether a schema has been exported yet.
-   - **If no schemas exist**: call ` + "`export_database`" + ` first. The DB is already
-     running (it is configured in seedmancer.yaml), so this always works.
-     export_database captures the schema + current data and creates the
-     ` + "`.seedmancer/schemas/<fp>/schema.json`" + ` file that all other tools need.
-     The dataset created by export defaults to ` + "`baseline`" + `; older projects may
-     have a timestamp like ` + "`20260426231303`" + ` instead — call ` + "`list_datasets`" + ` to
-     confirm the actual id.
+2. ` + "`list_datasets`" + ` — check existing scenarios and their pointers.
+   - **If no scenarios exist**: call ` + "`export_database`" + ` with a scenario name
+     (e.g. ` + "`basic`" + ` or ` + "`billing/pro`" + `). The DB is already running
+     (configured in seedmancer.yaml), so this always works. The export
+     creates ` + "`.seedmancer/scenarios/<scenario>/revisions/r001/`" + ` plus the
+     content-addressed ` + "`.seedmancer/schemas/<fp>/schema.json`" + ` that other
+     tools rely on.
 3. ` + "`describe_schema`" + ` — get the exact table and column names.
-4. ` + "`generate_dataset_local`" + ` with ` + "`inherit: \"baseline\"`" + ` — write a Go script that produces
-   only the tables you actually want to change. The result is a complete, seedable
-   dataset; descendant tables that FK to overwritten tables are auto-cleared.
-   When the project's export uses a timestamp id, ` + "`inherit`" + ` falls back to it
-   automatically (response carries ` + "`inheritFallback: true`" + `).
-5. ` + "`seed_database`" + ` — load the new dataset into the database.
+4. ` + "`generate_dataset_local`" + ` with ` + "`scenario: \"<new-scenario>\"`" + ` and
+   ` + "`inherit: \"<base-scenario>\"`" + ` — write a Go script that produces only the
+   tables you actually want to change. The result is a complete, seedable
+   revision; descendant tables that FK to overwritten tables are auto-cleared.
+5. ` + "`seed_database`" + ` with the scenario path — loads the latest revision.
+   Pass ` + "`useStable: true`" + ` for the pinned revision.
 
-**Never create both a "-gen" and "-merged" dataset for one task.** Always pass
-` + "`inherit`" + ` so a single ` + "`generate_dataset_local`" + ` call yields a complete dataset.
+**Always pass ` + "`inherit`" + `** so a single ` + "`generate_dataset_local`" + ` call yields a
+complete dataset.
 
-## Large datasets (1M+ rows)
+## Large scenarios (1M+ rows)
 
 ` + "`generate_dataset_local`" + ` works for any row count. Always use Seedmancer —
-even for millions of rows. The seed step may take longer due to index rebuilding
-but that is expected. **Never** switch to a raw SQL script just because the
+even for millions of rows. **Never** switch to a raw SQL script just because the
 dataset is large.
 
 ## To modify existing generated data:
 
-1. ` + "`describe_dataset`" + ` — check for ` + "`hasGeneratorScript: true`" + `.
-2. ` + "`get_dataset_script`" + ` — retrieve the saved source.
-3. Modify it and pass back to ` + "`generate_dataset_local`" + ` with a new ` + "`datasetId`" + `
-   and ` + "`inherit: \"baseline\"`" + `.
-4. ` + "`seed_database`" + ` with the new dataset id.
+1. ` + "`list_history`" + ` — see existing revisions of the scenario.
+2. ` + "`describe_dataset`" + ` — check for ` + "`hasGeneratorScript: true`" + `.
+3. ` + "`get_dataset_script`" + ` — retrieve the saved source.
+4. Modify it and pass back to ` + "`generate_dataset_local`" + ` with the same scenario
+   path and ` + "`inherit: \"<base-scenario>\"`" + `. A new ` + "`rNNN`" + ` revision is created
+   automatically and ` + "`latest`" + ` advances to it.
+5. ` + "`seed_database`" + ` with the scenario path.
+
+## Schema drift
+
+If the database schema changed since you last exported, run ` + "`check_scenario`" + `
+to compare. ` + "`seed_database`" + ` refuses to seed mismatched schemas unless you
+pass ` + "`force: true`" + `; usually the right fix is a fresh ` + "`export_database`" + ` to
+create a new revision.
+
+## Pinning a known-good revision
+
+Use ` + "`pin_scenario`" + ` to mark the current latest (or a specific revision) as
+stable. CI then runs ` + "`seed_database`" + ` with ` + "`useStable: true`" + ` to lock onto
+that revision regardless of newer exports.
 
 ## If this is a brand-new project (no seedmancer.yaml):
 1. ` + "`init_project`" + ` — creates seedmancer.yaml and .seedmancer/.
@@ -760,7 +755,7 @@ Read ` + "`seedmancer://docs/local-generation`" + ` for the Go script interface 
 Pipe the script via a shell heredoc — **nothing is written to disk**:
 
 ` + "```" + `
-seedmancer generate-local --schema-id <fp> --id <dataset-id> --inherit baseline <<'EOF'
+seedmancer generate-local <scenario> --inherit <base-scenario> <<'EOF'
 package main
 
 import ("encoding/csv"; "fmt"; "os")
@@ -770,12 +765,11 @@ func main() {
   // ... write only the <table>.csv files you want to change ...
 }
 EOF
-seedmancer seed --id <dataset-id>
+seedmancer seed <scenario>
 ` + "```" + `
 
-` + "`--inherit baseline`" + ` pre-fills the new dataset from the baseline export and
-auto-clears descendant FK tables; you no longer need to ` + "`cp baseline/* merged/`" + ` or
-` + "`head -1`" + ` child tables by hand.
+` + "`--inherit <base-scenario>`" + ` pre-fills the new revision from the base scenario
+and auto-clears descendant FK tables; no manual ` + "`cp`" + ` / ` + "`head -1`" + ` glue needed.
 
 **Never write the script to a file in the project directory.** ` + "`generate-local`" + `
 refuses ` + "`--script-file`" + ` paths inside the project — pipe via stdin instead.
@@ -793,38 +787,46 @@ const claudeMdBlockEnd = "<!-- seedmancer:end -->"
 const claudeMdBlock = `<!-- seedmancer:start -->
 ## Seedmancer test data rules
 
-This project uses Seedmancer (MCP) for test data. When asked to create,
-generate, or seed test/fixture data:
+This project uses Seedmancer (MCP) for test data, organised into **scenarios**
+(slash-separated paths like ` + "`basic`" + ` or ` + "`billing/pro`" + `). Every export creates
+a new immutable **revision** under the scenario; ` + "`latest`" + ` is used by default,
+` + "`stable`" + ` can be pinned for CI.
+
+When asked to create, generate, or seed test/fixture data:
 
 - **Never** write files to ` + "`.seedmancer/`" + ` manually. Never create seed.sql workarounds.
 - Never save generator scripts to project directories (` + "`scripts/`" + `, ` + "`src/`" + `, etc.).
   Never show script content, file paths, or generation internals to the user.
-- Call ` + "`list_schemas`" + ` first. If no schemas exist, call ` + "`export_database`" + ` — the DB
-  is already running (configured in seedmancer.yaml), so this always works. The
-  resulting dataset defaults to ` + "`baseline`" + ` (older projects may have a
-  timestamp id; ` + "`inherit`" + ` falls back to a single existing dataset automatically).
-- Then: ` + "`describe_schema`" + ` → ` + "`generate_dataset_local`" + ` (with ` + "`inherit: \"baseline\"`" + ` for
-  partial updates) → ` + "`seed_database`" + `.
-- **Never create both ` + "`-gen`" + ` and ` + "`-merged`" + ` datasets** for one change. ` + "`inherit`" + ` produces
-  a complete, seedable dataset in one call; descendant tables that FK to overwritten
-  tables are auto-cleared.
+- Call ` + "`list_datasets`" + ` first. If no scenarios exist, call ` + "`export_database`" + `
+  with a scenario name — the DB is already running (configured in seedmancer.yaml),
+  so this always works. The export creates ` + "`r001`" + ` plus the schema sidecars
+  every other tool needs.
+- Then: ` + "`describe_schema`" + ` → ` + "`generate_dataset_local`" + ` with ` + "`scenario`" + ` and
+  ` + "`inherit: \"<base-scenario>\"`" + ` → ` + "`seed_database`" + ` with the scenario path.
+- **Always pass ` + "`inherit`" + `** for partial updates. ` + "`inherit`" + ` produces a complete,
+  seedable revision in one call; descendant tables that FK to overwritten tables
+  are auto-cleared.
 - For a new project without seedmancer.yaml: ` + "`init_project`" + ` first.
 - Prefer ` + "`generate_dataset_local`" + ` (local, no quota) over ` + "`generate_dataset`" + ` (cloud).
 - **Always use Seedmancer for test data — even 1M+ rows.** ` + "`generate_dataset_local`" + `
   works at any row count. Never fall back to a SQL script just because the dataset
   is large.
-- **To modify existing data**: call ` + "`describe_dataset`" + ` to check for ` + "`hasGeneratorScript`" + `,
-  then ` + "`get_dataset_script`" + ` to retrieve the source, modify it, and pass it back
-  to ` + "`generate_dataset_local`" + ` with a new dataset id and ` + "`inherit: \"baseline\"`" + `.
-- **CLI fallback** (when MCP tools are unavailable): pipe the script via stdin heredoc
-  with ` + "`--inherit baseline`" + ` — nothing is written to disk, no manual ` + "`cp`" + `/` + "`head -1`" + `
-  shell glue, no orphan FKs.
+- **To modify existing data**: ` + "`list_history`" + ` to see existing revisions, then
+  ` + "`describe_dataset`" + ` for ` + "`hasGeneratorScript`" + `, then ` + "`get_dataset_script`" + ` to
+  retrieve the source, modify it, and pass it back to ` + "`generate_dataset_local`" + `
+  with the same scenario path and ` + "`inherit`" + `. A new ` + "`rNNN`" + ` revision is created
+  automatically.
+- **Schema drift**: run ` + "`check_scenario`" + ` if the DB schema changed since the
+  last export. ` + "`seed_database`" + ` refuses mismatched schemas unless ` + "`force: true`" + `.
+- **Pin for CI**: use ` + "`pin_scenario`" + ` to mark a revision as stable; CI uses
+  ` + "`seed_database`" + ` with ` + "`useStable: true`" + ` to lock onto it.
+- **CLI fallback** (when MCP tools are unavailable): pipe the script via stdin heredoc.
   ` + "```" + `
-  seedmancer generate-local --schema-id <fp> --id <id> --inherit baseline <<'EOF'
+  seedmancer generate-local <scenario> --inherit <base-scenario> <<'EOF'
   package main
   ...
   EOF
-  seedmancer seed --id <id>
+  seedmancer seed <scenario>
   ` + "```" + `
   ` + "`generate-local`" + ` rejects ` + "`--script-file`" + ` paths inside the project; always pipe.
 - Simply say "Generating test data…" and report the result.
@@ -891,20 +893,28 @@ func RunInstallAgentRules(_ context.Context, _ InstallAgentRulesInput) (InstallA
 
 // ─── seed ─────────────────────────────────────────────────────────────────────
 
+// SeedInput is the scenario-aware seed request. Revision selection is
+// the same as the CLI — the explicit revision wins, then `useStable`,
+// then pointers.latest.
 type SeedInput struct {
-	DatasetID string `json:"datasetId" jsonschema:"Dataset id to restore (the name given at export/generate time)"`
+	Scenario  string `json:"scenario" jsonschema:"Scenario path (e.g. basic, billing/pro)"`
+	Revision  string `json:"revision,omitempty" jsonschema:"Specific revision id (e.g. r002); defaults to latest"`
+	UseStable bool   `json:"useStable,omitempty" jsonschema:"Use the scenario's stable revision (set via pin)"`
 	Env       string `json:"env,omitempty" jsonschema:"Comma-separated env names (e.g. 'local,staging'); default_env when empty"`
 	DBURL     string `json:"dbUrl,omitempty" jsonschema:"Ad-hoc target URL (mutually exclusive with env)"`
-	// Agents always run non-interactive; we default to skipping the prompt
-	// when Yes is omitted by setting `Yes: true` in the MCP handler.
-	Yes             bool `json:"yes,omitempty" jsonschema:"Skip the prod confirmation prompt"`
+	// Force seeds even when the database schema fingerprint differs from
+	// the revision's stored fingerprint. Use sparingly — drift usually
+	// means the dataset will fail to load.
+	Force bool `json:"force,omitempty" jsonschema:"Seed even when the database schema fingerprint differs"`
+	// Yes skips the destructive-action prompt. Agents are non-interactive
+	// so MCP handlers default to true.
+	Yes             bool `json:"yes,omitempty" jsonschema:"Skip the destructive-action prompt"`
 	ContinueOnError bool `json:"continueOnError,omitempty" jsonschema:"Keep seeding remaining envs after a failure"`
 	DryRun          bool `json:"dryRun,omitempty" jsonschema:"Resolve envs and return plan only; make no DB changes"`
 	// NoServices skips service-connector seeds when true. Useful for
 	// fast DB-only resets when service state doesn't need to change.
 	NoServices bool `json:"noServices,omitempty" jsonschema:"Skip 3rd-party service connectors (Supabase Auth, etc.)"`
 	// Token is the Seedmancer API token used for plan entitlement checks.
-	// Falls back to the credentials file / SEEDMANCER_API_TOKEN env var.
 	Token string `json:"token,omitempty" jsonschema:"Seedmancer API token (for Pro plan check)"`
 }
 
@@ -916,8 +926,11 @@ type SeedTargetResult struct {
 	Error      string `json:"error,omitempty"`
 }
 
+// SeedOutput is the structured result returned by RunSeed. Schema is the
+// fingerprint short of the revision's stored schema, not the live DB.
 type SeedOutput struct {
-	Dataset  string             `json:"dataset"`
+	Scenario string             `json:"scenario"`
+	Revision string             `json:"revision"`
 	Schema   string             `json:"schema"`
 	DryRun   bool               `json:"dryRun"`
 	Results  []SeedTargetResult `json:"results"`
@@ -944,24 +957,28 @@ func RunSeed(_ context.Context, in SeedInput) (SeedOutput, error) {
 		return SeedOutput{}, err
 	}
 
+	scenarioPath, err := scenario.Normalize(in.Scenario)
+	if err != nil {
+		return SeedOutput{}, err
+	}
+
 	targets, err := resolveSeedTargetsFromOpts(in.DBURL, in.Env, cfg)
 	if err != nil {
 		return SeedOutput{}, err
 	}
 
-	datasetName := strings.TrimSpace(in.DatasetID)
-	schema, datasetDir, err := utils.FindLocalDataset(projectRoot, cfg.StoragePath, "", datasetName)
+	rev, err := resolveScenarioRevision(projectRoot, cfg.StoragePath, scenarioPath, in.Revision, in.UseStable)
 	if err != nil {
 		return SeedOutput{}, err
 	}
 
-	sourceEnv := utils.ReadDatasetMeta(datasetDir).SourceEnv
-
+	schemaShort := utils.FingerprintShort(rev.Manifest.SchemaFingerprint)
 	out := SeedOutput{
-		Dataset: datasetName,
-		Schema:  schema.FingerprintShort,
-		DryRun:  in.DryRun,
-		Results: make([]SeedTargetResult, 0, len(targets)),
+		Scenario: scenarioPath,
+		Revision: rev.RevID,
+		Schema:   schemaShort,
+		DryRun:   in.DryRun,
+		Results:  make([]SeedTargetResult, 0, len(targets)),
 	}
 
 	if in.DryRun {
@@ -971,7 +988,8 @@ func RunSeed(_ context.Context, in SeedInput) (SeedOutput, error) {
 		return out, nil
 	}
 
-	merged, cleanup, err := materializeRestoreDir(schema.Path, datasetDir)
+	schemaDir := scenario.SchemaStoreDir(projectRoot, cfg.StoragePath, schemaShort)
+	merged, cleanup, err := materializeRestoreDir(schemaDir, rev.DataDir)
 	if err != nil {
 		return out, err
 	}
@@ -985,7 +1003,7 @@ func RunSeed(_ context.Context, in SeedInput) (SeedOutput, error) {
 	// constraint. By seeding auth/services first (while public.* is still
 	// empty), the trigger inserts succeed, and the subsequent DB restore
 	// truncates + refills the public.* tables from the CSV anyway.
-	if !in.NoServices && !in.DryRun && len(cfg.ServicesForEnv(targets[0].Name)) > 0 {
+	if !in.NoServices && len(cfg.ServicesForEnv(targets[0].Name)) > 0 {
 		baseURL := utils.GetBaseURL()
 		token, _ := utils.ResolveAPIToken(in.Token)
 		if entErr := utils.CheckServiceConnectorEntitlement(baseURL, token); entErr != nil {
@@ -997,8 +1015,6 @@ func RunSeed(_ context.Context, in SeedInput) (SeedOutput, error) {
 				out.ServiceErrors = append(out.ServiceErrors, fmt.Sprintf("building connectors: %v", err))
 				out.AnyError = true
 			} else {
-				// Pass the first available DB URL so auth connector can clean
-				// mirror rows before creating new auth users.
 				svcCtx := context.Background()
 				svcCtx = svc.WithDataDir(svcCtx, merged)
 				for _, t := range targets {
@@ -1008,7 +1024,7 @@ func RunSeed(_ context.Context, in SeedInput) (SeedOutput, error) {
 					}
 				}
 				for _, nc := range connectors {
-					sidecarPath := filepath.Join(datasetDir, nc.SidecarFilename())
+					sidecarPath := filepath.Join(rev.DataDir, nc.SidecarFilename())
 					data, err := os.ReadFile(sidecarPath)
 					if err != nil {
 						if !os.IsNotExist(err) {
@@ -1029,7 +1045,23 @@ func RunSeed(_ context.Context, in SeedInput) (SeedOutput, error) {
 	}
 
 	for i, t := range targets {
-		res := seedOneEnvQuiet(t, merged, in.Yes, sourceEnv, datasetName)
+		if !in.Force {
+			if err := guardSchemaMatch(t, rev); err != nil {
+				out.Results = append(out.Results, SeedTargetResult{
+					Env:   t.Name,
+					Error: err.Error(),
+				})
+				out.AnyError = true
+				if !in.ContinueOnError {
+					for _, rest := range targets[i+1:] {
+						out.Results = append(out.Results, SeedTargetResult{Env: rest.Name, Skipped: true})
+					}
+					break
+				}
+				continue
+			}
+		}
+		res := seedOneEnvQuiet(t, merged, in.Yes, scenarioPath, rev.RevID)
 		r := SeedTargetResult{
 			Env:        res.Env,
 			DurationMS: res.Duration.Milliseconds(),
@@ -1083,14 +1115,11 @@ func resolveSeedTargetsFromOpts(dbURL, envCSV string, cfg utils.Config) ([]utils
 // same prod guard (opt-out via `yes`), but without the spinner and
 // titles. MCP clients surface progress + errors from the structured
 // result; the CLI still has its pretty path via seedOneEnv.
-func seedOneEnvQuiet(target utils.NamedEnv, mergedDir string, yes bool, sourceEnv, datasetName string) seedResult {
+func seedOneEnvQuiet(target utils.NamedEnv, mergedDir string, yes bool, scenarioPath, revID string) seedResult {
 	start := time.Now()
 	dest := targetDisplay(target)
-	if !yes {
-		msg := fmt.Sprintf("confirmation required to seed %q into %q — set yes:true to confirm", datasetName, dest)
-		if sourceEnv != "" && sourceEnv != adHocEnvName {
-			msg = fmt.Sprintf("confirmation required to seed %q (from %q) into %q — set yes:true to confirm", datasetName, sourceEnv, dest)
-		}
+	if !yes && isProdLike(target.Name) {
+		msg := fmt.Sprintf("confirmation required to seed %q @ %s into %q — set yes:true to confirm", scenarioPath, revID, dest)
 		return seedResult{Env: dest, Err: fmt.Errorf("%s", msg), Duration: time.Since(start)}
 	}
 	manager, normalizedURL, err := db.NewManager(target.DatabaseURL)
@@ -1108,11 +1137,13 @@ func seedOneEnvQuiet(target utils.NamedEnv, mergedDir string, yes bool, sourceEn
 
 // ─── export ───────────────────────────────────────────────────────────────────
 
+// ExportInput is the structured argument set for RunExport. Scenario is
+// validated before any database work happens so a typo never produces a
+// half-written revision directory.
 type ExportInput struct {
-	ID    string `json:"id,omitempty" jsonschema:"Dataset id for the new dump (defaults to baseline)"`
-	Env   string `json:"env,omitempty" jsonschema:"Named environment to export from (defaults to default_env)"`
-	DBURL string `json:"dbUrl,omitempty" jsonschema:"Ad-hoc source URL (takes precedence over env)"`
-	Force bool   `json:"force,omitempty" jsonschema:"Overwrite an existing dataset without prompting"`
+	Scenario string `json:"scenario" jsonschema:"Scenario path (e.g. basic, billing/pro, checkout/payment/failed)"`
+	Env      string `json:"env,omitempty" jsonschema:"Named environment to export from (defaults to default_env)"`
+	DBURL    string `json:"dbUrl,omitempty" jsonschema:"Ad-hoc source URL (takes precedence over env)"`
 	// NoServices skips service-connector exports when true. Useful for
 	// DB-only snapshots when service credentials are not available.
 	NoServices bool `json:"noServices,omitempty" jsonschema:"Skip 3rd-party service connectors (Supabase Auth, etc.)"`
@@ -1120,22 +1151,41 @@ type ExportInput struct {
 	// service connector export. Useful when offline or when manual
 	// externalIdResolution rules already cover all CSV columns.
 	NoAIInfer bool `json:"noAiInfer,omitempty" jsonschema:"Skip backend AI mapping inference for service connectors (Stripe externalIdResolution)"`
+	// Description is stored verbatim on the new revision manifest so
+	// future `seedmancer history` output can describe what changed.
+	Description string `json:"description,omitempty" jsonschema:"Human-readable note saved on the new revision"`
 	// Token is the Seedmancer API token used for plan entitlement checks.
 	// Falls back to the credentials file / SEEDMANCER_API_TOKEN env var.
 	Token string `json:"token,omitempty" jsonschema:"Seedmancer API token (for Pro plan check)"`
 }
 
+// ExportOutput summarises the freshly created revision. Path points at
+// the revision data folder so callers can hand it straight to seed.
 type ExportOutput struct {
-	Dataset           string `json:"dataset"`
-	SchemaFingerprint string `json:"schemaFingerprint"`
-	SchemaShort       string `json:"schemaShort"`
-	Path              string `json:"path"`
-	Env               string `json:"env"`
-	// ServicesExported lists the service connector names that were snapshotted.
+	Scenario          string         `json:"scenario"`
+	Revision          string         `json:"revision"`
+	SchemaFingerprint string         `json:"schemaFingerprint"`
+	SchemaShort       string         `json:"schemaShort"`
+	Path              string         `json:"path"`
+	Env               string         `json:"env"`
+	Tables            []string       `json:"tables"`
+	RowCounts         map[string]int `json:"rowCounts"`
+	// ServicesExported lists the service connector names that were
+	// snapshotted into the revision data folder. Always includes
+	// "postgres" implicitly; only extra connectors appear here.
 	ServicesExported []string `json:"servicesExported,omitempty"`
 }
 
+// RunExport materialises a new revision under the requested scenario
+// and updates pointers.latest. Existing revisions are never touched —
+// the only mutation outside the new revision folder is the manifest
+// timestamps and the latest pointer.
 func RunExport(_ context.Context, in ExportInput) (ExportOutput, error) {
+	scenarioPath, err := scenario.Normalize(in.Scenario)
+	if err != nil {
+		return ExportOutput{}, err
+	}
+
 	configPath, err := utils.FindConfigFile()
 	if err != nil {
 		return ExportOutput{}, err
@@ -1146,27 +1196,10 @@ func RunExport(_ context.Context, in ExportInput) (ExportOutput, error) {
 		return ExportOutput{}, err
 	}
 
-	var target utils.NamedEnv
-	if adhoc := strings.TrimSpace(in.DBURL); adhoc != "" {
-		target = utils.NamedEnv{Name: adHocEnvName, EnvConfig: utils.EnvConfig{DatabaseURL: adhoc}}
-	} else if len(cfg.EffectiveEnvs()) == 0 && strings.TrimSpace(in.Env) == "" {
-		if v := strings.TrimSpace(os.Getenv("SEEDMANCER_DATABASE_URL")); v != "" {
-			target = utils.NamedEnv{Name: adHocEnvName, EnvConfig: utils.EnvConfig{DatabaseURL: v}}
-		}
+	target, err := pickExportTarget(cfg, in.Env, in.DBURL)
+	if err != nil {
+		return ExportOutput{}, err
 	}
-	if target.DatabaseURL == "" {
-		t, err := cfg.ResolveEnv(in.Env)
-		if err != nil {
-			return ExportOutput{}, err
-		}
-		target = t
-	}
-
-	datasetName := strings.TrimSpace(in.ID)
-	if datasetName == "" {
-		datasetName = time.Now().UTC().Format("20060102150405")
-	}
-	datasetName = utils.SanitizeDatasetSegment(datasetName)
 
 	manager, normalizedURL, err := db.NewManager(target.DatabaseURL)
 	if err != nil {
@@ -1190,7 +1223,7 @@ func RunExport(_ context.Context, in ExportInput) (ExportOutput, error) {
 	}
 	fpShort := utils.FingerprintShort(fingerprint)
 
-	schemaDir := utils.SchemaDir(projectRoot, cfg.StoragePath, fpShort)
+	schemaDir := scenario.SchemaStoreDir(projectRoot, cfg.StoragePath, fpShort)
 	if err := os.MkdirAll(schemaDir, 0755); err != nil {
 		return ExportOutput{}, fmt.Errorf("creating schema directory: %v", err)
 	}
@@ -1198,38 +1231,58 @@ func RunExport(_ context.Context, in ExportInput) (ExportOutput, error) {
 		return ExportOutput{}, err
 	}
 
-	datasetDir := utils.DatasetPath(projectRoot, cfg.StoragePath, fpShort, datasetName)
-	if info, statErr := os.Stat(datasetDir); statErr == nil && info.IsDir() {
-		if !in.Force {
-			return ExportOutput{}, fmt.Errorf("dataset %q already exists at %s — set force:true to overwrite", datasetName, datasetDir)
+	// Require a valid Pro entitlement **before** creating scenario/revision
+	// folders so a token failure never leaves a partial export on disk.
+	var connectorToken string
+	if !in.NoServices && len(cfg.ServicesForEnv(target.Name)) > 0 {
+		baseURL := utils.GetBaseURL()
+		var tokErr error
+		connectorToken, tokErr = utils.ResolveAPIToken(in.Token)
+		if tokErr != nil {
+			return ExportOutput{}, fmt.Errorf("service connectors blocked: %w", tokErr)
 		}
-		if err := os.RemoveAll(datasetDir); err != nil {
-			return ExportOutput{}, fmt.Errorf("removing existing dataset directory: %v", err)
+		if entErr := utils.CheckServiceConnectorEntitlement(baseURL, connectorToken); entErr != nil {
+			return ExportOutput{}, fmt.Errorf("service connectors blocked: %w", entErr)
 		}
 	}
-	if err := os.MkdirAll(datasetDir, 0755); err != nil {
-		return ExportOutput{}, fmt.Errorf("creating dataset directory: %v", err)
+
+	var success bool
+	var revRoot string // set once revision dir is created; removed on failure
+	defer func() {
+		if success || revRoot == "" {
+			return
+		}
+		_ = os.RemoveAll(revRoot)
+	}()
+
+	scenarioDir := scenario.ScenarioDir(projectRoot, cfg.StoragePath, scenarioPath)
+	if err := os.MkdirAll(scenarioDir, 0755); err != nil {
+		return ExportOutput{}, fmt.Errorf("creating scenario directory: %v", err)
 	}
-	if err := manager.ExportToCSV(datasetDir); err != nil {
+	revID, err := scenario.NextRevisionID(scenarioDir)
+	if err != nil {
+		return ExportOutput{}, fmt.Errorf("allocating revision id: %v", err)
+	}
+	revRoot = scenario.RevisionDir(projectRoot, cfg.StoragePath, scenarioPath, revID)
+	dataDir := filepath.Join(revRoot, "data")
+	if err := os.MkdirAll(dataDir, 0755); err != nil {
+		return ExportOutput{}, fmt.Errorf("creating revision data directory: %v", err)
+	}
+	if err := manager.ExportToCSV(dataDir); err != nil {
 		return ExportOutput{}, fmt.Errorf("exporting data: %v", err)
 	}
-	_ = utils.WriteDatasetMeta(datasetDir, utils.DatasetMeta{SourceEnv: target.Name})
 
-	// ── Service connectors (Pro gate) ────────────────────────────────────────
+	// ── Service connectors (Pro gate was checked above) ────────────────────
 	var servicesExported []string
 	if !in.NoServices && len(cfg.ServicesForEnv(target.Name)) > 0 {
 		baseURL := utils.GetBaseURL()
-		token, _ := utils.ResolveAPIToken(in.Token)
-		if entErr := utils.CheckServiceConnectorEntitlement(baseURL, token); entErr != nil {
-			return ExportOutput{}, fmt.Errorf("service connectors blocked: %w", entErr)
-		}
 		connectors, err := svc.BuildAll(cfg.ServicesForEnv(target.Name))
 		if err != nil {
 			return ExportOutput{}, fmt.Errorf("building service connectors: %w", err)
 		}
 		for _, nc := range connectors {
-			svcCtx := svc.WithDataDir(context.Background(), datasetDir)
-			svcCtx = svc.WithAICredentials(svcCtx, svc.AICredentials{BaseURL: baseURL, Token: token})
+			svcCtx := svc.WithDataDir(context.Background(), dataDir)
+			svcCtx = svc.WithAICredentials(svcCtx, svc.AICredentials{BaseURL: baseURL, Token: connectorToken})
 			if in.NoAIInfer {
 				svcCtx = svc.WithNoAIInfer(svcCtx)
 			}
@@ -1237,7 +1290,7 @@ func RunExport(_ context.Context, in ExportInput) (ExportOutput, error) {
 			if err != nil {
 				return ExportOutput{}, fmt.Errorf("exporting service %q: %w", nc.Name, err)
 			}
-			sidecarPath := filepath.Join(datasetDir, nc.SidecarFilename())
+			sidecarPath := filepath.Join(dataDir, nc.SidecarFilename())
 			if err := os.WriteFile(sidecarPath, data, 0644); err != nil {
 				return ExportOutput{}, fmt.Errorf("writing %s: %w", nc.SidecarFilename(), err)
 			}
@@ -1245,38 +1298,102 @@ func RunExport(_ context.Context, in ExportInput) (ExportOutput, error) {
 		}
 	}
 
+	tables, rowCounts, err := listCSVTablesAndRowCounts(dataDir)
+	if err != nil {
+		return ExportOutput{}, err
+	}
+
+	now := time.Now().UTC()
+	revManifest := scenario.RevisionManifest{
+		Scenario:          scenarioPath,
+		Revision:          revID,
+		SchemaFingerprint: fingerprint,
+		CreatedAt:         now,
+		Source:            "export",
+		Tables:            tables,
+		Services:          append([]string{"postgres"}, servicesExported...),
+		RowCounts:         rowCounts,
+		Description:       strings.TrimSpace(in.Description),
+	}
+	if err := scenario.WriteRevisionManifest(revRoot, revManifest); err != nil {
+		return ExportOutput{}, err
+	}
+
+	scenarioManifest, err := scenario.ReadManifest(scenarioDir)
+	if err != nil && !os.IsNotExist(err) {
+		return ExportOutput{}, err
+	}
+	if scenarioManifest.Scenario == "" {
+		scenarioManifest = scenario.Manifest{Scenario: scenarioPath, CreatedAt: now}
+	}
+	scenarioManifest.UpdatedAt = now
+	scenarioManifest.LatestRevision = revID
+	if err := scenario.WriteManifest(scenarioDir, scenarioManifest); err != nil {
+		return ExportOutput{}, err
+	}
+
+	pointers, _ := scenario.ReadPointers(scenarioDir)
+	pointers.Latest = revID
+	if err := scenario.WritePointers(scenarioDir, pointers); err != nil {
+		return ExportOutput{}, err
+	}
+
+	success = true
 	return ExportOutput{
-		Dataset:           datasetName,
+		Scenario:          scenarioPath,
+		Revision:          revID,
 		SchemaFingerprint: fingerprint,
 		SchemaShort:       fpShort,
-		Path:              datasetDir,
+		Path:              dataDir,
 		Env:               target.Name,
+		Tables:            tables,
+		RowCounts:         rowCounts,
 		ServicesExported:  servicesExported,
 	}, nil
 }
 
-// ─── generate ─────────────────────────────────────────────────────────────────
+// pickExportTarget mirrors resolveSingleDB but works from raw strings so
+// the MCP handler can call RunExport without a cli.Context.
+func pickExportTarget(cfg utils.Config, envName, dbURL string) (utils.NamedEnv, error) {
+	if adhoc := strings.TrimSpace(dbURL); adhoc != "" {
+		return utils.NamedEnv{Name: adHocEnvName, EnvConfig: utils.EnvConfig{DatabaseURL: adhoc}}, nil
+	}
+	if len(cfg.EffectiveEnvs()) == 0 && strings.TrimSpace(envName) == "" {
+		if v := strings.TrimSpace(os.Getenv("SEEDMANCER_DATABASE_URL")); v != "" {
+			return utils.NamedEnv{Name: adHocEnvName, EnvConfig: utils.EnvConfig{DatabaseURL: v}}, nil
+		}
+	}
+	return cfg.ResolveEnv(envName)
+}
+
+// ─── generate (cloud AI) ──────────────────────────────────────────────────────
 
 // GenerateInput covers the non-interactive subset of `seedmancer generate`.
-// MCP clients that want to reuse an already-exported schema point at its
-// fingerprint; otherwise the tool errors and asks them to run export first
-// (we do not open DB connections from the MCP surface opportunistically).
+// The schema fingerprint is read from the scenario's existing latest
+// revision (or, when the scenario doesn't exist yet, from the inherit
+// base). MCP clients always pass a scenario path so the result is a
+// proper revision rather than a free-form dataset folder.
 type GenerateInput struct {
 	Prompt      string `json:"prompt" jsonschema:"Natural-language description of the data to generate"`
-	SchemaRef   string `json:"schemaRef" jsonschema:"Fingerprint prefix (≥4 chars) of the target schema folder"`
-	DatasetID   string `json:"datasetId,omitempty" jsonschema:"Dataset id for the result (timestamp when empty)"`
+	Scenario    string `json:"scenario" jsonschema:"Scenario path for the new revision (e.g. billing/pro)"`
+	Inherit     string `json:"inherit,omitempty" jsonschema:"Scenario whose latest revision provides the schema fingerprint"`
+	Description string `json:"description,omitempty" jsonschema:"Description stored on the new revision manifest"`
 	Token       string `json:"token,omitempty" jsonschema:"API token override"`
-	Force       bool   `json:"force,omitempty" jsonschema:"Overwrite an existing dataset folder"`
 	PollTimeout int    `json:"pollTimeoutSeconds,omitempty" jsonschema:"Max seconds to wait for the job (default 300)"`
 }
 
+// GenerateOutput summarises the freshly created revision. Path points at
+// the data folder so callers can hand it straight to seed.
 type GenerateOutput struct {
-	Dataset string `json:"dataset"`
-	Schema  string `json:"schema"`
-	Path    string `json:"path"`
-	JobID   string `json:"jobId,omitempty"`
+	Scenario string `json:"scenario"`
+	Revision string `json:"revision"`
+	Schema   string `json:"schema"`
+	Path     string `json:"path"`
+	JobID    string `json:"jobId,omitempty"`
 }
 
+// RunGenerate kicks off a backend AI generation job for a scenario and
+// materialises the resulting CSVs as a new revision.
 func RunGenerate(ctx context.Context, in GenerateInput) (GenerateOutput, error) {
 	configPath, err := utils.FindConfigFile()
 	if err != nil {
@@ -1290,20 +1407,43 @@ func RunGenerate(ctx context.Context, in GenerateInput) (GenerateOutput, error) 
 	if strings.TrimSpace(in.Prompt) == "" {
 		return GenerateOutput{}, fmt.Errorf("prompt cannot be empty")
 	}
-	if strings.TrimSpace(in.SchemaRef) == "" {
-		return GenerateOutput{}, fmt.Errorf("schemaRef cannot be empty — run export_database first")
+	scenarioPath, err := scenario.Normalize(in.Scenario)
+	if err != nil {
+		return GenerateOutput{}, err
 	}
 
 	token, err := utils.ResolveAPIToken(in.Token)
 	if err != nil {
 		return GenerateOutput{}, err
 	}
-	schema, err := utils.ResolveLocalSchema(projectRoot, cfg.StoragePath, in.SchemaRef)
-	if err != nil {
-		return GenerateOutput{}, err
-	}
 
-	schemaJSONPath := filepath.Join(schema.Path, "schema.json")
+	// Pick the schema: inherit base wins, else the scenario's existing
+	// latest revision. We need a fingerprint to send the right schema.json.
+	var schemaFingerprint string
+	if strings.TrimSpace(in.Inherit) != "" {
+		basePath, err := scenario.Normalize(in.Inherit)
+		if err != nil {
+			return GenerateOutput{}, fmt.Errorf("invalid inherit scenario: %w", err)
+		}
+		baseRev, err := resolveScenarioRevision(projectRoot, cfg.StoragePath, basePath, "", false)
+		if err != nil {
+			return GenerateOutput{}, fmt.Errorf("resolving inherit base %q: %w", basePath, err)
+		}
+		schemaFingerprint = baseRev.Manifest.SchemaFingerprint
+	}
+	if schemaFingerprint == "" {
+		if existing, err := resolveScenarioRevision(projectRoot, cfg.StoragePath, scenarioPath, "", false); err == nil {
+			schemaFingerprint = existing.Manifest.SchemaFingerprint
+		}
+	}
+	if schemaFingerprint == "" {
+		return GenerateOutput{}, fmt.Errorf(
+			"no schema available for scenario %q — pass --inherit <base-scenario> or run `seedmancer export %s` first",
+			scenarioPath, scenarioPath,
+		)
+	}
+	fpShort := utils.FingerprintShort(schemaFingerprint)
+	schemaJSONPath := scenario.SchemaJSONPath(projectRoot, cfg.StoragePath, fpShort)
 	raw, err := os.ReadFile(schemaJSONPath)
 	if err != nil {
 		return GenerateOutput{}, fmt.Errorf("reading %s: %v", schemaJSONPath, err)
@@ -1313,26 +1453,21 @@ func RunGenerate(ctx context.Context, in GenerateInput) (GenerateOutput, error) 
 		return GenerateOutput{}, fmt.Errorf("parsing schema.json: %v", err)
 	}
 
-	datasetName := strings.TrimSpace(in.DatasetID)
-	if datasetName == "" {
-		datasetName = time.Now().UTC().Format("20060102150405")
+	scenarioDir := scenario.ScenarioDir(projectRoot, cfg.StoragePath, scenarioPath)
+	if err := os.MkdirAll(scenarioDir, 0755); err != nil {
+		return GenerateOutput{}, fmt.Errorf("creating scenario dir: %v", err)
 	}
-	datasetName = utils.SanitizeDatasetSegment(datasetName)
-
-	datasetDir := utils.DatasetPath(projectRoot, cfg.StoragePath, schema.FingerprintShort, datasetName)
-	if info, statErr := os.Stat(datasetDir); statErr == nil && info.IsDir() {
-		if !in.Force {
-			return GenerateOutput{}, fmt.Errorf("dataset %q already exists at %s — set force:true to overwrite", datasetName, datasetDir)
-		}
-		if err := os.RemoveAll(datasetDir); err != nil {
-			return GenerateOutput{}, err
-		}
-	}
-	if err := os.MkdirAll(datasetDir, 0755); err != nil {
+	revID, err := scenario.NextRevisionID(scenarioDir)
+	if err != nil {
 		return GenerateOutput{}, err
 	}
+	revDir := scenario.RevisionDir(projectRoot, cfg.StoragePath, scenarioPath, revID)
+	dataDir := filepath.Join(revDir, "data")
+	if err := os.MkdirAll(dataDir, 0755); err != nil {
+		return GenerateOutput{}, fmt.Errorf("creating revision data dir: %v", err)
+	}
 
-	jobReq := generateJobRequest{Schema: sch, DatasetName: datasetName, Prompt: in.Prompt}
+	jobReq := generateJobRequest{Schema: sch, DatasetName: scenarioPath, Prompt: in.Prompt}
 	body, err := json.Marshal(jobReq)
 	if err != nil {
 		return GenerateOutput{}, err
@@ -1373,14 +1508,44 @@ func RunGenerate(ctx context.Context, in GenerateInput) (GenerateOutput, error) 
 		}
 		switch status.Status {
 		case "completed", "done", "success":
-			if _, err := downloadGenerateArtifacts(ctx, status.Files, datasetDir); err != nil {
+			if _, err := downloadGenerateArtifacts(ctx, status.Files, dataDir); err != nil {
 				return GenerateOutput{}, err
 			}
+			tables, rowCounts, _ := listCSVTablesAndRowCounts(dataDir)
+			now := time.Now().UTC()
+			revManifest := scenario.RevisionManifest{
+				Scenario:          scenarioPath,
+				Revision:          revID,
+				SchemaFingerprint: schemaFingerprint,
+				CreatedAt:         now,
+				Source:            "generate",
+				Tables:            tables,
+				Services:          []string{"postgres"},
+				RowCounts:         rowCounts,
+				Description:       strings.TrimSpace(in.Description),
+			}
+			if err := scenario.WriteRevisionManifest(revDir, revManifest); err != nil {
+				return GenerateOutput{}, err
+			}
+			scenarioManifest, err := scenario.ReadManifest(scenarioDir)
+			if err != nil && !os.IsNotExist(err) {
+				return GenerateOutput{}, err
+			}
+			if scenarioManifest.Scenario == "" {
+				scenarioManifest = scenario.Manifest{Scenario: scenarioPath, CreatedAt: now}
+			}
+			scenarioManifest.UpdatedAt = now
+			scenarioManifest.LatestRevision = revID
+			_ = scenario.WriteManifest(scenarioDir, scenarioManifest)
+			pointers, _ := scenario.ReadPointers(scenarioDir)
+			pointers.Latest = revID
+			_ = scenario.WritePointers(scenarioDir, pointers)
 			return GenerateOutput{
-				Dataset: datasetName,
-				Schema:  schema.FingerprintShort,
-				Path:    datasetDir,
-				JobID:   jobResp.JobID,
+				Scenario: scenarioPath,
+				Revision: revID,
+				Schema:   fpShort,
+				Path:     dataDir,
+				JobID:    jobResp.JobID,
 			}, nil
 		case "failed", "error":
 			msg := "unknown error"
@@ -1400,47 +1565,45 @@ func RunGenerate(ctx context.Context, in GenerateInput) (GenerateOutput, error) 
 
 // ─── generate local ───────────────────────────────────────────────────────────
 
-// GenerateLocalInput is the input for RunGenerateLocal. The agent writes a
-// Go program (package main, stdlib only) that creates <table>.csv files in the
-// directory passed as os.Args[1]. The CLI writes the script to a temp dir and
-// executes it with `go run` — no cloud API, no quota, no internet needed.
+// GenerateLocalInput is the input for RunGenerateLocal. The script writes
+// CSV files into the data folder of a fresh revision under the requested
+// scenario; everything else (schema sidecars, manifests, pointers) is
+// handled by Seedmancer itself.
+//
+// Inherit takes another scenario path; its latest revision provides the
+// base CSVs. The script may overwrite whichever tables it wants;
+// descendant tables (those that FK to overwritten tables) are cleared to
+// header-only so the result is always safe to seed.
 type GenerateLocalInput struct {
-	Script    string `json:"script"             jsonschema:"Go source code (package main) that writes <table>.csv files to os.Args[1]. Stdlib only; no go.mod needed."`
-	SchemaRef string `json:"schemaRef"          jsonschema:"Fingerprint prefix (≥4 chars) or display name of the target schema folder"`
-	DatasetID string `json:"datasetId,omitempty" jsonschema:"Dataset id for the result; auto-generated timestamp when empty"`
-	Force     bool   `json:"force,omitempty"    jsonschema:"Overwrite an existing dataset folder with the same id"`
-	// Inherit pre-fills the new dataset with all CSVs from another dataset
-	// under the same schema. The script then overwrites whichever tables it
-	// wants. Descendant tables (those that FK to overwritten tables) are
-	// automatically cleared to header-only so no orphan foreign keys remain.
-	// This eliminates the "products-only dataset wipes everything else" footgun.
-	Inherit string `json:"inherit,omitempty" jsonschema:"Base dataset id to inherit non-generated tables from (typically 'baseline')"`
+	Script      string `json:"script" jsonschema:"Go source (package main) that writes <table>.csv files into os.Args[1]"`
+	Scenario    string `json:"scenario" jsonschema:"Scenario path for the new revision (e.g. billing/pro)"`
+	Inherit     string `json:"inherit,omitempty" jsonschema:"Base scenario whose latest revision pre-fills the new revision"`
+	Description string `json:"description,omitempty" jsonschema:"Optional description stored on the new revision manifest"`
 }
 
+// GenerateLocalOutput is the structured result. Path points at the
+// revision data folder so the caller can hand it straight to seed.
 type GenerateLocalOutput struct {
-	Dataset               string   `json:"dataset"`
+	Scenario              string   `json:"scenario"`
+	Revision              string   `json:"revision"`
 	Schema                string   `json:"schema"`
 	Path                  string   `json:"path"`
 	Tables                []string `json:"tables"`
 	GeneratorScriptStored bool     `json:"generatorScriptStored"`
-	// InheritedFrom is the dataset id whose CSVs were copied in before the
-	// script ran. Empty when no inherit was requested.
-	InheritedFrom string `json:"inheritedFrom,omitempty"`
-	// ClearedTables lists tables whose CSV was reduced to header-only because
-	// they FK to a table the script overwrote. Empty when no inherit happened.
-	ClearedTables []string `json:"clearedTables,omitempty"`
-	// InheritFallback is true when the requested `inherit` id wasn't found
-	// but a single existing dataset was used as the base instead. Surfaces
-	// the "user has a timestamp dataset, agent asked for `baseline`" case.
-	InheritFallback bool `json:"inheritFallback,omitempty"`
+	InheritedFrom         string   `json:"inheritedFrom,omitempty"`
+	InheritedRevision     string   `json:"inheritedRevision,omitempty"`
+	ClearedTables         []string `json:"clearedTables,omitempty"`
 }
 
-func RunGenerateLocal(ctx context.Context, in GenerateLocalInput) (GenerateLocalOutput, error) {
+// RunGenerateLocal materialises a new revision whose data is produced by
+// running the given Go script against an embedded interpreter. The
+// revision uses the schema fingerprint of the inherit base (when given)
+// or the schema currently stored under the scenario's existing latest
+// revision; if neither exists, the caller must export at least once
+// first so we have a schema to pin against.
+func RunGenerateLocal(_ context.Context, in GenerateLocalInput) (GenerateLocalOutput, error) {
 	if strings.TrimSpace(in.Script) == "" {
 		return GenerateLocalOutput{}, fmt.Errorf("script cannot be empty")
-	}
-	if len(strings.TrimSpace(in.SchemaRef)) < 4 {
-		return GenerateLocalOutput{}, fmt.Errorf("schemaRef must be at least 4 characters")
 	}
 
 	configPath, err := utils.FindConfigFile()
@@ -1453,90 +1616,73 @@ func RunGenerateLocal(ctx context.Context, in GenerateLocalInput) (GenerateLocal
 		return GenerateLocalOutput{}, err
 	}
 
-	schema, err := utils.ResolveLocalSchema(projectRoot, cfg.StoragePath, in.SchemaRef)
+	scenarioPath, err := scenario.Normalize(in.Scenario)
 	if err != nil {
 		return GenerateLocalOutput{}, err
 	}
 
-	datasetName := strings.TrimSpace(in.DatasetID)
-	if datasetName == "" {
-		datasetName = time.Now().UTC().Format("20060102150405")
-	}
-	datasetName = utils.SanitizeDatasetSegment(datasetName)
-
-	// Reject inheriting from yourself — that would wipe the only base we
-	// could read from once we delete the existing dataset directory.
-	inheritFrom := strings.TrimSpace(in.Inherit)
-	if inheritFrom != "" && inheritFrom == datasetName {
-		return GenerateLocalOutput{}, fmt.Errorf("inherit base %q must differ from dataset id", inheritFrom)
-	}
-
-	// Resolve the base dataset *before* touching the new dataset directory so
-	// a typo in --inherit doesn't destroy an existing dataset.
-	//
-	// When the literal name doesn't match but the schema has exactly one
-	// dataset, we fall back to it. This is the "user ran `seedmancer export`
-	// before we changed the default to `baseline`, so they have a timestamp
-	// folder instead" case — agents shouldn't have to discover the timestamp
-	// before they can do partial generations. Multiple datasets → no fallback,
-	// because picking arbitrarily would silently bias the result.
+	// Resolve the inherit base (if any) BEFORE we create the new revision
+	// directory so a typo never produces a half-written rNNN folder.
 	var (
-		baseDir      string
-		resolvedFrom = inheritFrom
-		usedFallback bool
+		baseDir          string
+		baseFingerprint  string
+		inheritedFrom    string
+		inheritedRevID   string
 	)
-	if inheritFrom != "" {
-		_, dir, err := utils.FindLocalDataset(projectRoot, cfg.StoragePath, schema.FingerprintShort, inheritFrom)
-		if err == nil {
-			baseDir = dir
-		} else {
-			datasets := listLocalDatasetIDs(schema.Path)
-			fallback := singleFallbackDataset(datasets, datasetName)
-			if fallback != "" {
-				_, dir2, err2 := utils.FindLocalDataset(projectRoot, cfg.StoragePath, schema.FingerprintShort, fallback)
-				if err2 == nil {
-					baseDir = dir2
-					resolvedFrom = fallback
-					usedFallback = true
-				}
-			}
-			if baseDir == "" {
-				avail := "(none)"
-				if len(datasets) > 0 {
-					avail = strings.Join(datasets, ", ")
-				}
-				return GenerateLocalOutput{}, fmt.Errorf(
-					"inherit base %q not found under schema %s. Available datasets: %s",
-					inheritFrom, schema.FingerprintShort, avail,
-				)
-			}
+	if strings.TrimSpace(in.Inherit) != "" {
+		basePath, err := scenario.Normalize(in.Inherit)
+		if err != nil {
+			return GenerateLocalOutput{}, fmt.Errorf("invalid inherit scenario: %w", err)
 		}
+		baseRev, err := resolveScenarioRevision(projectRoot, cfg.StoragePath, basePath, "", false)
+		if err != nil {
+			return GenerateLocalOutput{}, fmt.Errorf("resolving inherit base %q: %w", basePath, err)
+		}
+		baseDir = baseRev.DataDir
+		baseFingerprint = baseRev.Manifest.SchemaFingerprint
+		inheritedFrom = basePath
+		inheritedRevID = baseRev.RevID
 	}
 
-	datasetDir := utils.DatasetPath(projectRoot, cfg.StoragePath, schema.FingerprintShort, datasetName)
-	if info, statErr := os.Stat(datasetDir); statErr == nil && info.IsDir() {
-		if !in.Force {
-			return GenerateLocalOutput{}, fmt.Errorf(
-				"dataset %q already exists at %s — set force:true to overwrite", datasetName, datasetDir,
-			)
-		}
-		if err := os.RemoveAll(datasetDir); err != nil {
-			return GenerateLocalOutput{}, fmt.Errorf("removing existing dataset: %w", err)
+	// When no inherit was given, fall back to the scenario's existing
+	// latest revision for schema info. This lets users iterate on a
+	// scenario without re-exporting just to get the right fingerprint.
+	if baseFingerprint == "" {
+		if existing, err := resolveScenarioRevision(projectRoot, cfg.StoragePath, scenarioPath, "", false); err == nil {
+			baseFingerprint = existing.Manifest.SchemaFingerprint
 		}
 	}
-	if err := os.MkdirAll(datasetDir, 0755); err != nil {
-		return GenerateLocalOutput{}, fmt.Errorf("creating dataset dir: %w", err)
+	if baseFingerprint == "" {
+		return GenerateLocalOutput{}, fmt.Errorf(
+			"no schema available for scenario %q — pass --inherit <base-scenario> or run `seedmancer export %s` first",
+			scenarioPath, scenarioPath,
+		)
+	}
+	fpShort := utils.FingerprintShort(baseFingerprint)
+	schemaJSONPath := scenario.SchemaJSONPath(projectRoot, cfg.StoragePath, fpShort)
+
+	scenarioDir := scenario.ScenarioDir(projectRoot, cfg.StoragePath, scenarioPath)
+	if err := os.MkdirAll(scenarioDir, 0755); err != nil {
+		return GenerateLocalOutput{}, fmt.Errorf("creating scenario dir: %w", err)
+	}
+	revID, err := scenario.NextRevisionID(scenarioDir)
+	if err != nil {
+		return GenerateLocalOutput{}, err
+	}
+	revDir := scenario.RevisionDir(projectRoot, cfg.StoragePath, scenarioPath, revID)
+	dataDir := filepath.Join(revDir, "data")
+	if err := os.MkdirAll(dataDir, 0755); err != nil {
+		return GenerateLocalOutput{}, fmt.Errorf("creating revision data dir: %w", err)
 	}
 
-	// Pre-fill the new dataset with the inherit base's CSVs. The script can
-	// then overwrite whichever tables it cares about. Snapshot mtimes so we
-	// can detect which files the script actually touched.
+	// Pre-fill from the base revision. Snapshot mtimes so we can detect
+	// which CSVs the script actually wrote.
 	inherited := map[string]bool{}
 	preMtime := map[string]time.Time{}
 	if baseDir != "" {
 		entries, err := os.ReadDir(baseDir)
 		if err != nil {
-			_ = os.RemoveAll(datasetDir)
+			_ = os.RemoveAll(revDir)
 			return GenerateLocalOutput{}, fmt.Errorf("reading inherit base: %w", err)
 		}
 		for _, e := range entries {
@@ -1549,9 +1695,9 @@ func RunGenerateLocal(ctx context.Context, in GenerateLocalInput) (GenerateLocal
 				continue
 			}
 			src := filepath.Join(baseDir, name)
-			dst := filepath.Join(datasetDir, name)
+			dst := filepath.Join(dataDir, name)
 			if err := copyFile(src, dst); err != nil {
-				_ = os.RemoveAll(datasetDir)
+				_ = os.RemoveAll(revDir)
 				return GenerateLocalOutput{}, fmt.Errorf("copying %s from base: %w", name, err)
 			}
 			inherited[tbl] = true
@@ -1562,20 +1708,14 @@ func RunGenerateLocal(ctx context.Context, in GenerateLocalInput) (GenerateLocal
 	}
 
 	// Execute the script via the embedded yaegi Go interpreter.
-	// No Go toolchain needs to be installed on the client — yaegi is bundled
-	// in the Seedmancer binary and supports the full standard library.
-	if err := gointerp.Run(in.Script, datasetDir); err != nil {
-		_ = os.RemoveAll(datasetDir)
+	if err := gointerp.Run(in.Script, dataDir); err != nil {
+		_ = os.RemoveAll(revDir)
 		return GenerateLocalOutput{}, err
 	}
 
-	// Determine which CSVs ended up in the dataset and which ones the script
-	// actually wrote (vs. files that came untouched from the base). A file
-	// counts as "generated" when it's brand-new, or when its mtime advanced
-	// past the snapshot taken right after the base copy.
-	entries, err := os.ReadDir(datasetDir)
+	entries, err := os.ReadDir(dataDir)
 	if err != nil {
-		return GenerateLocalOutput{}, fmt.Errorf("reading dataset dir: %w", err)
+		return GenerateLocalOutput{}, fmt.Errorf("reading data dir: %w", err)
 	}
 	generated := map[string]bool{}
 	var tables []string
@@ -1599,33 +1739,27 @@ func RunGenerateLocal(ctx context.Context, in GenerateLocalInput) (GenerateLocal
 		}
 	}
 	if len(tables) == 0 {
-		_ = os.RemoveAll(datasetDir)
-		return GenerateLocalOutput{}, fmt.Errorf("script produced no CSV files in %s", datasetDir)
+		_ = os.RemoveAll(revDir)
+		return GenerateLocalOutput{}, fmt.Errorf("script produced no CSV files in %s", dataDir)
 	}
-	// Only count "generated" tables if the script wrote at least one CSV;
-	// otherwise the agent likely passed an empty script alongside an inherit
-	// flag, which is almost certainly a mistake.
 	if baseDir != "" && len(generated) == 0 {
-		_ = os.RemoveAll(datasetDir)
+		_ = os.RemoveAll(revDir)
 		return GenerateLocalOutput{}, fmt.Errorf(
 			"script produced no new CSV files; inheriting from %q without overwriting any table is a no-op",
-			inheritFrom,
+			inheritedFrom,
 		)
 	}
 
-	// Walk the FK graph: any inherited child table that references a
-	// generated table — directly or transitively — is reduced to header-only
-	// so the resulting dataset never carries orphan foreign keys after seed.
 	cleared := map[string]bool{}
 	if baseDir != "" && len(generated) > 0 {
-		idx, err := buildFKChildIndex(schema.SchemaJSONPath)
+		idx, err := buildFKChildIndex(schemaJSONPath)
 		if err == nil {
 			descendants := findFKDescendants(idx, generated)
 			for tbl := range descendants {
 				if !inherited[tbl] || generated[tbl] {
 					continue
 				}
-				csvPath := filepath.Join(datasetDir, tbl+".csv")
+				csvPath := filepath.Join(dataDir, tbl+".csv")
 				if err := truncateCSVToHeader(csvPath); err == nil {
 					cleared[tbl] = true
 				}
@@ -1634,29 +1768,72 @@ func RunGenerateLocal(ctx context.Context, in GenerateLocalInput) (GenerateLocal
 	}
 
 	sort.Strings(tables)
+	_, rowCounts, _ := listCSVTablesAndRowCounts(dataDir)
+
+	now := time.Now().UTC()
+	revManifest := scenario.RevisionManifest{
+		Scenario:          scenarioPath,
+		Revision:          revID,
+		SchemaFingerprint: baseFingerprint,
+		CreatedAt:         now,
+		Source:            "generate-local",
+		Tables:            tables,
+		Services:          []string{"postgres"},
+		RowCounts:         rowCounts,
+		Description:       strings.TrimSpace(in.Description),
+	}
+	if err := scenario.WriteRevisionManifest(revDir, revManifest); err != nil {
+		return GenerateLocalOutput{}, err
+	}
+
+	scenarioManifest, err := scenario.ReadManifest(scenarioDir)
+	if err != nil && !os.IsNotExist(err) {
+		return GenerateLocalOutput{}, err
+	}
+	if scenarioManifest.Scenario == "" {
+		scenarioManifest = scenario.Manifest{Scenario: scenarioPath, CreatedAt: now}
+	}
+	scenarioManifest.UpdatedAt = now
+	scenarioManifest.LatestRevision = revID
+	if err := scenario.WriteManifest(scenarioDir, scenarioManifest); err != nil {
+		return GenerateLocalOutput{}, err
+	}
+	pointers, _ := scenario.ReadPointers(scenarioDir)
+	pointers.Latest = revID
+	if err := scenario.WritePointers(scenarioDir, pointers); err != nil {
+		return GenerateLocalOutput{}, err
+	}
+
+	scriptKey := scenarioPath + "@" + revID
+	scriptStored := utils.SaveGeneratorScript(projectRoot, scriptKey, in.Script) == nil
+
 	return GenerateLocalOutput{
-		Dataset:               datasetName,
-		Schema:                schema.FingerprintShort,
-		Path:                  datasetDir,
+		Scenario:              scenarioPath,
+		Revision:              revID,
+		Schema:                fpShort,
+		Path:                  dataDir,
 		Tables:                tables,
-		GeneratorScriptStored: utils.SaveGeneratorScript(projectRoot, datasetName, in.Script) == nil,
-		InheritedFrom:         resolvedFrom,
+		GeneratorScriptStored: scriptStored,
+		InheritedFrom:         inheritedFrom,
+		InheritedRevision:     inheritedRevID,
 		ClearedTables:         sortedKeys(cleared),
-		InheritFallback:       usedFallback,
 	}, nil
 }
 
 // ─── push (sync) ─────────────────────────────────────────────────────────────
 
+// SyncInput uploads a scenario revision. The server stores an immutable
+// revision row (r001, r002, …) and advances the scenario's latest pointer.
 type SyncInput struct {
-	DatasetID string `json:"datasetId" jsonschema:"Dataset id to upload"`
-	Token     string `json:"token,omitempty" jsonschema:"API token override"`
+	Scenario string `json:"scenario" jsonschema:"Scenario path whose latest revision should be uploaded"`
+	Token    string `json:"token,omitempty" jsonschema:"API token override"`
 }
 
 type SyncOutput struct {
-	Dataset string `json:"dataset"`
-	Schema  string `json:"schema"`
-	ID      string `json:"id,omitempty"`
+	Scenario string `json:"scenario"`
+	Revision string `json:"revision"`
+	Schema   string `json:"schema"`
+	ID       string `json:"id,omitempty"`
 }
 
 func RunSync(ctx context.Context, in SyncInput) (SyncOutput, error) {
@@ -1673,32 +1850,58 @@ func RunSync(ctx context.Context, in SyncInput) (SyncOutput, error) {
 	if err != nil {
 		return SyncOutput{}, err
 	}
-	datasetName := strings.TrimSpace(in.DatasetID)
-	if datasetName == "" {
-		return SyncOutput{}, fmt.Errorf("datasetId is required")
-	}
-	schema, datasetDir, err := utils.FindLocalDataset(projectRoot, cfg.StoragePath, "", datasetName)
+	scenarioPath, err := scenario.Normalize(in.Scenario)
 	if err != nil {
 		return SyncOutput{}, err
 	}
+	rev, err := resolveScenarioRevision(projectRoot, cfg.StoragePath, scenarioPath, "", false)
+	if err != nil {
+		return SyncOutput{}, err
+	}
+	fpShort := utils.FingerprintShort(rev.Manifest.SchemaFingerprint)
+	schemaDir := scenario.SchemaStoreDir(projectRoot, cfg.StoragePath, fpShort)
 	baseURL := utils.GetBaseURL()
-	result, err := syncDatasetUpload(ctx, token, schema, datasetDir, datasetName, baseURL)
+
+	schemaFiles, err := utils.SchemaFiles(schemaDir)
 	if err != nil {
 		return SyncOutput{}, err
 	}
-	return SyncOutput{Dataset: datasetName, Schema: schema.FingerprintShort, ID: result.ID}, nil
+	dataFiles, err := utils.DatasetFiles(rev.DataDir)
+	if err != nil {
+		return SyncOutput{}, err
+	}
+	if len(dataFiles) == 0 {
+		return SyncOutput{}, fmt.Errorf("no CSV or JSON files in %s", rev.DataDir)
+	}
+	entries := append(append([]string{}, schemaFiles...), dataFiles...)
+	zipData, err := compressFiles(entries)
+	if err != nil {
+		return SyncOutput{}, fmt.Errorf("compressing files: %v", err)
+	}
+	result, err := syncUploadPresigned(ctx, token, baseURL, scenarioPath, rev.RevID, zipData)
+	if err != nil {
+		return SyncOutput{}, err
+	}
+	return SyncOutput{
+		Scenario: scenarioPath,
+		Revision: rev.RevID,
+		Schema:   fpShort,
+		ID:       result.ID,
+	}, nil
 }
 
 // ─── pull (fetch) ────────────────────────────────────────────────────────────
 
+// FetchInput downloads the cloud dataset whose name matches a scenario
+// path and lands it as a fresh revision under that scenario locally.
 type FetchInput struct {
-	DatasetID string `json:"datasetId" jsonschema:"Dataset id to download"`
-	Token     string `json:"token,omitempty" jsonschema:"API token override"`
-	Force     bool   `json:"force,omitempty" jsonschema:"Overwrite existing local dataset"`
+	Scenario string `json:"scenario" jsonschema:"Scenario path to download (matched against the cloud dataset name)"`
+	Token    string `json:"token,omitempty" jsonschema:"API token override"`
 }
 
 type FetchOutput struct {
-	Dataset           string   `json:"dataset"`
+	Scenario          string   `json:"scenario"`
+	Revision          string   `json:"revision"`
 	SchemaShort       string   `json:"schemaShort"`
 	SchemaFingerprint string   `json:"schemaFingerprint"`
 	Path              string   `json:"path"`
@@ -1719,26 +1922,89 @@ func RunFetch(ctx context.Context, in FetchInput) (FetchOutput, error) {
 	if err != nil {
 		return FetchOutput{}, err
 	}
-	datasetName := strings.TrimSpace(in.DatasetID)
-	if datasetName == "" {
-		return FetchOutput{}, fmt.Errorf("datasetId is required")
-	}
-	baseURL := utils.GetBaseURL()
-	res, err := fetchDatasetDownload(ctx, baseURL, token, projectRoot, cfg.StoragePath, datasetName)
+	scenarioPath, err := scenario.Normalize(in.Scenario)
 	if err != nil {
 		return FetchOutput{}, err
 	}
-	out := FetchOutput{
-		Dataset: datasetName,
-		Path:    res.OutputDir,
-		Files:   res.Files,
+	baseURL := utils.GetBaseURL()
+	match, err := findRemoteDataset(baseURL, token, scenarioPath, "")
+	if err != nil {
+		return FetchOutput{}, err
 	}
-	if res.Match.Schema != nil {
-		out.SchemaShort = res.Match.Schema.FingerprintShort
-		out.SchemaFingerprint = res.Match.Schema.Fingerprint
+	if match.Schema == nil || match.Schema.FingerprintShort == "" {
+		return FetchOutput{}, fmt.Errorf("remote dataset %q is missing schema metadata", scenarioPath)
 	}
-	_ = in.Force
-	return out, nil
+
+	fpShort := match.Schema.FingerprintShort
+	schemaDir := scenario.SchemaStoreDir(projectRoot, cfg.StoragePath, fpShort)
+	if err := os.MkdirAll(schemaDir, 0755); err != nil {
+		return FetchOutput{}, fmt.Errorf("creating schema dir: %v", err)
+	}
+
+	scenarioDir := scenario.ScenarioDir(projectRoot, cfg.StoragePath, scenarioPath)
+	if err := os.MkdirAll(scenarioDir, 0755); err != nil {
+		return FetchOutput{}, fmt.Errorf("creating scenario dir: %v", err)
+	}
+	revID, err := scenario.NextRevisionID(scenarioDir)
+	if err != nil {
+		return FetchOutput{}, err
+	}
+	revDir := scenario.RevisionDir(projectRoot, cfg.StoragePath, scenarioPath, revID)
+	dataDir := filepath.Join(revDir, "data")
+	if err := os.MkdirAll(dataDir, 0755); err != nil {
+		return FetchOutput{}, fmt.Errorf("creating revision data dir: %v", err)
+	}
+
+	downloadURL, err := getDownloadURL(baseURL, token, match.ID)
+	if err != nil {
+		return FetchOutput{}, err
+	}
+	extracted, err := downloadAndExtractZip(downloadURL, dataDir)
+	if err != nil {
+		return FetchOutput{}, err
+	}
+	if _, err := liftSchemaSidecars(dataDir, schemaDir); err != nil {
+		return FetchOutput{}, fmt.Errorf("placing schema files: %v", err)
+	}
+
+	tables, rowCounts, _ := listCSVTablesAndRowCounts(dataDir)
+	now := time.Now().UTC()
+	revManifest := scenario.RevisionManifest{
+		Scenario:          scenarioPath,
+		Revision:          revID,
+		SchemaFingerprint: match.Schema.Fingerprint,
+		CreatedAt:         now,
+		Source:            "pull",
+		Tables:            tables,
+		Services:          []string{"postgres"},
+		RowCounts:         rowCounts,
+	}
+	if err := scenario.WriteRevisionManifest(revDir, revManifest); err != nil {
+		return FetchOutput{}, err
+	}
+	scenarioManifest, err := scenario.ReadManifest(scenarioDir)
+	if err != nil && !os.IsNotExist(err) {
+		return FetchOutput{}, err
+	}
+	if scenarioManifest.Scenario == "" {
+		scenarioManifest = scenario.Manifest{Scenario: scenarioPath, CreatedAt: now}
+	}
+	scenarioManifest.UpdatedAt = now
+	scenarioManifest.LatestRevision = revID
+	_ = scenario.WriteManifest(scenarioDir, scenarioManifest)
+	pointers, _ := scenario.ReadPointers(scenarioDir)
+	pointers.Latest = revID
+	_ = scenario.WritePointers(scenarioDir, pointers)
+
+	_ = ctx
+	return FetchOutput{
+		Scenario:          scenarioPath,
+		Revision:          revID,
+		SchemaShort:       fpShort,
+		SchemaFingerprint: match.Schema.Fingerprint,
+		Path:              dataDir,
+		Files:             extracted,
+	}, nil
 }
 
 // ─── login / logout ───────────────────────────────────────────────────────────

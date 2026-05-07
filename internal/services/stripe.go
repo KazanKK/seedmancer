@@ -525,8 +525,14 @@ func (c *stripeConnector) recreateSubscriptions(ctx context.Context, snap stripe
 
 	for _, sub := range snap.Subscriptions {
 		priceID := priceIDs[sub.PriceKey]
+		if priceID == "" && strings.HasPrefix(sub.PriceKey, "price_") {
+			pr, err := c.retrievePrice(ctx, sub.PriceKey)
+			if err == nil && pr.Active {
+				priceID = pr.ID
+			}
+		}
 		if priceID == "" {
-			return fmt.Errorf("stripe seed: no resolved Stripe price for priceKey %q", sub.PriceKey)
+			return fmt.Errorf("stripe seed: no resolved Stripe price for priceKey %q (re-export the dataset after stripe export if this is a raw price id)", sub.PriceKey)
 		}
 		customerAlias := renderAlias(sub.CustomerAlias, map[string]string{extractPlaceholder(sub.CustomerAlias): sub.CustomerEmail})
 		customerID := objectIDs[customerAlias]
@@ -685,22 +691,35 @@ func recordMap(header, record []string) map[string]string {
 }
 
 func (c *stripeConnector) listProducts(ctx context.Context, activeOnly, includeArchived bool) ([]stripeProduct, error) {
-	params := url.Values{}
-	params.Set("limit", "100")
-	if activeOnly && !includeArchived {
-		params.Set("active", "true")
-	}
-	var out struct {
-		Data []stripeProduct `json:"data"`
-	}
-	if err := c.doStripe(ctx, http.MethodGet, "/v1/products", params, &out); err != nil {
-		return nil, err
+	var all []stripeProduct
+	startingAfter := ""
+	for {
+		params := url.Values{}
+		params.Set("limit", "100")
+		if startingAfter != "" {
+			params.Set("starting_after", startingAfter)
+		}
+		if activeOnly && !includeArchived {
+			params.Set("active", "true")
+		}
+		var page struct {
+			Data    []stripeProduct `json:"data"`
+			HasMore bool            `json:"has_more"`
+		}
+		if err := c.doStripe(ctx, http.MethodGet, "/v1/products", params, &page); err != nil {
+			return nil, err
+		}
+		all = append(all, page.Data...)
+		if !page.HasMore || len(page.Data) == 0 {
+			break
+		}
+		startingAfter = page.Data[len(page.Data)-1].ID
 	}
 	if includeArchived {
-		return out.Data, nil
+		return all, nil
 	}
-	filtered := make([]stripeProduct, 0, len(out.Data))
-	for _, product := range out.Data {
+	filtered := make([]stripeProduct, 0, len(all))
+	for _, product := range all {
 		if product.Active {
 			filtered = append(filtered, product)
 		}
@@ -714,23 +733,42 @@ func (c *stripeConnector) retrieveProduct(ctx context.Context, id string) (strip
 	return out, err
 }
 
+func (c *stripeConnector) retrievePrice(ctx context.Context, id string) (stripePrice, error) {
+	var out stripePrice
+	err := c.doStripe(ctx, http.MethodGet, "/v1/prices/"+url.PathEscape(id), nil, &out)
+	return out, err
+}
+
 func (c *stripeConnector) listPrices(ctx context.Context, activeOnly, includeArchived bool) ([]stripePrice, error) {
-	params := url.Values{}
-	params.Set("limit", "100")
-	if activeOnly && !includeArchived {
-		params.Set("active", "true")
-	}
-	var out struct {
-		Data []stripePrice `json:"data"`
-	}
-	if err := c.doStripe(ctx, http.MethodGet, "/v1/prices", params, &out); err != nil {
-		return nil, err
+	var all []stripePrice
+	startingAfter := ""
+	for {
+		params := url.Values{}
+		params.Set("limit", "100")
+		if startingAfter != "" {
+			params.Set("starting_after", startingAfter)
+		}
+		if activeOnly && !includeArchived {
+			params.Set("active", "true")
+		}
+		var page struct {
+			Data    []stripePrice `json:"data"`
+			HasMore bool          `json:"has_more"`
+		}
+		if err := c.doStripe(ctx, http.MethodGet, "/v1/prices", params, &page); err != nil {
+			return nil, err
+		}
+		all = append(all, page.Data...)
+		if !page.HasMore || len(page.Data) == 0 {
+			break
+		}
+		startingAfter = page.Data[len(page.Data)-1].ID
 	}
 	if includeArchived {
-		return out.Data, nil
+		return all, nil
 	}
-	filtered := make([]stripePrice, 0, len(out.Data))
-	for _, price := range out.Data {
+	filtered := make([]stripePrice, 0, len(all))
+	for _, price := range all {
 		if price.Active {
 			filtered = append(filtered, price)
 		}

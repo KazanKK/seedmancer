@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	utils "github.com/KazanKK/seedmancer/internal/utils"
@@ -30,6 +31,7 @@ type syncUploadResult struct {
 	SchemaCreated    bool   `json:"schemaCreated"`
 	Updated          bool   `json:"updated"`
 	FileCount        int    `json:"fileCount"`
+	Revision         string `json:"revision,omitempty"`
 }
 
 // uploadURLResponse is returned by POST /v1.0/datasets/sync/upload-url.
@@ -45,10 +47,13 @@ type uploadURLResponse struct {
 //
 // This bypasses the Vercel function body-size limit (≈4.5 MB) so datasets
 // of any size can be synced.
-func syncUploadPresigned(ctx context.Context, token, baseURL, datasetName string, zipData *bytes.Buffer) (syncUploadResult, error) {
+func syncUploadPresigned(ctx context.Context, token, baseURL, datasetName, revisionLabel string, zipData *bytes.Buffer) (syncUploadResult, error) {
 	// Step 1: request a presigned upload URL.
 	q1 := url.Values{}
 	q1.Set("name", datasetName)
+	if strings.TrimSpace(revisionLabel) != "" {
+		q1.Set("revision", strings.TrimSpace(revisionLabel))
+	}
 	uploadURLEndpoint := fmt.Sprintf("%s/v1.0/datasets/sync/upload-url?%s", baseURL, q1.Encode())
 
 	req1, err := http.NewRequestWithContext(ctx, "POST", uploadURLEndpoint, nil)
@@ -96,10 +101,13 @@ func syncUploadPresigned(ctx context.Context, token, baseURL, datasetName string
 		return syncUploadResult{}, fmt.Errorf("storage upload failed (HTTP %d)", resp2.StatusCode)
 	}
 
-	// Step 3: confirm — server parses the ZIP, resolves schema, and upserts the dataset row.
+	// Step 3: confirm — server parses the ZIP, resolves schema, and records the revision.
 	q3 := url.Values{}
 	q3.Set("name", datasetName)
 	q3.Set("path", uploadURLResp.Path)
+	if strings.TrimSpace(revisionLabel) != "" {
+		q3.Set("revision", strings.TrimSpace(revisionLabel))
+	}
 	confirmEndpoint := fmt.Sprintf("%s/v1.0/datasets/sync/confirm?%s", baseURL, q3.Encode())
 
 	req3, err := http.NewRequestWithContext(ctx, "POST", confirmEndpoint, nil)
@@ -134,7 +142,7 @@ func syncUploadPresigned(ctx context.Context, token, baseURL, datasetName string
 
 // syncDatasetUpload zips the schema sidecars + dataset CSVs and uploads
 // them via the presigned URL flow. It is the quiet counterpart to syncOne.
-func syncDatasetUpload(ctx context.Context, token string, schema utils.LocalSchema, datasetDir, datasetName, baseURL string) (syncUploadResult, error) {
+func syncDatasetUpload(ctx context.Context, token string, schema utils.LocalSchema, datasetDir, datasetName, revisionLabel, baseURL string) (syncUploadResult, error) {
 	schemaFiles, err := utils.SchemaFiles(schema.Path)
 	if err != nil {
 		return syncUploadResult{}, err
@@ -156,7 +164,7 @@ func syncDatasetUpload(ctx context.Context, token string, schema utils.LocalSche
 		return syncUploadResult{}, fmt.Errorf("compressing files: %v", err)
 	}
 
-	return syncUploadPresigned(ctx, token, baseURL, datasetName, zipData)
+	return syncUploadPresigned(ctx, token, baseURL, datasetName, revisionLabel, zipData)
 }
 
 type fetchDownloadResult struct {

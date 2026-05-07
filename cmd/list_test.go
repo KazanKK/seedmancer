@@ -7,10 +7,12 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
+
+	"github.com/KazanKK/seedmancer/internal/scenario"
 )
 
 func TestOutputJSON(t *testing.T) {
-	// Capture stdout since outputJSON prints directly to os.Stdout.
 	orig := os.Stdout
 	r, w, err := os.Pipe()
 	if err != nil {
@@ -18,8 +20,10 @@ func TestOutputJSON(t *testing.T) {
 	}
 	os.Stdout = w
 
-	payload := listOutput{
-		Local: []listEntry{{Schema: "abc", Dataset: "basic"}},
+	payload := struct {
+		Scenarios []listEntry `json:"scenarios"`
+	}{
+		Scenarios: []listEntry{{Scenario: "billing/pro", Latest: "r001", Schema: "abcd"}},
 	}
 	err = outputJSON(payload)
 
@@ -32,19 +36,21 @@ func TestOutputJSON(t *testing.T) {
 	var buf bytes.Buffer
 	_, _ = io.Copy(&buf, r)
 
-	var decoded listOutput
+	var decoded struct {
+		Scenarios []listEntry `json:"scenarios"`
+	}
 	if err := json.Unmarshal(buf.Bytes(), &decoded); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if len(decoded.Local) != 1 || decoded.Local[0].Schema != "abc" {
+	if len(decoded.Scenarios) != 1 || decoded.Scenarios[0].Scenario != "billing/pro" {
 		t.Fatalf("unexpected payload: %+v", decoded)
 	}
 }
 
-// TestListLocalEntries_localLayout exercises the full on-disk walk: create a
-// fake `.seedmancer/schemas/<fp-short>/datasets/<name>/` tree and make sure
-// the entry comes back.
-func TestListLocalEntries_localLayout(t *testing.T) {
+// TestListLocalEntries_scenarioLayout exercises the scenario walk: build a
+// fake .seedmancer/scenarios/<path>/ tree and ensure the entry comes back
+// with the right pointers.
+func TestListLocalEntries_scenarioLayout(t *testing.T) {
 	dir := t.TempDir()
 	prev, _ := os.Getwd()
 	t.Cleanup(func() { _ = os.Chdir(prev) })
@@ -54,9 +60,41 @@ func TestListLocalEntries_localLayout(t *testing.T) {
 	t.Setenv("HOME", dir)
 
 	writeFile(t, filepath.Join(dir, "seedmancer.yaml"), "storage_path: .seedmancer\n")
-	fp := `{"tables":[{"name":"t","columns":[{"name":"id","type":"uuid"}]}]}`
-	writeFile(t, filepath.Join(dir, ".seedmancer/schemas/abcd12345678/schema.json"), fp)
-	writeFile(t, filepath.Join(dir, ".seedmancer/schemas/abcd12345678/datasets/basic/t.csv"), "id\n1\n")
+
+	scenarioPath := "billing/pro"
+	scDir := scenario.ScenarioDir(dir, ".seedmancer", scenarioPath)
+	if err := os.MkdirAll(scDir, 0755); err != nil {
+		t.Fatalf("mkdir scenario: %v", err)
+	}
+	now := time.Now().UTC()
+	if err := scenario.WriteManifest(scDir, scenario.Manifest{
+		Scenario:       scenarioPath,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+		LatestRevision: "r001",
+	}); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	if err := scenario.WritePointers(scDir, scenario.Pointers{Latest: "r001"}); err != nil {
+		t.Fatalf("write pointers: %v", err)
+	}
+	revDir := scenario.RevisionDir(dir, ".seedmancer", scenarioPath, "r001")
+	dataDir := filepath.Join(revDir, "data")
+	if err := os.MkdirAll(dataDir, 0755); err != nil {
+		t.Fatalf("mkdir rev: %v", err)
+	}
+	if err := scenario.WriteRevisionManifest(revDir, scenario.RevisionManifest{
+		Scenario:          scenarioPath,
+		Revision:          "r001",
+		SchemaFingerprint: "deadbeefcafebabe",
+		CreatedAt:         now,
+		Source:            "export",
+		Tables:            []string{"User"},
+		Services:          []string{"postgres"},
+		RowCounts:         map[string]int{"User": 1},
+	}); err != nil {
+		t.Fatalf("write revision manifest: %v", err)
+	}
 
 	entries, err := listLocalEntries()
 	if err != nil {
@@ -65,7 +103,10 @@ func TestListLocalEntries_localLayout(t *testing.T) {
 	if len(entries) != 1 {
 		t.Fatalf("want 1 entry, got %d (%+v)", len(entries), entries)
 	}
-	if entries[0].Dataset != "basic" {
-		t.Errorf("Dataset = %q, want %q", entries[0].Dataset, "basic")
+	if entries[0].Scenario != scenarioPath {
+		t.Errorf("Scenario = %q, want %q", entries[0].Scenario, scenarioPath)
+	}
+	if entries[0].Latest != "r001" {
+		t.Errorf("Latest = %q, want %q", entries[0].Latest, "r001")
 	}
 }

@@ -17,39 +17,45 @@ func registerPrompts(s *mcp.Server) {
 	s.AddPrompt(&mcp.Prompt{
 		Name:        "reset_db_for_tests",
 		Title:       "Reset DB for tests",
-		Description: "Generate a plan that resets the database using a named dataset and then runs the given test command.",
+		Description: "Generate a plan that resets the database to a scenario revision and runs the given test command.",
 		Arguments: []*mcp.PromptArgument{
-			{Name: "dataset", Description: "Dataset id to restore (e.g. 'api-test')", Required: true},
+			{Name: "scenario", Description: "Scenario path to seed (e.g. 'api-test')", Required: true},
 			{Name: "env", Description: "Target env name (defaults to default_env)"},
+			{Name: "useStable", Description: "Set to 'true' to load the pinned stable revision"},
 			{Name: "testCommand", Description: "Command to run after the reset (e.g. 'pnpm playwright test')"},
 		},
 	}, func(ctx context.Context, req *mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
 		args := req.Params.Arguments
-		dataset := args["dataset"]
-		if dataset == "" {
-			return nil, fmt.Errorf("dataset argument is required")
+		scenarioArg := args["scenario"]
+		if scenarioArg == "" {
+			return nil, fmt.Errorf("scenario argument is required")
 		}
 		env := args["env"]
 		testCmd := args["testCommand"]
+		useStable := args["useStable"] == "true"
 
 		envLine := ""
 		if env != "" {
 			envLine = fmt.Sprintf(" (env: %s)", env)
+		}
+		stableLine := ""
+		if useStable {
+			stableLine = " and useStable=true"
 		}
 		testLine := ""
 		if testCmd != "" {
 			testLine = fmt.Sprintf("\n3. Run the test command: `%s`", testCmd)
 		}
 
-		text := fmt.Sprintf(`Goal: reset the database to a known-good snapshot before running tests.
+		text := fmt.Sprintf(`Goal: reset the database to a known-good scenario revision before running tests.
 
 Steps:
-1. Call the MCP tool 'seed_database' with datasetId=%q%s and yes=true (agents can't answer interactive prompts).
-2. If it fails, call 'get_status' to confirm the target env is reachable and the dataset exists locally.%s
+1. Call the MCP tool 'seed_database' with scenario=%q%s%s and yes=true (agents can't answer interactive prompts).
+2. If it fails on a schema mismatch, call 'check_scenario' to see the diff. Re-export the scenario or pass force=true if the diff is intentional.%s
 
 Success criteria:
 - 'seed_database' result has anyError=false.
-- The listed dataset path matches what the app under test expects.`, dataset, envLine, testLine)
+- The listed scenario revision matches what the app under test expects.`, scenarioArg, envLine, stableLine, testLine)
 
 		return &mcp.GetPromptResult{
 			Description: "Reset-the-DB-before-tests playbook",
@@ -62,37 +68,36 @@ Success criteria:
 	s.AddPrompt(&mcp.Prompt{
 		Name:        "generate_test_data",
 		Title:       "Generate test data",
-		Description: "Generate a plan for creating a new dataset against an existing schema using a natural-language prompt.",
+		Description: "Generate a plan for creating a new revision under a scenario using a natural-language prompt.",
 		Arguments: []*mcp.PromptArgument{
 			{Name: "prompt", Description: "Natural-language description of the data", Required: true},
-			{Name: "schemaRef", Description: "Fingerprint prefix of the target schema (from list_schemas)", Required: true},
-			{Name: "datasetId", Description: "Optional dataset id for the output"},
+			{Name: "scenario", Description: "Scenario path for the new revision (e.g. 'billing/pro')", Required: true},
+			{Name: "inherit", Description: "Base scenario whose latest revision provides the schema (defaults to the scenario's existing latest)"},
 		},
 	}, func(ctx context.Context, req *mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
 		args := req.Params.Arguments
 		if args["prompt"] == "" {
 			return nil, fmt.Errorf("prompt argument is required")
 		}
-		if args["schemaRef"] == "" {
-			return nil, fmt.Errorf("schemaRef argument is required")
+		if args["scenario"] == "" {
+			return nil, fmt.Errorf("scenario argument is required")
 		}
-		dsID := args["datasetId"]
-		dsLine := ""
-		if dsID != "" {
-			dsLine = fmt.Sprintf(", datasetId=%q", dsID)
+		inheritLine := ""
+		if v := args["inherit"]; v != "" {
+			inheritLine = fmt.Sprintf(", inherit=%q", v)
 		}
 
-		text := fmt.Sprintf(`Goal: synthesize a new dataset that satisfies schema %q.
+		text := fmt.Sprintf(`Goal: synthesize a new revision under scenario %q.
 
 Steps:
-1. Call 'describe_schema' with ref=%q to confirm the tables/columns match expectations.
-2. Call 'generate_dataset' with prompt=%q, schemaRef=%q%s.
+1. Call 'describe_schema' on the scenario's existing schema (use list_history first if you need the fingerprint).
+2. Call 'generate_dataset' with prompt=%q, scenario=%q%s.
 3. After it returns, call 'describe_dataset' on the resulting dataset id to preview the generated rows.
-4. Optionally call 'push_dataset' to publish the result to the connected Seedmancer account.
+4. Optionally call 'pin_scenario' to mark the revision as stable, or 'push_dataset' to publish.
 
 Success criteria:
-- 'generate_dataset' returns with a non-empty Path and JobID.
-- The dataset preview contains rows for every table you care about.`, args["schemaRef"], args["schemaRef"], args["prompt"], args["schemaRef"], dsLine)
+- 'generate_dataset' returns with a non-empty Path and a new revision id.
+- The dataset preview contains rows for every table you care about.`, args["scenario"], args["prompt"], args["scenario"], inheritLine)
 
 		return &mcp.GetPromptResult{
 			Description: "Generate-test-data playbook",

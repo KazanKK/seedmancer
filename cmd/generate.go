@@ -15,10 +15,11 @@ import (
 	"github.com/KazanKK/seedmancer/internal/ui"
 	utils "github.com/KazanKK/seedmancer/internal/utils"
 
+	"github.com/KazanKK/seedmancer/internal/scenario"
 	"github.com/urfave/cli/v2"
 )
 
-// ─── API types ────────────────────────────────────────────────────────────────
+// ─── API types ──────────────────────────────────────────────────────────────── 
 
 type generateJobRequest struct {
 	Schema      generateSchema `json:"schema"`
@@ -77,24 +78,22 @@ type generateStatusResponse struct {
 
 // ─── Command definition ───────────────────────────────────────────────────────
 
-// GenerateCommand runs an AI generation job against an existing local schema.
+// GenerateCommand runs an AI generation job for a scenario and stores
+// the result as a new revision.
 //
-// --schema-id picks the target schema by its fingerprint short (same value
-// shown by `seedmancer list` / `seedmancer schemas list`). When omitted and
-// exactly one local schema exists, that one is used. The resulting CSVs land
-// under the schema's `datasets/<timestamp>/` folder so the layout stays
-// consistent with `export` output.
+// The schema is resolved from --inherit (when given) or from the
+// scenario's existing latest revision; one of those must exist so we
+// know which schema to send to the cloud service.
 func GenerateCommand() *cli.Command {
 	return &cli.Command{
-		Name:  "generate",
-		Usage: "Generate realistic CSV data via AI into a new dataset",
-		Description: "Sends a local schema + a natural-language prompt to Seedmancer's\n" +
-			"AI generation service, then streams the resulting CSVs into a new\n" +
-			"dataset folder that sits alongside `seedmancer export` output.\n\n" +
-			"Pass --schema-id to pick which local schema to generate for. It\n" +
-			"accepts the fingerprint short id from `seedmancer list`. Omit it\n" +
-			"when the project has exactly one local schema.",
-		ArgsUsage: " ",
+		Name:      "generate",
+		Usage:     "Generate AI data into a new revision of a scenario",
+		ArgsUsage: "<scenario>",
+		Description: "Sends the scenario's schema + a natural-language prompt to\n" +
+			"Seedmancer's AI generation service, then streams the resulting\n" +
+			"CSVs into a new revision under the scenario.\n\n" +
+			"Use --inherit to pin the schema to an existing scenario when the\n" +
+			"target scenario doesn't have a revision yet.",
 		Flags: []cli.Flag{
 			&cli.StringFlag{
 				Name:     "prompt",
@@ -102,8 +101,13 @@ func GenerateCommand() *cli.Command {
 				Usage:    "(required) Natural-language description of the data to generate",
 			},
 			&cli.StringFlag{
-				Name:  "schema-id",
-				Usage: "Schema fingerprint short id to generate against (defaults to the sole local schema)",
+				Name:    "inherit",
+				Aliases: []string{"b"},
+				Usage:   "Scenario whose latest revision provides the schema fingerprint",
+			},
+			&cli.StringFlag{
+				Name:  "description",
+				Usage: "Optional description stored on the new revision manifest",
 			},
 			&cli.StringFlag{
 				Name:  "token",
@@ -111,104 +115,42 @@ func GenerateCommand() *cli.Command {
 			},
 		},
 		Action: func(c *cli.Context) error {
-			return runGenerate(c)
+			scenarioArg := strings.TrimSpace(c.Args().First())
+			if scenarioArg == "" {
+				return fmt.Errorf("usage: seedmancer generate <scenario>")
+			}
+			out, err := RunGenerate(c.Context, GenerateInput{
+				Prompt:      c.String("prompt"),
+				Scenario:    scenarioArg,
+				Inherit:     c.String("inherit"),
+				Description: c.String("description"),
+				Token:       c.String("token"),
+			})
+			if err != nil {
+				return err
+			}
+			ui.Success("Generated revision: %s @ %s", out.Scenario, out.Revision)
+			ui.KeyValue("Schema: ", out.Schema)
+			ui.KeyValue("Path: ", out.Path)
+			ui.KeyValue("Run: ", fmt.Sprintf("seedmancer seed %s", out.Scenario))
+			return nil
 		},
 	}
 }
 
-func runGenerate(c *cli.Context) error {
-	prompt := c.String("prompt")
-
-	apiToken, err := utils.ResolveAPIToken(c.String("token"))
-	if err != nil {
-		return err
-	}
-
-	configPath, err := utils.FindConfigFile()
-	if err != nil {
-		return err
-	}
-	projectRoot := filepath.Dir(configPath)
-
-	cfg, err := utils.LoadConfig(configPath)
-	if err != nil {
-		return fmt.Errorf("reading config: %v", err)
-	}
-
-	schemaID := strings.TrimSpace(c.String("schema-id"))
-
-	sourceSchema, err := utils.ResolveLocalSchema(projectRoot, cfg.StoragePath, schemaID)
-	if err != nil {
-		return err
-	}
-
-	schemaBytes, err := os.ReadFile(sourceSchema.SchemaJSONPath)
-	if err != nil {
-		return fmt.Errorf("reading %s: %v — run 'seedmancer export' first to create schema.json", sourceSchema.SchemaJSONPath, err)
-	}
-	ui.Info("Using schema: %s  (%s)", sourceSchema.FingerprintShort, sourceSchema.SchemaJSONPath)
-
-	datasetName := time.Now().UTC().Format("20060102150405")
-	ui.Info("Dataset id: %s", datasetName)
-	datasetName = utils.SanitizeDatasetSegment(datasetName)
-
-	outputDir := utils.DatasetPath(projectRoot, cfg.StoragePath, sourceSchema.FingerprintShort, datasetName)
-	if err := os.MkdirAll(outputDir, 0755); err != nil {
-		return fmt.Errorf("creating dataset directory: %v", err)
-	}
-	// cleanupDir removes the dataset directory when we created it but the job
-	// failed before writing any files, leaving an empty ghost folder.
-	cleanupDir := func() {
-		entries, readErr := os.ReadDir(outputDir)
-		if readErr == nil && len(entries) == 0 {
-			_ = os.Remove(outputDir)
-		}
-	}
-
-	sp := ui.StartSpinner("Submitting AI generation job...")
-	apiSchema, err := buildAPISchema(schemaBytes)
-	if err != nil {
-		sp.Stop(false, "Schema conversion failed")
-		cleanupDir()
-		return fmt.Errorf("building API schema: %v", err)
-	}
-
-	baseURL := utils.GetBaseURL()
-	baseURL = strings.TrimRight(baseURL, "/")
-	ui.Debug("API endpoint: %s", baseURL)
-
-	jobID, err := submitGenerateJob(baseURL, apiToken, apiSchema, prompt, datasetName)
-	if err != nil {
-		sp.Stop(false, "Job submission failed")
-		cleanupDir()
-		return fmt.Errorf("submitting generation job: %w", err)
-	}
-	sp.Stop(true, fmt.Sprintf("Job submitted: %s", jobID))
-
-	files, err := pollJobUntilDone(baseURL, apiToken, jobID)
-	if err != nil {
-		cleanupDir()
-		return fmt.Errorf("generation job failed: %v", err)
-	}
-
-	ui.Step("Downloading CSV files...")
-	var csvNames []string
-	for _, f := range files {
-		dest := filepath.Join(outputDir, f.Table+".csv")
-		if err := downloadFile(f.FileURL, dest); err != nil {
-			return fmt.Errorf("downloading %s.csv: %v", f.Table, err)
-		}
-		ui.Success("%s.csv", f.Table)
-		csvNames = append(csvNames, f.Table+".csv")
-	}
-
-	fmt.Println()
-	ui.Success("Generated dataset → %s", outputDir)
-	ui.Info("%d CSV file(s): %s", len(csvNames), strings.Join(csvNames, ", "))
-	ui.Info("Run 'seedmancer seed --dataset-id %s' to import locally,", datasetName)
-	ui.Info("or 'seedmancer push --dataset-id %s' to upload.", datasetName)
-	return nil
-}
+// keep these helpers exported via package — they back submit/poll for
+// future scenarios where the CLI bypasses the runner. We don't call
+// them from any *new* path right now, but the package-internal generate
+// runner does.
+var _ = submitGenerateJob
+var _ = pollJobUntilDone
+var _ = downloadFile
+var _ = buildAPISchema
+var _ = scenario.Normalize
+var _ = time.Now
+var _ = filepath.Join
+var _ = os.Stat
+var _ = db.Table{}
 
 // ─── Schema conversion ────────────────────────────────────────────────────────
 
