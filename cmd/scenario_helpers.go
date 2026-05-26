@@ -13,7 +13,7 @@ import (
 
 	db "github.com/KazanKK/seedmancer/database"
 	"github.com/KazanKK/seedmancer/internal/scenario"
-	utils "github.com/KazanKK/seedmancer/internal/utils"
+	"github.com/KazanKK/seedmancer/internal/utils"
 )
 
 // resolvedRevision describes the revision a command picked, after the
@@ -201,4 +201,47 @@ func pointerLabel(revID string, p scenario.Pointers) string {
 		parts = append(parts, "stable")
 	}
 	return strings.Join(parts, ",")
+}
+
+// fileExists reports whether path resolves to an existing, regular file.
+// Returns false for directories, broken symlinks, and any stat error.
+func fileExists(path string) bool {
+	st, err := os.Stat(path)
+	return err == nil && !st.IsDir()
+}
+
+// liftDatasetSQL moves a dataset.sql file (if present) out of dataDir
+// and into revDir, where get_dataset_sql expects it. Push bundles the
+// SQL into the zip flat alongside the CSVs; pull lifts it one level up
+// so the on-disk layout matches what generate_dataset_local produces.
+// No-op when the file isn't in the zip.
+func liftDatasetSQL(dataDir, revDir string) error {
+	src := filepath.Join(dataDir, utils.DatasetSQLFileName)
+	if _, err := os.Stat(src); os.IsNotExist(err) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	dst := filepath.Join(revDir, utils.DatasetSQLFileName)
+	if err := os.Rename(src, dst); err == nil {
+		return nil
+	}
+	// Cross-device rename can fail on some filesystems; copy then delete.
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	if err := out.Close(); err != nil {
+		return err
+	}
+	return os.Remove(src)
 }

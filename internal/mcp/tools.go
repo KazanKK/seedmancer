@@ -52,15 +52,18 @@ func registerTools(s *mcp.Server) {
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
-		Name:  "get_dataset_script",
-		Title: "Get dataset generator script",
-		Description: "Return the generator script that was used to create a local dataset with generate_dataset_local. " +
-			"Use this before generating a new dataset — retrieve the existing script, modify it, and pass the " +
-			"modified source back to generate_dataset_local instead of writing a new script from scratch. " +
-			"Returns an error when the dataset was not created with generate_dataset_local.",
+		Name:  "get_dataset_sql",
+		Title: "Get dataset SQL",
+		Description: "Return the SQL block that was used to create a scenario revision via " +
+			"generate_dataset_local. Use this before generating a new revision — retrieve the " +
+			"existing SQL, modify it, and pass it back to generate_dataset_local instead of " +
+			"writing a new block from scratch. Defaults to the scenario's latest revision; " +
+			"pass `revision: \"rNNN\"` for a specific one or `useStable: true` for the pinned " +
+			"revision. Returns an error when the revision has no dataset.sql sidecar (e.g. it " +
+			"was produced by export_database or pull_dataset).",
 		Annotations: readOnly,
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, in cmd.GetDatasetScriptInput) (*mcp.CallToolResult, cmd.GetDatasetScriptOutput, error) {
-		out, err := cmd.RunGetDatasetScript(ctx, in)
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in cmd.GetDatasetSQLInput) (*mcp.CallToolResult, cmd.GetDatasetSQLOutput, error) {
+		out, err := cmd.RunGetDatasetSQL(ctx, in)
 		return nil, out, err
 	})
 
@@ -191,17 +194,17 @@ func registerTools(s *mcp.Server) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name:  "generate_dataset_local",
 		Title: "Generate scenario revision locally",
-		Description: "Run an agent-written Go script locally to synthesise a new revision under the " +
-			"given scenario. No cloud API, no quota, and no internet connection are needed. " +
-			"Read seedmancer://docs/local-generation first to learn the Go script contract, " +
-			"then call describe_schema to get the exact column names before writing the script. " +
-			"For partial updates (e.g. regenerating only products without touching users/orders), " +
-			"pass `inherit: \"<base-scenario>\"`. The new revision is pre-filled from the base " +
-			"scenario's latest revision, the script overwrites the table(s) it cares about, and any " +
-			"descendant table that FKs to an overwritten table is auto-cleared so the result is " +
-			"always safe to seed without orphan foreign keys. Pointers.latest advances to the new " +
-			"revision automatically.",
-		Annotations: &mcp.ToolAnnotations{DestructiveHint: falsePtr(), IdempotentHint: false},
+		Description: "Synthesise a new revision under the given scenario by running agent-written " +
+			"SQL on top of an inherit base. Pipeline: (1) seed the inherit base into the " +
+			"configured local env (CSV → COPY), (2) apply your SQL inside a transaction, " +
+			"(3) export the resulting tables back to CSV as a new revision, (4) save the SQL " +
+			"as dataset.sql alongside the CSVs so it can be retrieved later with get_dataset_sql. " +
+			"Read seedmancer://docs/local-generation first for the SQL contract and examples, " +
+			"then call describe_schema to get the exact column names before writing the SQL. " +
+			"`inherit` is REQUIRED. Pointers.latest advances to the new revision automatically. " +
+			"Note: this overwrites data in the configured local env (the SQL runs against it). " +
+			"No cloud API, no quota, and no internet connection are needed.",
+		Annotations: &mcp.ToolAnnotations{DestructiveHint: truePtr(), IdempotentHint: false},
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in cmd.GenerateLocalInput) (*mcp.CallToolResult, cmd.GenerateLocalOutput, error) {
 		out, err := cmd.RunGenerateLocal(ctx, in)
 		return nil, out, err

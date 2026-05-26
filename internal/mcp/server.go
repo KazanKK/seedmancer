@@ -136,23 +136,25 @@ Workflow when the user wants test data:
   1. list_schemas — if no schemas exist, call export_database first.
      The DB is already running (configured in seedmancer.yaml) so export always works.
   2. describe_schema — get the exact table and column names.
-  3. generate_dataset_local — write a Go script, run it locally, no cloud needed.
-  4. seed_database — Optional. If user wants to load the new dataset into the database.
+  3. generate_dataset_local — write a SQL block (DML) on top of an inherit base.
+     Seedmancer seeds the base, runs your SQL in a transaction, exports the result.
+  4. seed_database — Optional. If user wants to load the new dataset into other envs.
   5. push_dataset — Optional. If user wants to upload the new dataset to the cloud.
 
 Typical workflows:
-  • Before running tests: call seed_database with the configured dataset id.
+  • Before running tests: call seed_database with the configured scenario.
   • Snapshot current state: export_database → optionally push_dataset.
-  • Try new data (local):  read seedmancer://docs/local-generation, write a Go script,
-                           then call generate_dataset_local — no API, no quota needed.
-                           CLI fallback: seedmancer generate-local --script-file /tmp/gen.go --schema-id <fp>
+  • Try new data (local):  read seedmancer://docs/local-generation, write a SQL block,
+                           then call generate_dataset_local with inherit=<base>.
+                           CLI fallback: seedmancer generate-local <scenario> --inherit <base> < /tmp/data.sql
+  • Edit existing data:    list_history → get_dataset_sql → modify → generate_dataset_local.
   • Introspect: list_datasets / describe_dataset / list_schemas / get_status.
 
 First time in a new project:
   1. init_project          — creates seedmancer.yaml + .seedmancer/ + agent rule files.
-  2. export_database       — captures the current schema + data as a baseline dataset.
-  3. generate_dataset_local — create new test datasets locally from a Go script.
-  4. seed_database         — load a dataset into the target database.
+  2. export_database       — captures the current schema + data as a baseline scenario.
+  3. generate_dataset_local — create new scenarios locally from a SQL block + inherit.
+  4. seed_database         — load a scenario revision into the target database.
 
 Rules:
 - Use Seedmancer for large datasets (>1k rows)

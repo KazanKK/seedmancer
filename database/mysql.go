@@ -45,6 +45,28 @@ func (m *MySQLManager) ConnectWithDSN(dsn string) error {
 	return nil
 }
 
+// ExecSQL runs sqlText inside a single transaction. On any error the
+// transaction is rolled back. The DSN normalization in database/factory.go
+// enables `multiStatements=true` so callers can pass agent-written DML
+// chains (INSERT/UPDATE/DELETE) as a single string.
+func (m *MySQLManager) ExecSQL(sqlText string) error {
+	if m.DB == nil {
+		return errors.New("no database connection")
+	}
+	tx, err := m.DB.Begin()
+	if err != nil {
+		return fmt.Errorf("beginning transaction: %v", err)
+	}
+	if _, err := tx.Exec(sqlText); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("executing SQL: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("committing SQL transaction: %v", err)
+	}
+	return nil
+}
+
 // ExtractSchema reads tables, columns, constraints, routines, and triggers
 // from information_schema for the current database.
 func (m *MySQLManager) ExtractSchema() (*Schema, error) {

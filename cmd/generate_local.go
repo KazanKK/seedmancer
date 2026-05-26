@@ -13,56 +13,64 @@ import (
 	"github.com/urfave/cli/v2"
 )
 
-// GenerateLocalCommand runs a Go script that produces CSV files for a
-// new revision of a scenario. The script is interpreted by an embedded
-// Go interpreter (yaegi) — no Go toolchain needed.
+// GenerateLocalCommand runs an agent-written SQL block on top of an inherit
+// base and snapshots the resulting state as a new revision under the named
+// scenario. Pipeline:
 //
-// Recommended invocation (script piped via stdin so it never touches disk):
+//  1. Seed the inherit base into the configured local env (CSV → COPY,
+//     same path as `seedmancer seed`).
+//  2. Apply the user-provided SQL inside a single transaction. On failure
+//     the env is left at the inherit baseline.
+//  3. Export the resulting tables to CSV under a fresh rNNN revision.
+//  4. Save the raw SQL alongside the CSVs as dataset.sql so agents can
+//     retrieve it later with `seedmancer mcp` get_dataset_sql.
+//
+// Recommended invocation (SQL piped via stdin so it never touches disk):
 //
 //	seedmancer generate-local <scenario> --inherit <base-scenario> <<'EOF'
-//	package main
-//	...
+//	DELETE FROM order_items WHERE product_id IN (SELECT id FROM products);
+//	DELETE FROM products;
+//	INSERT INTO products (id, brand_id, name, price) VALUES (1, 1, 'P1', 9.99);
 //	EOF
-//
-// `--inherit baseline-scenario` pre-fills the new revision with the
-// inherit base's latest CSVs. The script overwrites whichever tables it
-// cares about; descendant tables (FK descendants of the overwritten
-// tables) are auto-cleared so the result is always safe to seed.
 func GenerateLocalCommand() *cli.Command {
 	return &cli.Command{
 		Name:      "generate-local",
-		Usage:     "Generate a scenario revision from a Go script (no cloud, no quota)",
+		Usage:     "Generate a scenario revision from an SQL block (no cloud, no quota)",
 		ArgsUsage: "<scenario>",
-		Description: "Interprets a Go program via the embedded engine inside the binary.\n" +
-			"The script receives the data directory as os.Args[1] and must\n" +
-			"write <table>.csv files there using only stdlib.\n\n" +
-			"Recommended: pipe the script via stdin so nothing is written to disk:\n\n" +
+		Description: "Seeds an inherit base into the configured local env, applies the\n" +
+			"agent-written SQL on top of it, then exports the resulting tables\n" +
+			"back to CSV as a new rNNN revision. The SQL is stored alongside the\n" +
+			"CSVs as dataset.sql for later retrieval.\n\n" +
+			"Recommended: pipe the SQL via stdin so nothing is written to disk:\n\n" +
 			"  seedmancer generate-local billing/pro --inherit basic <<'EOF'\n" +
-			"  package main\n" +
-			"  import (\"encoding/csv\"; \"fmt\"; \"os\")\n" +
-			"  func main() {\n" +
-			"    out := os.Args[1]\n" +
-			"    f, _ := os.Create(out + \"/products.csv\")\n" +
-			"    w := csv.NewWriter(f)\n" +
-			"    w.Write([]string{\"id\", \"name\"})\n" +
-			"    for i := 1; i <= 5; i++ { w.Write([]string{fmt.Sprintf(\"%d\", i), fmt.Sprintf(\"P%d\", i)}) }\n" +
-			"    w.Flush(); f.Close()\n" +
-			"  }\n" +
+			"  DELETE FROM order_items WHERE product_id IN (SELECT id FROM products);\n" +
+			"  DELETE FROM products;\n" +
+			"  INSERT INTO products (id, brand_id, name, price) VALUES\n" +
+			"    (1, 1, 'Product 1', 9.99),\n" +
+			"    (2, 1, 'Product 2', 19.98);\n" +
 			"  EOF\n\n" +
-			"--inherit <base-scenario> copies the latest revision of the base\n" +
-			"scenario in first, lets the script overwrite the tables it cares\n" +
-			"about, and auto-clears any descendant table that FKs to an\n" +
-			"overwritten table — so partial datasets are always safe to seed.",
+			"`--inherit` is REQUIRED — it specifies the base scenario whose\n" +
+			"latest revision is seeded into the local env before your SQL runs.\n" +
+			"NOTE: this overwrites data in the configured local env.",
 		Flags: []cli.Flag{
 			&cli.StringFlag{
-				Name:    "script-file",
+				Name:    "sql-file",
 				Aliases: []string{"f"},
-				Usage:   "Path to the Go source file (use \"-\" for stdin; omit to read stdin automatically). Project-relative paths are rejected.",
+				Usage:   "Path to a SQL file (use \"-\" for stdin; omit to read stdin automatically). Project-relative paths are rejected.",
 			},
 			&cli.StringFlag{
 				Name:    "inherit",
 				Aliases: []string{"b"},
-				Usage:   "Base scenario whose latest revision pre-fills the new revision",
+				Usage:   "REQUIRED. Base scenario whose latest revision is seeded before the SQL runs",
+			},
+			&cli.StringFlag{
+				Name:    "env",
+				Aliases: []string{"e"},
+				Usage:   "Named environment to seed/export against (defaults to default_env)",
+			},
+			&cli.StringFlag{
+				Name:  "db-url",
+				Usage: "Ad-hoc target URL (mutually exclusive with --env)",
 			},
 			&cli.StringFlag{
 				Name:  "description",
@@ -74,33 +82,41 @@ func GenerateLocalCommand() *cli.Command {
 			if scenarioArg == "" {
 				return fmt.Errorf("usage: seedmancer generate-local <scenario>")
 			}
+			inherit := strings.TrimSpace(c.String("inherit"))
+			if inherit == "" {
+				return fmt.Errorf(
+					"--inherit is required (run `seedmancer export <baseline>` first, then pass --inherit <baseline>)",
+				)
+			}
 
-			scriptFile := strings.TrimSpace(c.String("script-file"))
-			var script []byte
+			sqlFile := strings.TrimSpace(c.String("sql-file"))
+			var sqlBody []byte
 			var err error
 			switch {
-			case scriptFile == "" || scriptFile == "-":
-				script, err = io.ReadAll(os.Stdin)
+			case sqlFile == "" || sqlFile == "-":
+				sqlBody, err = io.ReadAll(os.Stdin)
 				if err != nil {
-					return fmt.Errorf("reading script from stdin: %w", err)
+					return fmt.Errorf("reading SQL from stdin: %w", err)
 				}
 			default:
-				if err := rejectProjectRelativeScriptPath(scriptFile); err != nil {
+				if err := rejectProjectRelativeSQLPath(sqlFile); err != nil {
 					return err
 				}
-				script, err = os.ReadFile(scriptFile)
+				sqlBody, err = os.ReadFile(sqlFile)
 				if err != nil {
-					return fmt.Errorf("reading script file %q: %w", scriptFile, err)
+					return fmt.Errorf("reading SQL file %q: %w", sqlFile, err)
 				}
 			}
-			if strings.TrimSpace(string(script)) == "" {
-				return fmt.Errorf("script is empty (pass via stdin or --script-file)")
+			if strings.TrimSpace(string(sqlBody)) == "" {
+				return fmt.Errorf("SQL is empty (pass via stdin or --sql-file)")
 			}
 
 			out, err := RunGenerateLocal(context.Background(), GenerateLocalInput{
-				Script:      string(script),
+				SQL:         string(sqlBody),
 				Scenario:    scenarioArg,
-				Inherit:     strings.TrimSpace(c.String("inherit")),
+				Inherit:     inherit,
+				Env:         strings.TrimSpace(c.String("env")),
+				DBURL:       strings.TrimSpace(c.String("db-url")),
 				Description: strings.TrimSpace(c.String("description")),
 			})
 			if err != nil {
@@ -111,23 +127,20 @@ func GenerateLocalCommand() *cli.Command {
 			ui.Success("Generated revision: %s @ %s", out.Scenario, out.Revision)
 			ui.KeyValue("Schema: ", out.Schema)
 			ui.KeyValue("Tables: ", strings.Join(out.Tables, ", "))
-			if out.InheritedFrom != "" {
-				ui.KeyValue("Inherited from: ", fmt.Sprintf("%s @ %s", out.InheritedFrom, out.InheritedRevision))
-				if len(out.ClearedTables) > 0 {
-					ui.KeyValue("Auto-cleared FK descendants: ", strings.Join(out.ClearedTables, ", "))
-				}
-			}
+			ui.KeyValue("Inherited from: ", fmt.Sprintf("%s @ %s", out.InheritedFrom, out.InheritedRevision))
+			ui.KeyValue("Env used: ", out.Env)
+			ui.KeyValue("SQL saved: ", out.SQLPath)
 			ui.KeyValue("Run: ", fmt.Sprintf("seedmancer seed %s", out.Scenario))
 			return nil
 		},
 	}
 }
 
-// rejectProjectRelativeScriptPath returns an error when scriptFile resolves
-// to a path inside the project root (the directory containing seedmancer.yaml).
-// This keeps generator scripts out of the repository — they should live in
-// /tmp or be piped via stdin.
-func rejectProjectRelativeScriptPath(scriptFile string) error {
+// rejectProjectRelativeSQLPath returns an error when sqlFile resolves to
+// a path inside the project root (the directory containing seedmancer.yaml).
+// This keeps generator SQL files out of the repository — they should live
+// in /tmp or be piped via stdin.
+func rejectProjectRelativeSQLPath(sqlFile string) error {
 	configPath, err := utils.FindConfigFile()
 	if err != nil {
 		return nil
@@ -136,7 +149,7 @@ func rejectProjectRelativeScriptPath(scriptFile string) error {
 	if err != nil {
 		return nil
 	}
-	abs, err := filepath.Abs(scriptFile)
+	abs, err := filepath.Abs(sqlFile)
 	if err != nil {
 		return nil
 	}
@@ -146,9 +159,9 @@ func rejectProjectRelativeScriptPath(scriptFile string) error {
 	}
 	if rel == "." || (!strings.HasPrefix(rel, "..") && !filepath.IsAbs(rel)) {
 		return fmt.Errorf(
-			"refusing to read --script-file %q: path is inside the project (%s).\n"+
-				"Generator scripts are throwaway — pipe via stdin (heredoc) or place the file under /tmp.",
-			scriptFile, projectRoot,
+			"refusing to read --sql-file %q: path is inside the project (%s).\n"+
+				"Generator SQL files are throwaway — pipe via stdin (heredoc) or place the file under /tmp.",
+			sqlFile, projectRoot,
 		)
 	}
 	return nil

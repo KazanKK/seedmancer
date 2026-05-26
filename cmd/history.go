@@ -91,6 +91,10 @@ type HistoryRevision struct {
 	Source      string `json:"source,omitempty"`
 	Services    string `json:"services,omitempty"`
 	Description string `json:"description,omitempty"`
+	// HasSQL is true when a dataset.sql sidecar is stored alongside the
+	// revision's CSVs (i.e. the revision was created via generate_dataset_local).
+	// Agents can use this to decide whether get_dataset_sql will succeed.
+	HasSQL bool `json:"hasSql,omitempty"`
 }
 
 // HistoryOutput is the structured response for RunHistory.
@@ -145,6 +149,9 @@ func RunHistory(_ context.Context, in HistoryInput) (HistoryOutput, error) {
 			Source:      manifest.Source,
 			Services:    strings.Join(manifest.Services, ","),
 			Description: manifest.Description,
+		}
+		if _, err := os.Stat(DatasetSQLPath(revDir)); err == nil {
+			row.HasSQL = true
 		}
 		out.Revisions = append(out.Revisions, row)
 	}

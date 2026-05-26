@@ -68,10 +68,10 @@ Success criteria:
 	s.AddPrompt(&mcp.Prompt{
 		Name:        "generate_test_data",
 		Title:       "Generate test data",
-		Description: "Generate a plan for creating a new revision under a scenario using a local Go script.",
+		Description: "Generate a plan for creating a new revision under a scenario using a SQL block on top of an inherit base.",
 		Arguments: []*mcp.PromptArgument{
 			{Name: "scenario", Description: "Scenario path for the new revision (e.g. 'billing/pro')", Required: true},
-			{Name: "inherit", Description: "Base scenario whose latest revision pre-fills the new revision", Required: true},
+			{Name: "inherit", Description: "REQUIRED base scenario; its latest revision is seeded into the local env before the SQL runs", Required: true},
 		},
 	}, func(ctx context.Context, req *mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
 		args := req.Params.Arguments
@@ -85,15 +85,19 @@ Success criteria:
 		text := fmt.Sprintf(`Goal: synthesize a new revision under scenario %q locally.
 
 Steps:
-1. Read seedmancer://docs/local-generation for the Go script contract.
+1. Read seedmancer://docs/local-generation for the SQL contract and examples.
 2. Call 'describe_schema' to get exact table and column names.
-3. Call 'generate_dataset_local' with a Go script, scenario=%q, inherit=%q.
-4. Call 'seed_database' with the scenario path to load the revision.
-5. Optionally call 'pin_scenario' to mark the revision as stable, or 'push_dataset' to publish.
+3. Before writing fresh SQL, check 'list_history' for prior revisions with hasSql=true
+   and 'get_dataset_sql' to retrieve and edit existing SQL instead of starting over.
+4. Call 'generate_dataset_local' with scenario=%q, inherit=%q, and a SQL block of
+   INSERT/UPDATE/DELETE statements. Seedmancer seeds the inherit base into the
+   configured local env, runs your SQL in a transaction, then exports the result.
+5. Call 'seed_database' with the scenario path to load the revision into other envs.
+6. Optionally call 'pin_scenario' to mark the revision as stable, or 'push_dataset' to publish.
 
 Success criteria:
-- 'generate_dataset_local' returns with a non-empty Path and a new revision id.
-- The revision contains CSVs for every table you care about.`, args["scenario"], args["scenario"], args["inherit"])
+- 'generate_dataset_local' returns with a non-empty Path, SQLPath, and a new revision id.
+- The revision's dataset.sql round-trips through 'get_dataset_sql' unchanged.`, args["scenario"], args["scenario"], args["inherit"])
 
 		return &mcp.GetPromptResult{
 			Description: "Generate-test-data playbook (local)",

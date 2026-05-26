@@ -11,7 +11,6 @@ import (
 	"time"
 
 	db "github.com/KazanKK/seedmancer/database"
-	"github.com/KazanKK/seedmancer/internal/gointerp"
 	"github.com/KazanKK/seedmancer/internal/scenario"
 	"github.com/KazanKK/seedmancer/internal/schemadiff"
 	utils "github.com/KazanKK/seedmancer/internal/utils"
@@ -90,9 +89,6 @@ type DescribeDatasetOutput struct {
 	SourceEnv         string               `json:"sourceEnv,omitempty"`
 	UpdatedAt         string               `json:"updatedAt"`
 	Files             []DatasetFilePreview `json:"files"`
-	// HasGeneratorScript is true when a generator script has been saved for
-	// this dataset. Retrieve the script with the get_dataset_script tool.
-	HasGeneratorScript bool `json:"hasGeneratorScript,omitempty"`
 }
 
 // DatasetFilePreview is one row in DescribeDatasetOutput.Files. Rows is
@@ -157,46 +153,69 @@ func RunDescribeDataset(_ context.Context, in DescribeDatasetInput) (DescribeDat
 		}
 		out.Files = append(out.Files, fp)
 	}
-	// Signal whether a generator script was saved for this dataset so agents
-	// know to call get_dataset_script before writing a new script from scratch.
-	if script, err := utils.LoadGeneratorScript(projectRoot, in.DatasetID); err == nil && script != "" {
-		out.HasGeneratorScript = true
-	}
 	return out, nil
 }
 
-// ─── get_dataset_script ───────────────────────────────────────────────────────
+// ─── get_dataset_sql ──────────────────────────────────────────────────────────
 
-type GetDatasetScriptInput struct {
-	DatasetID string `json:"datasetId" jsonschema:"Dataset id whose generator script to retrieve"`
+// GetDatasetSQLInput selects a revision by scenario path (and optional
+// revision id / useStable). Defaults follow the same precedence rules as
+// seed_database: explicit revision wins, then useStable, then latest.
+type GetDatasetSQLInput struct {
+	Scenario  string `json:"scenario" jsonschema:"Scenario path (e.g. basic, billing/pro)"`
+	Revision  string `json:"revision,omitempty" jsonschema:"Specific revision id (e.g. r002); defaults to latest"`
+	UseStable bool   `json:"useStable,omitempty" jsonschema:"Use the scenario's stable revision (set via pin)"`
 }
 
-type GetDatasetScriptOutput struct {
-	DatasetID string `json:"datasetId"`
-	Script    string `json:"script"`
+type GetDatasetSQLOutput struct {
+	Scenario string `json:"scenario"`
+	Revision string `json:"revision"`
+	Path     string `json:"path"`
+	SQL      string `json:"sql"`
 }
 
-// RunGetDatasetScript returns the generator script that was saved when the
-// dataset was created with generate_dataset_local / generate-local. Returns
-// an error when no script has been saved for the given dataset id.
-func RunGetDatasetScript(_ context.Context, in GetDatasetScriptInput) (GetDatasetScriptOutput, error) {
+// RunGetDatasetSQL returns the dataset.sql file that was saved when the
+// revision was created with generate_dataset_local. Returns an error when
+// the revision has no dataset.sql — e.g. it was produced via export_database
+// or pulled from cloud storage that didn't carry one.
+func RunGetDatasetSQL(_ context.Context, in GetDatasetSQLInput) (GetDatasetSQLOutput, error) {
 	configPath, err := utils.FindConfigFile()
 	if err != nil {
-		return GetDatasetScriptOutput{}, err
+		return GetDatasetSQLOutput{}, err
 	}
 	projectRoot := filepath.Dir(configPath)
-
-	script, err := utils.LoadGeneratorScript(projectRoot, in.DatasetID)
+	cfg, err := utils.LoadConfig(configPath)
 	if err != nil {
-		return GetDatasetScriptOutput{}, fmt.Errorf("loading generator script: %w", err)
+		return GetDatasetSQLOutput{}, err
 	}
-	if script == "" {
-		return GetDatasetScriptOutput{}, fmt.Errorf(
-			"no generator script found for dataset %q — it may have been created without generate_dataset_local",
-			in.DatasetID,
+
+	scenarioPath, err := scenario.Normalize(in.Scenario)
+	if err != nil {
+		return GetDatasetSQLOutput{}, err
+	}
+	rev, err := resolveScenarioRevision(projectRoot, cfg.StoragePath, scenarioPath, in.Revision, in.UseStable)
+	if err != nil {
+		return GetDatasetSQLOutput{}, err
+	}
+
+	sqlPath := DatasetSQLPath(rev.RevDir)
+	data, err := os.ReadFile(sqlPath)
+	if os.IsNotExist(err) {
+		return GetDatasetSQLOutput{}, fmt.Errorf(
+			"revision %s of scenario %q has no %s — it was likely produced by export_database "+
+				"or pull_dataset rather than generate_dataset_local",
+			rev.RevID, scenarioPath, datasetSQLName,
 		)
 	}
-	return GetDatasetScriptOutput{DatasetID: in.DatasetID, Script: script}, nil
+	if err != nil {
+		return GetDatasetSQLOutput{}, fmt.Errorf("reading %s: %w", sqlPath, err)
+	}
+	return GetDatasetSQLOutput{
+		Scenario: scenarioPath,
+		Revision: rev.RevID,
+		Path:     sqlPath,
+		SQL:      string(data),
+	}, nil
 }
 
 // previewDatasetFile reads the first `n+1` lines of a CSV/JSON file
@@ -708,10 +727,14 @@ This project uses **Seedmancer** for test data management. Test data lives in
 (e.g. ` + "`r001`" + `, ` + "`r002`" + `). The ` + "`latest`" + ` revision is used by default; pin a
 revision as ` + "`stable`" + ` for CI.
 
+Generation is driven by **SQL**. The agent writes DML
+(` + "`INSERT`" + ` / ` + "`UPDATE`" + ` / ` + "`DELETE`" + `) that runs on top of an inherit base; Seedmancer
+exports the resulting state back to CSV and saves the SQL alongside as
+` + "`dataset.sql`" + ` so it can be retrieved and edited later.
+
 **Never** write CSV files to ` + "`.seedmancer/`" + ` by hand.
-**Never** create seed.sql or similar workarounds.
-**Never** save generator scripts to project directories (` + "`scripts/`" + `, ` + "`src/`" + `, etc.) — use MCP or stdin pipe.
-**Never** show script content or generation internals to the user. Say "Generating test data…" and report the result.
+**Never** save generator SQL files to project directories (` + "`scripts/`" + `, ` + "`src/`" + `, etc.) — use MCP or stdin pipe.
+**Never** show SQL content or generation internals to the user. Say "Generating test data…" and report the result.
 **Always** use the Seedmancer MCP tools.
 
 ## Standard workflow for generating test data:
@@ -725,31 +748,39 @@ revision as ` + "`stable`" + ` for CI.
      content-addressed ` + "`.seedmancer/schemas/<fp>/schema.json`" + ` that other
      tools rely on.
 3. ` + "`describe_schema`" + ` — get the exact table and column names.
-4. ` + "`generate_dataset_local`" + ` with ` + "`scenario: \"<new-scenario>\"`" + ` and
-   ` + "`inherit: \"<base-scenario>\"`" + ` — write a Go script that produces only the
-   tables you actually want to change. The result is a complete, seedable
-   revision; descendant tables that FK to overwritten tables are auto-cleared.
+4. ` + "`generate_dataset_local`" + ` with ` + "`scenario: \"<new-scenario>\"`" + `,
+   ` + "`inherit: \"<base-scenario>\"`" + `, and ` + "`sql: \"...\"`" + ` — write SQL that mutates
+   only the rows you actually want to change. Seedmancer seeds the inherit
+   base first, runs your SQL in a transaction, then snapshots the result as
+   a new revision.
 5. ` + "`seed_database`" + ` with the scenario path — loads the latest revision.
    Pass ` + "`useStable: true`" + ` for the pinned revision.
 
-**Always pass ` + "`inherit`" + `** so a single ` + "`generate_dataset_local`" + ` call yields a
-complete dataset.
+**` + "`inherit`" + ` is REQUIRED.** ` + "`generate_dataset_local`" + ` always seeds a base
+scenario before applying your SQL.
+
+**Heads-up: this overwrites the configured local env's data** (the SQL runs
+against it). That's already true of ` + "`seed_database`" + `, so this is fine for
+a dev/test DB but never run it against a database whose state you care about.
 
 ## Large scenarios (1M+ rows)
 
-` + "`generate_dataset_local`" + ` works for any row count. Always use Seedmancer —
-even for millions of rows. **Never** switch to a raw SQL script just because the
-dataset is large.
+` + "`generate_dataset_local`" + ` works for any row count. For very large datasets
+prefer ` + "`INSERT INTO ... SELECT FROM generate_series(...)`" + ` so Postgres
+does the heavy lifting. Always use Seedmancer — never bypass it with a raw
+SQL script outside the tool.
 
 ## To modify existing generated data:
 
-1. ` + "`list_history`" + ` — see existing revisions of the scenario.
-2. ` + "`describe_dataset`" + ` — check for ` + "`hasGeneratorScript: true`" + `.
-3. ` + "`get_dataset_script`" + ` — retrieve the saved source.
-4. Modify it and pass back to ` + "`generate_dataset_local`" + ` with the same scenario
-   path and ` + "`inherit: \"<base-scenario>\"`" + `. A new ` + "`rNNN`" + ` revision is created
-   automatically and ` + "`latest`" + ` advances to it.
-5. ` + "`seed_database`" + ` with the scenario path.
+1. ` + "`list_history`" + ` — see existing revisions of the scenario; rows with
+   ` + "`hasSql: true`" + ` were produced by ` + "`generate_dataset_local`" + ` and have a
+   ` + "`dataset.sql`" + ` you can retrieve.
+2. ` + "`get_dataset_sql`" + ` with ` + "`scenario`" + ` (and optionally ` + "`revision`" + `) — returns
+   the SQL block.
+3. Modify the SQL and pass it back to ` + "`generate_dataset_local`" + ` with the same
+   ` + "`scenario`" + ` and ` + "`inherit: \"<base-scenario>\"`" + `. A new ` + "`rNNN`" + ` revision is
+   created automatically and ` + "`latest`" + ` advances to it.
+4. ` + "`seed_database`" + ` with the scenario path.
 
 ## Schema drift
 
@@ -769,33 +800,29 @@ that revision regardless of newer exports.
 2. Then follow the standard workflow above from step 1.
 
 Prefer ` + "`generate_dataset_local`" + ` (local, no quota).
-Read ` + "`seedmancer://docs/local-generation`" + ` for the Go script interface and examples.
+Read ` + "`seedmancer://docs/local-generation`" + ` for the SQL contract and examples.
 
 ## CLI fallback (when MCP tools are unavailable):
 
-Pipe the script via a shell heredoc — **nothing is written to disk**:
+Pipe the SQL via a shell heredoc — **nothing is written to disk**:
 
 ` + "```" + `
 seedmancer generate-local <scenario> --inherit <base-scenario> <<'EOF'
-package main
-
-import ("encoding/csv"; "fmt"; "os")
-
-func main() {
-  out := os.Args[1]
-  // ... write only the <table>.csv files you want to change ...
-}
+DELETE FROM order_items WHERE product_id IN (SELECT id FROM products);
+DELETE FROM products;
+INSERT INTO products (id, brand_id, name, price) VALUES
+  (1, 1, 'Product 1', 9.99),
+  (2, 1, 'Product 2', 19.98);
 EOF
 seedmancer seed <scenario>
 ` + "```" + `
 
-` + "`--inherit <base-scenario>`" + ` pre-fills the new revision from the base scenario
-and auto-clears descendant FK tables; no manual ` + "`cp`" + ` / ` + "`head -1`" + ` glue needed.
+` + "`--inherit <base-scenario>`" + ` seeds the base scenario into the local env first
+so your SQL only has to express the delta.
 
-**Never write the script to a file in the project directory.** ` + "`generate-local`" + `
-refuses ` + "`--script-file`" + ` paths inside the project — pipe via stdin instead.
-**Never mention the script content or generation details to the user.**
-The Seedmancer binary includes an embedded Go interpreter — no Go toolchain needed.
+**Never write the SQL to a file in the project directory.** ` + "`generate-local`" + `
+refuses ` + "`--sql-file`" + ` paths inside the project — pipe via stdin instead.
+**Never mention the SQL content or generation details to the user.**
 `
 
 // claudeMdBlock is appended to (or used to replace an existing block in)
@@ -813,43 +840,50 @@ This project uses Seedmancer (MCP) for test data, organised into **scenarios**
 a new immutable **revision** under the scenario; ` + "`latest`" + ` is used by default,
 ` + "`stable`" + ` can be pinned for CI.
 
+Generation is driven by **SQL** (` + "`INSERT`" + `/` + "`UPDATE`" + `/` + "`DELETE`" + ` DML). Seedmancer
+seeds the inherit base into the configured local env, runs your SQL in a
+transaction, then snapshots the resulting state back to CSV. The SQL is saved
+as ` + "`dataset.sql`" + ` alongside the CSVs so you can retrieve and edit it later.
+
 When asked to create, generate, or seed test/fixture data:
 
-- **Never** write files to ` + "`.seedmancer/`" + ` manually. Never create seed.sql workarounds.
-- Never save generator scripts to project directories (` + "`scripts/`" + `, ` + "`src/`" + `, etc.).
-  Never show script content, file paths, or generation internals to the user.
+- **Never** write files to ` + "`.seedmancer/`" + ` manually.
+- Never save generator SQL to project directories (` + "`scripts/`" + `, ` + "`src/`" + `, etc.).
+  Never show SQL content, file paths, or generation internals to the user.
 - Call ` + "`list_datasets`" + ` first. If no scenarios exist, call ` + "`export_database`" + `
   with a scenario name — the DB is already running (configured in seedmancer.yaml),
   so this always works. The export creates ` + "`r001`" + ` plus the schema sidecars
   every other tool needs.
-- Then: ` + "`describe_schema`" + ` → ` + "`generate_dataset_local`" + ` with ` + "`scenario`" + ` and
-  ` + "`inherit: \"<base-scenario>\"`" + ` → ` + "`seed_database`" + ` with the scenario path.
-- **Always pass ` + "`inherit`" + `** for partial updates. ` + "`inherit`" + ` produces a complete,
-  seedable revision in one call; descendant tables that FK to overwritten tables
-  are auto-cleared.
+- Then: ` + "`describe_schema`" + ` → ` + "`generate_dataset_local`" + ` with ` + "`scenario`" + `,
+  ` + "`inherit: \"<base-scenario>\"`" + `, and ` + "`sql`" + ` → ` + "`seed_database`" + ` with the scenario path.
+- **` + "`inherit`" + ` is REQUIRED.** It seeds the named base scenario into the local
+  env before your SQL runs, so the SQL only has to express the delta.
+- ` + "`generate_dataset_local`" + ` overwrites data in the configured local env (the
+  SQL runs against it). Same behaviour as ` + "`seed_database`" + ` — fine for dev/test
+  DBs, never use against a DB whose state matters.
 - For a new project without seedmancer.yaml: ` + "`init_project`" + ` first.
 - Prefer ` + "`generate_dataset_local`" + ` (local, no quota).
-- **Always use Seedmancer for test data — even 1M+ rows.** ` + "`generate_dataset_local`" + `
-  works at any row count. Never fall back to a SQL script just because the dataset
-  is large.
-- **To modify existing data**: ` + "`list_history`" + ` to see existing revisions, then
-  ` + "`describe_dataset`" + ` for ` + "`hasGeneratorScript`" + `, then ` + "`get_dataset_script`" + ` to
-  retrieve the source, modify it, and pass it back to ` + "`generate_dataset_local`" + `
-  with the same scenario path and ` + "`inherit`" + `. A new ` + "`rNNN`" + ` revision is created
-  automatically.
+- **Always use Seedmancer for test data — even 1M+ rows.** Use
+  ` + "`INSERT INTO ... SELECT FROM generate_series(...)`" + ` for high row counts.
+- **To modify existing data**: ` + "`list_history`" + ` (rows with ` + "`hasSql: true`" + ` have
+  a saved ` + "`dataset.sql`" + `), then ` + "`get_dataset_sql`" + ` with ` + "`scenario`" + ` (and
+  optionally ` + "`revision`" + `) to retrieve it, modify the SQL, and pass it back to
+  ` + "`generate_dataset_local`" + ` with the same scenario path and ` + "`inherit`" + `. A new
+  ` + "`rNNN`" + ` revision is created automatically.
 - **Schema drift**: run ` + "`check_scenario`" + ` if the DB schema changed since the
   last export. ` + "`seed_database`" + ` refuses mismatched schemas unless ` + "`force: true`" + `.
 - **Pin for CI**: use ` + "`pin_scenario`" + ` to mark a revision as stable; CI uses
   ` + "`seed_database`" + ` with ` + "`useStable: true`" + ` to lock onto it.
-- **CLI fallback** (when MCP tools are unavailable): pipe the script via stdin heredoc.
+- **CLI fallback** (when MCP tools are unavailable): pipe the SQL via stdin heredoc.
   ` + "```" + `
   seedmancer generate-local <scenario> --inherit <base-scenario> <<'EOF'
-  package main
-  ...
+  DELETE FROM order_items WHERE product_id IN (SELECT id FROM products);
+  DELETE FROM products;
+  INSERT INTO products (id, brand_id, name, price) VALUES (1, 1, 'P1', 9.99);
   EOF
   seedmancer seed <scenario>
   ` + "```" + `
-  ` + "`generate-local`" + ` rejects ` + "`--script-file`" + ` paths inside the project; always pipe.
+  ` + "`generate-local`" + ` rejects ` + "`--sql-file`" + ` paths inside the project; always pipe.
 - Simply say "Generating test data…" and report the result.
 <!-- seedmancer:end -->`
 
@@ -1274,45 +1308,68 @@ func pickExportTarget(cfg utils.Config, envName, dbURL string) (utils.NamedEnv, 
 
 // ─── generate local ───────────────────────────────────────────────────────────
 
-// GenerateLocalInput is the input for RunGenerateLocal. The script writes
-// CSV files into the data folder of a fresh revision under the requested
-// scenario; everything else (schema sidecars, manifests, pointers) is
-// handled by Seedmancer itself.
+// GenerateLocalInput is the input for RunGenerateLocal. The agent provides
+// a SQL block (INSERT/UPDATE/DELETE/etc., wrapped in a single transaction)
+// that runs on top of the inherit base. Seedmancer seeds the inherit base
+// into the configured local env first, then applies the SQL, then exports
+// the resulting tables back to CSV as a new revision under `scenario`.
 //
-// Inherit takes another scenario path; its latest revision provides the
-// base CSVs. The script may overwrite whichever tables it wants;
-// descendant tables (those that FK to overwritten tables) are cleared to
-// header-only so the result is always safe to seed.
+// Inherit is REQUIRED — there is no schema available without it.
 type GenerateLocalInput struct {
-	Script      string `json:"script" jsonschema:"Go source (package main) that writes <table>.csv files into os.Args[1]"`
+	SQL         string `json:"sql" jsonschema:"SQL applied on top of the inherit base. DML only (INSERT/UPDATE/DELETE); runs inside a single transaction."`
 	Scenario    string `json:"scenario" jsonschema:"Scenario path for the new revision (e.g. billing/pro)"`
-	Inherit     string `json:"inherit,omitempty" jsonschema:"Base scenario whose latest revision pre-fills the new revision"`
+	Inherit     string `json:"inherit" jsonschema:"REQUIRED. Base scenario whose latest revision is seeded into the configured local env before the SQL runs."`
+	Env         string `json:"env,omitempty" jsonschema:"Named env to seed/export against (defaults to default_env)"`
+	DBURL       string `json:"dbUrl,omitempty" jsonschema:"Ad-hoc target URL (mutually exclusive with env)"`
 	Description string `json:"description,omitempty" jsonschema:"Optional description stored on the new revision manifest"`
 }
 
 // GenerateLocalOutput is the structured result. Path points at the
 // revision data folder so the caller can hand it straight to seed.
 type GenerateLocalOutput struct {
-	Scenario              string   `json:"scenario"`
-	Revision              string   `json:"revision"`
-	Schema                string   `json:"schema"`
-	Path                  string   `json:"path"`
-	Tables                []string `json:"tables"`
-	GeneratorScriptStored bool     `json:"generatorScriptStored"`
-	InheritedFrom         string   `json:"inheritedFrom,omitempty"`
-	InheritedRevision     string   `json:"inheritedRevision,omitempty"`
-	ClearedTables         []string `json:"clearedTables,omitempty"`
+	Scenario          string         `json:"scenario"`
+	Revision          string         `json:"revision"`
+	Schema            string         `json:"schema"`
+	Path              string         `json:"path"`
+	SQLPath           string         `json:"sqlPath"`
+	Tables            []string       `json:"tables"`
+	RowCounts         map[string]int `json:"rowCounts,omitempty"`
+	GeneratorSQLStored bool          `json:"generatorSqlStored"`
+	InheritedFrom     string         `json:"inheritedFrom"`
+	InheritedRevision string         `json:"inheritedRevision"`
+	Env               string         `json:"env"`
 }
 
-// RunGenerateLocal materialises a new revision whose data is produced by
-// running the given Go script against an embedded interpreter. The
-// revision uses the schema fingerprint of the inherit base (when given)
-// or the schema currently stored under the scenario's existing latest
-// revision; if neither exists, the caller must export at least once
-// first so we have a schema to pin against.
-func RunGenerateLocal(_ context.Context, in GenerateLocalInput) (GenerateLocalOutput, error) {
-	if strings.TrimSpace(in.Script) == "" {
-		return GenerateLocalOutput{}, fmt.Errorf("script cannot be empty")
+// datasetSQLName is the filename of the agent-written SQL inside a
+// revision directory. Stored as a sibling of data/ so the directory
+// scanners that walk data/ for CSV files never trip over it.
+const datasetSQLName = "dataset.sql"
+
+// DatasetSQLPath returns the on-disk path of the agent-written SQL file
+// for a single revision directory.
+func DatasetSQLPath(revDir string) string {
+	return filepath.Join(revDir, datasetSQLName)
+}
+
+// RunGenerateLocal materialises a new revision by:
+//  1. Seeding the inherit base into the configured local env (CSV → COPY,
+//     same path as `seed_database`).
+//  2. Applying the agent-written SQL on top of that state inside a single
+//     transaction. A failure rolls back, leaving the env at the inherit
+//     baseline so the next attempt starts from a known state.
+//  3. Exporting the resulting tables back to CSV as a new revision under
+//     `scenario`. Pointers.latest advances to the new revision.
+//  4. Saving the raw SQL inside the revision as dataset.sql so agents can
+//     retrieve it later via get_dataset_sql instead of re-reading CSVs.
+func RunGenerateLocal(ctx context.Context, in GenerateLocalInput) (GenerateLocalOutput, error) {
+	if strings.TrimSpace(in.SQL) == "" {
+		return GenerateLocalOutput{}, fmt.Errorf("sql cannot be empty")
+	}
+	if strings.TrimSpace(in.Inherit) == "" {
+		return GenerateLocalOutput{}, fmt.Errorf(
+			"inherit is required — generate_dataset_local always seeds a base scenario first " +
+				"(run `seedmancer export <baseline>` and pass inherit=<baseline>)",
+		)
 	}
 
 	configPath, err := utils.FindConfigFile()
@@ -1329,47 +1386,73 @@ func RunGenerateLocal(_ context.Context, in GenerateLocalInput) (GenerateLocalOu
 	if err != nil {
 		return GenerateLocalOutput{}, err
 	}
-
-	// Resolve the inherit base (if any) BEFORE we create the new revision
-	// directory so a typo never produces a half-written rNNN folder.
-	var (
-		baseDir          string
-		baseFingerprint  string
-		inheritedFrom    string
-		inheritedRevID   string
-	)
-	if strings.TrimSpace(in.Inherit) != "" {
-		basePath, err := scenario.Normalize(in.Inherit)
-		if err != nil {
-			return GenerateLocalOutput{}, fmt.Errorf("invalid inherit scenario: %w", err)
-		}
-		baseRev, err := resolveScenarioRevision(projectRoot, cfg.StoragePath, basePath, "", false)
-		if err != nil {
-			return GenerateLocalOutput{}, fmt.Errorf("resolving inherit base %q: %w", basePath, err)
-		}
-		baseDir = baseRev.DataDir
-		baseFingerprint = baseRev.Manifest.SchemaFingerprint
-		inheritedFrom = basePath
-		inheritedRevID = baseRev.RevID
+	inheritPath, err := scenario.Normalize(in.Inherit)
+	if err != nil {
+		return GenerateLocalOutput{}, fmt.Errorf("invalid inherit scenario: %w", err)
 	}
 
-	// When no inherit was given, fall back to the scenario's existing
-	// latest revision for schema info. This lets users iterate on a
-	// scenario without re-exporting just to get the right fingerprint.
-	if baseFingerprint == "" {
-		if existing, err := resolveScenarioRevision(projectRoot, cfg.StoragePath, scenarioPath, "", false); err == nil {
-			baseFingerprint = existing.Manifest.SchemaFingerprint
-		}
+	// Resolve target env up front so a misconfigured env never wastes a
+	// half-written revision id. dbUrl/env precedence mirrors RunExport.
+	target, err := pickExportTarget(cfg, in.Env, in.DBURL)
+	if err != nil {
+		return GenerateLocalOutput{}, err
 	}
-	if baseFingerprint == "" {
-		return GenerateLocalOutput{}, fmt.Errorf(
-			"no schema available for scenario %q — pass --inherit <base-scenario> or run `seedmancer export %s` first",
-			scenarioPath, scenarioPath,
-		)
+
+	// Resolve the inherit base before any side effects so a typo doesn't
+	// leave the local env in a half-restored state.
+	baseRev, err := resolveScenarioRevision(projectRoot, cfg.StoragePath, inheritPath, "", false)
+	if err != nil {
+		return GenerateLocalOutput{}, fmt.Errorf("resolving inherit base %q: %w", inheritPath, err)
 	}
+	baseFingerprint := baseRev.Manifest.SchemaFingerprint
 	fpShort := utils.FingerprintShort(baseFingerprint)
-	schemaJSONPath := scenario.SchemaJSONPath(projectRoot, cfg.StoragePath, fpShort)
 
+	// 1) Seed the inherit base into the target env. Reuses the exact same
+	//    CSV → COPY restore path as the seed_database tool so any quirks
+	//    (sequence resets, trigger handling, FK ordering) only have to be
+	//    correct in one place.
+	//    Force: true because generate_dataset_local owns the DB state for
+	//    the duration of the call — the schema fingerprint check that gates
+	//    a regular seed would block legitimate generate calls whenever the
+	//    live DB has any drift from the base. The freshly exported revision
+	//    will reflect the actual DB state regardless.
+	seedOut, err := RunSeed(ctx, SeedInput{
+		Scenario: inheritPath,
+		Env:      target.Name,
+		DBURL:    in.DBURL,
+		Yes:      true,
+		Force:    true,
+	})
+	if err != nil {
+		return GenerateLocalOutput{}, fmt.Errorf("seeding inherit base %q: %w", inheritPath, err)
+	}
+	if seedOut.AnyError {
+		for _, r := range seedOut.Results {
+			if r.Error != "" {
+				return GenerateLocalOutput{}, fmt.Errorf(
+					"seeding inherit base %q failed on env %q: %s",
+					inheritPath, r.Env, r.Error,
+				)
+			}
+		}
+		return GenerateLocalOutput{}, fmt.Errorf("seeding inherit base %q failed", inheritPath)
+	}
+
+	// 2) Apply the agent-written SQL on top of the seeded state, wrapped
+	//    in a transaction by ExecSQL. If it fails, the env is left at the
+	//    inherit baseline (clean recovery — caller can re-run).
+	manager, normalizedURL, err := db.NewManager(target.DatabaseURL)
+	if err != nil {
+		return GenerateLocalOutput{}, err
+	}
+	if err := manager.ConnectWithDSN(normalizedURL); err != nil {
+		return GenerateLocalOutput{}, fmt.Errorf("connecting to database: %v", err)
+	}
+	if err := manager.ExecSQL(in.SQL); err != nil {
+		return GenerateLocalOutput{}, fmt.Errorf("applying SQL on top of %q: %w", inheritPath, err)
+	}
+
+	// 3) Materialise the resulting state into a brand-new revision dir.
 	scenarioDir := scenario.ScenarioDir(projectRoot, cfg.StoragePath, scenarioPath)
 	if err := os.MkdirAll(scenarioDir, 0755); err != nil {
 		return GenerateLocalOutput{}, fmt.Errorf("creating scenario dir: %w", err)
@@ -1384,100 +1467,34 @@ func RunGenerateLocal(_ context.Context, in GenerateLocalInput) (GenerateLocalOu
 		return GenerateLocalOutput{}, fmt.Errorf("creating revision data dir: %w", err)
 	}
 
-	// Pre-fill from the base revision. Snapshot mtimes so we can detect
-	// which CSVs the script actually wrote.
-	inherited := map[string]bool{}
-	preMtime := map[string]time.Time{}
-	if baseDir != "" {
-		entries, err := os.ReadDir(baseDir)
-		if err != nil {
+	// Defer cleanup on the way out — only triggered when we don't reach
+	// the successful return path. This keeps partial revisions off disk
+	// without papering over real errors.
+	success := false
+	defer func() {
+		if !success {
 			_ = os.RemoveAll(revDir)
-			return GenerateLocalOutput{}, fmt.Errorf("reading inherit base: %w", err)
 		}
-		for _, e := range entries {
-			if e.IsDir() {
-				continue
-			}
-			name := e.Name()
-			tbl := trimCSVSuffix(name)
-			if tbl == "" {
-				continue
-			}
-			src := filepath.Join(baseDir, name)
-			dst := filepath.Join(dataDir, name)
-			if err := copyFile(src, dst); err != nil {
-				_ = os.RemoveAll(revDir)
-				return GenerateLocalOutput{}, fmt.Errorf("copying %s from base: %w", name, err)
-			}
-			inherited[tbl] = true
-			if info, err := os.Stat(dst); err == nil {
-				preMtime[tbl] = info.ModTime()
-			}
-		}
+	}()
+
+	if err := manager.ExportToCSV(dataDir); err != nil {
+		return GenerateLocalOutput{}, fmt.Errorf("exporting tables to CSV: %v", err)
 	}
 
-	// Execute the script via the embedded yaegi Go interpreter.
-	if err := gointerp.Run(in.Script, dataDir); err != nil {
-		_ = os.RemoveAll(revDir)
+	tables, rowCounts, err := listCSVTablesAndRowCounts(dataDir)
+	if err != nil {
 		return GenerateLocalOutput{}, err
 	}
-
-	entries, err := os.ReadDir(dataDir)
-	if err != nil {
-		return GenerateLocalOutput{}, fmt.Errorf("reading data dir: %w", err)
-	}
-	generated := map[string]bool{}
-	var tables []string
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		tbl := trimCSVSuffix(e.Name())
-		if tbl == "" {
-			continue
-		}
-		tables = append(tables, tbl)
-		if !inherited[tbl] {
-			generated[tbl] = true
-			continue
-		}
-		if info, err := e.Info(); err == nil {
-			if info.ModTime().After(preMtime[tbl]) {
-				generated[tbl] = true
-			}
-		}
-	}
 	if len(tables) == 0 {
-		_ = os.RemoveAll(revDir)
-		return GenerateLocalOutput{}, fmt.Errorf("script produced no CSV files in %s", dataDir)
-	}
-	if baseDir != "" && len(generated) == 0 {
-		_ = os.RemoveAll(revDir)
-		return GenerateLocalOutput{}, fmt.Errorf(
-			"script produced no new CSV files; inheriting from %q without overwriting any table is a no-op",
-			inheritedFrom,
-		)
+		return GenerateLocalOutput{}, fmt.Errorf("export produced no CSV files in %s", dataDir)
 	}
 
-	cleared := map[string]bool{}
-	if baseDir != "" && len(generated) > 0 {
-		idx, err := buildFKChildIndex(schemaJSONPath)
-		if err == nil {
-			descendants := findFKDescendants(idx, generated)
-			for tbl := range descendants {
-				if !inherited[tbl] || generated[tbl] {
-					continue
-				}
-				csvPath := filepath.Join(dataDir, tbl+".csv")
-				if err := truncateCSVToHeader(csvPath); err == nil {
-					cleared[tbl] = true
-				}
-			}
-		}
+	// 4) Persist the SQL alongside the materialised CSVs. dataset.sql is
+	//    the agent-readable source of truth; the CSVs are the seed format.
+	sqlPath := DatasetSQLPath(revDir)
+	if err := os.WriteFile(sqlPath, []byte(in.SQL), 0644); err != nil {
+		return GenerateLocalOutput{}, fmt.Errorf("writing %s: %w", datasetSQLName, err)
 	}
-
-	sort.Strings(tables)
-	_, rowCounts, _ := listCSVTablesAndRowCounts(dataDir)
 
 	now := time.Now().UTC()
 	revManifest := scenario.RevisionManifest{
@@ -1485,7 +1502,7 @@ func RunGenerateLocal(_ context.Context, in GenerateLocalInput) (GenerateLocalOu
 		Revision:          revID,
 		SchemaFingerprint: baseFingerprint,
 		CreatedAt:         now,
-		Source:            "generate-local",
+		Source:            "generate-sql",
 		Tables:            tables,
 		Services:          []string{"postgres"},
 		RowCounts:         rowCounts,
@@ -1513,19 +1530,19 @@ func RunGenerateLocal(_ context.Context, in GenerateLocalInput) (GenerateLocalOu
 		return GenerateLocalOutput{}, err
 	}
 
-	scriptKey := scenarioPath + "@" + revID
-	scriptStored := utils.SaveGeneratorScript(projectRoot, scriptKey, in.Script) == nil
-
+	success = true
 	return GenerateLocalOutput{
-		Scenario:              scenarioPath,
-		Revision:              revID,
-		Schema:                fpShort,
-		Path:                  dataDir,
-		Tables:                tables,
-		GeneratorScriptStored: scriptStored,
-		InheritedFrom:         inheritedFrom,
-		InheritedRevision:     inheritedRevID,
-		ClearedTables:         sortedKeys(cleared),
+		Scenario:           scenarioPath,
+		Revision:           revID,
+		Schema:             fpShort,
+		Path:               dataDir,
+		SQLPath:            sqlPath,
+		Tables:             tables,
+		RowCounts:          rowCounts,
+		GeneratorSQLStored: true,
+		InheritedFrom:      inheritPath,
+		InheritedRevision:  baseRev.RevID,
+		Env:                target.Name,
 	}, nil
 }
 
@@ -1583,6 +1600,11 @@ func RunSync(ctx context.Context, in SyncInput) (SyncOutput, error) {
 		return SyncOutput{}, fmt.Errorf("no CSV or JSON files in %s", rev.DataDir)
 	}
 	entries := append(append([]string{}, schemaFiles...), dataFiles...)
+	// Bundle the agent-written SQL sidecar (if present) so a round-trip
+	// pull preserves the source of truth, not just the materialised CSVs.
+	if sqlPath := DatasetSQLPath(rev.RevDir); fileExists(sqlPath) {
+		entries = append(entries, sqlPath)
+	}
 	zipData, err := compressFiles(entries)
 	if err != nil {
 		return SyncOutput{}, fmt.Errorf("compressing files: %v", err)
@@ -1674,6 +1696,12 @@ func RunFetch(ctx context.Context, in FetchInput) (FetchOutput, error) {
 	}
 	if _, err := liftSchemaSidecars(dataDir, schemaDir); err != nil {
 		return FetchOutput{}, fmt.Errorf("placing schema files: %v", err)
+	}
+	// Lift the agent-written SQL sidecar one level up so it lives at
+	// <revDir>/dataset.sql (where get_dataset_sql looks for it) rather
+	// than alongside the CSVs in data/.
+	if err := liftDatasetSQL(dataDir, revDir); err != nil {
+		return FetchOutput{}, fmt.Errorf("placing dataset.sql: %v", err)
 	}
 
 	tables, rowCounts, _ := listCSVTablesAndRowCounts(dataDir)

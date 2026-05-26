@@ -39,6 +39,29 @@ func (p *PostgresManager) ConnectWithDSN(dsn string) error {
 	return nil
 }
 
+// ExecSQL runs sqlText inside a single transaction. On any error the
+// transaction is rolled back so the database stays at its pre-call state.
+// lib/pq's simple query protocol accepts multi-statement strings as long
+// as no parameter placeholders are used, which is the contract callers
+// rely on for agent-written DML scripts (INSERT/UPDATE/DELETE chains).
+func (p *PostgresManager) ExecSQL(sqlText string) error {
+	if p.DB == nil {
+		return errors.New("no database connection")
+	}
+	tx, err := p.DB.Begin()
+	if err != nil {
+		return fmt.Errorf("beginning transaction: %v", err)
+	}
+	if _, err := tx.Exec(sqlText); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("executing SQL: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("committing SQL transaction: %v", err)
+	}
+	return nil
+}
+
 func (p *PostgresManager) ExtractSchema() (*Schema, error) {
 	if p.DB == nil {
 		return nil, errors.New("no database connection")

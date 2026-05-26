@@ -29,10 +29,11 @@ Run this sequence once to set everything up:
    - **If no scenarios exist**: call ` + "`export_database`" + ` first with a scenario
      name. The database is already running (configured in seedmancer.yaml).
 2. ` + "`describe_schema`" + ` — get the exact table and column names.
-3. ` + "`generate_dataset_local scenario=\"<new>\" inherit=\"<base>\"`" + ` — write a Go
-   script that produces CSVs locally. Inherit pre-fills the new revision from
-   the base scenario; the script overwrites only the table(s) it cares about.
-   Read seedmancer://docs/local-generation for the contract.
+3. ` + "`generate_dataset_local scenario=\"<new>\" inherit=\"<base>\" sql=\"...\"`" + ` —
+   write SQL that mutates only the rows you want to change. Seedmancer seeds
+   the inherit base into the configured local env first, runs your SQL in a
+   transaction, then snapshots the result. Read seedmancer://docs/local-generation
+   for the SQL contract.
 4. ` + "`seed_database scenario=\"<new>\" yes=true`" + ` — loads the latest revision
    into the target env.
 5. Run the actual test command outside MCP (e.g. Playwright, pytest).
@@ -53,11 +54,12 @@ the diff and ` + "`export_database`" + ` again to create a new compatible revisi
 
 ## Need new data?
 
-1. ` + "`list_history scenario=\"<scenario>\"`" + ` — see existing revisions.
-2. ` + "`describe_dataset`" + ` — check if an existing dataset has ` + "`hasGeneratorScript: true`" + `.
-   If so, use ` + "`get_dataset_script`" + ` to retrieve the source and **modify it** instead
-   of writing a new script from scratch.
-3. ` + "`generate_dataset_local`" + ` with the modified script — creates a fresh
+1. ` + "`list_history scenario=\"<scenario>\"`" + ` — see existing revisions. Rows
+   with ` + "`hasSql: true`" + ` have a saved ` + "`dataset.sql`" + ` you can edit.
+2. ` + "`get_dataset_sql scenario=\"<scenario>\"`" + ` — retrieve the SQL block from
+   the latest revision (or pass ` + "`revision: \"rNNN\"`" + ` for a specific one) and
+   **modify it** instead of writing new SQL from scratch.
+3. ` + "`generate_dataset_local`" + ` with the modified SQL — creates a fresh
    revision under the same scenario.
 4. ` + "`push_dataset scenario=\"<scenario>\"`" + ` — optionally publish the latest
    revision to your cloud account.
@@ -122,83 +124,73 @@ const docLocalGeneration = `# Local dataset generation
 Use ` + "`generate_dataset_local`" + ` when:
 - You want deterministic, hand-crafted test data with precise values.
 - You are offline or prefer not to use cloud APIs.
-- You need any row count — the embedded Go interpreter runs entirely on your machine.
+- You need any row count — generation runs entirely against your local DB.
+
+## How it works
+
+1. Seedmancer **seeds the inherit base** into the configured local env (CSV → COPY,
+   same path as ` + "`seed_database`" + `). This puts the DB into a known starting state.
+2. Your **SQL block is executed** against that state inside a single transaction.
+   On failure the DB is rolled back to the inherit baseline so you can retry.
+3. The resulting tables are **exported back to CSV** as a brand-new ` + "`rNNN`" + ` revision.
+4. The raw SQL is saved as ` + "`dataset.sql`" + ` next to the CSVs so ` + "`get_dataset_sql`" + `
+   can retrieve it later for incremental edits.
+
+**Note:** this overwrites data in the configured local env (the SQL runs against
+it). Fine for dev/test DBs; never use against a DB whose state you care about.
 
 ## Performance note for large datasets
 
 ` + "`generate_dataset_local`" + ` works for any row count. For very large tables
-(hundreds of thousands of rows) the Go generator runs in memory and writes CSV
-files, which is efficient for insertion-later workflows but not streaming.
-If the user asks for 1M+ rows and speed is the priority, mention that the seed
-step will take time proportional to index rebuilding on the target DB.
+prefer set-based SQL (` + "`INSERT INTO ... SELECT FROM generate_series(...)`" + `)
+so Postgres does the heavy lifting natively.
 
 ## Guidance on what Seedmancer should NOT be
 
 - **Production-shape anonymisation pipelines.** Use a dedicated masking tool.
-- **One-off "I just need to insert this row" hacks.** Use plain SQL or your
-  ORM seeders.
+- **One-off "I just need to insert this row" hacks against a live DB.** Use plain SQL
+  or your ORM seeders.
 
 ## Recommended workflow: ` + "`inherit`" + ` from a base scenario
 
-The ` + "`inherit`" + ` parameter is the safe default for any partial generation.
-It pre-fills the new revision with all CSVs from the base scenario's latest
-revision, lets your script overwrite only the tables it cares about, and
-**automatically clears any descendant table that FKs to an overwritten table**
-so seeding can never produce orphan foreign keys.
+` + "`inherit`" + ` is REQUIRED. It names the base scenario whose latest revision is
+seeded into the local env before your SQL runs. Your SQL only has to express
+the delta — anything you don't touch stays as the inherit base had it.
 
 1. ` + "`list_datasets`" + ` — confirm a base scenario exists. If not,
    ` + "`export_database scenario=\"basic\"`" + ` to capture the live DB.
 2. ` + "`describe_schema`" + ` — get exact table and column names.
-3. ` + "`generate_dataset_local scenario=\"<new>\" inherit=\"basic\"`" + ` — write a
-   tiny script that only emits the table(s) you actually want to change.
+3. ` + "`generate_dataset_local scenario=\"<new>\" inherit=\"basic\" sql=\"...\"`" + ` —
+   write SQL that mutates only the rows you actually want to change.
 4. ` + "`seed_database scenario=\"<new>\" yes=true`" + `.
 
-**A single inherit call produces a complete, seedable revision** — no manual
-merge step.
+## SQL contract
 
-## Go script contract
-
-- ` + "`package main`" + `, stdlib only (` + "`encoding/csv`" + `, ` + "`fmt`" + `, ` + "`os`" + `, ` + "`math/rand`" + `, ` + "`time`" + `, …).
-- No ` + "`go.mod`" + ` needed — the script is interpreted by the embedded Go engine inside the Seedmancer binary. **No Go toolchain needs to be installed.**
-- Output directory is ` + "`os.Args[1]`" + `. Write each CSV there as ` + "`<tableName>.csv`" + `.
-- **First row must be the column header**, with names matching the schema exactly (case-sensitive).
-- Subsequent rows are data. Use ` + "`encoding/csv`" + ` — it handles quoting automatically.
-- When using ` + "`inherit`" + `, you only need to write the table(s) you're changing. Parent
-  tables come from the base; descendant tables are auto-cleared. When **not** using
-  ` + "`inherit`" + `, generate parent tables first and reuse their IDs in child rows.
+- DML only: ` + "`INSERT`" + ` / ` + "`UPDATE`" + ` / ` + "`DELETE`" + ` (plus ` + "`SELECT`" + ` if you want to
+  build values dynamically). **No DDL** — the schema is owned by the inherit base.
+- The whole block runs inside one transaction. Use semicolons to separate statements.
+- Reference tables by their unqualified names; the configured local env's search_path
+  is used as-is.
+- Foreign keys are enforced. Delete child rows before deleting parents (or order
+  ` + "`INSERT`" + ` so parent ids exist before child rows reference them).
 
 ## Minimal example (with inherit)
 
-The script below replaces only ` + "`products.csv`" + `. ` + "`brands`" + ` and ` + "`categories`" + ` come
-from the inherited baseline; ` + "`product_images`" + `, ` + "`inventory`" + `, ` + "`order_items`" + `
-(any table that FKs to ` + "`products`" + `) are reduced to header-only automatically.
+The SQL below replaces the ` + "`products`" + ` table while leaving the inherited
+` + "`brands`" + ` and ` + "`categories`" + ` rows untouched.
 
-` + "```go" + `
-package main
+` + "```sql" + `
+-- inherit: basic (already seeded into the local env)
+-- We're rewriting products, so clear out the rows that FK to it first.
+DELETE FROM order_items WHERE product_id IN (SELECT id FROM products);
+DELETE FROM product_images WHERE product_id IN (SELECT id FROM products);
+DELETE FROM inventory WHERE product_id IN (SELECT id FROM products);
+DELETE FROM products;
 
-import (
-	"encoding/csv"
-	"fmt"
-	"os"
-	"strconv"
-)
-
-func main() {
-	out := os.Args[1]
-
-	pf, _ := os.Create(out + "/products.csv")
-	pw := csv.NewWriter(pf)
-	pw.Write([]string{"id", "brand_id", "name", "price"})
-	for i := 1; i <= 10; i++ {
-		pw.Write([]string{
-			strconv.Itoa(i),
-			"1", // any brand id present in the inherited brands.csv
-			fmt.Sprintf("Product %d", i),
-			fmt.Sprintf("%.2f", float64(i)*9.99),
-		})
-	}
-	pw.Flush(); pf.Close()
-}
+INSERT INTO products (id, brand_id, name, price) VALUES
+  (1, 1, 'Product 1', 9.99),
+  (2, 1, 'Product 2', 19.98),
+  (3, 1, 'Product 3', 29.97);
 ` + "```" + `
 
 Call:
@@ -207,34 +199,35 @@ Call:
 generate_dataset_local
   scenario: products/v2
   inherit: basic
-  script: <the Go source above>
+  sql: <the SQL above>
 ` + "```" + `
 
-The result has full ` + "`brands`" + `/` + "`categories`" + ` from the basic scenario, the new
-` + "`products`" + `, and header-only ` + "`product_images`" + `/` + "`inventory`" + `/` + "`order_items`" + ` so
-the seed never produces orphan FKs.
+The exported revision contains every table the DB currently has — ` + "`brands`" + `
+and ` + "`categories`" + ` inherited from basic, the new ` + "`products`" + `, and the now-empty
+` + "`product_images`" + `/` + "`inventory`" + `/` + "`order_items`" + ` you cleared.
 
 ## Common pitfalls
 
-- **Wrong column names**: copy names verbatim from ` + "`describe_schema`" + ` — a mismatch silently inserts NULL or causes restore errors.
-- **Missing header row**: the first ` + "`Write`" + ` call must be the header, not a data row.
-- **No ` + "`csv.Writer.Flush()`" + ` call**: buffered rows won't reach the file without ` + "`Flush()`" + `.
-- **External imports**: the script runs without a module — only stdlib is available. Third-party packages are not supported.
-- **Forgetting ` + "`inherit`" + `**: a partial generation without ` + "`inherit`" + ` produces a thin
-  revision that, when seeded, wipes every table the script didn't write. Always pass
-  ` + "`inherit: \"<base-scenario>\"`" + ` for partial updates.
+- **Wrong column names**: copy names verbatim from ` + "`describe_schema`" + `.
+- **Missing FK cleanup**: deleting parent rows fails (or orphans child rows) when
+  child tables still reference them. Delete children first, or use ` + "`ON DELETE CASCADE`" + `.
+- **Forgetting ` + "`inherit`" + `**: the tool refuses to run without it. Always pass
+  ` + "`inherit: \"<base-scenario>\"`" + `.
+- **DDL** (` + "`CREATE TABLE`" + `, ` + "`ALTER TABLE`" + `): not allowed. If the schema needs to
+  change, update the live DB and run ` + "`export_database`" + ` to capture a new baseline.
 
 ## Incremental edits to existing generated data
 
-Every time ` + "`generate_dataset_local`" + ` succeeds, the source script is stored privately
-under the resulting ` + "`scenario@rNNN`" + `. Before writing a script from scratch:
+Every time ` + "`generate_dataset_local`" + ` succeeds, the SQL is stored as ` + "`dataset.sql`" + `
+inside the revision. Before writing a SQL block from scratch:
 
-1. ` + "`list_history scenario=<scenario>`" + ` — see existing revisions.
-2. ` + "`describe_dataset datasetId=<scenario@rNNN>`" + ` — if ` + "`hasGeneratorScript: true`" + `,
-   a saved script exists.
-3. ` + "`get_dataset_script`" + ` — returns the full source as ` + "`script`" + `.
-4. Modify the source.
-5. ` + "`generate_dataset_local script=<modified> scenario=<scenario> inherit=<base>`" + ` —
+1. ` + "`list_history scenario=<scenario>`" + ` — see existing revisions; rows with
+   ` + "`hasSql: true`" + ` were produced by ` + "`generate_dataset_local`" + ` and have a
+   retrievable ` + "`dataset.sql`" + `.
+2. ` + "`get_dataset_sql scenario=<scenario>`" + ` — returns the SQL block (defaults to
+   the latest revision; pass ` + "`revision: \"rNNN\"`" + ` for a specific one).
+3. Modify the SQL.
+4. ` + "`generate_dataset_local scenario=<scenario> inherit=<base> sql=<modified>`" + ` —
    creates a new ` + "`rNNN`" + ` revision.
-6. ` + "`seed_database scenario=<scenario> yes=true`" + `.
+5. ` + "`seed_database scenario=<scenario> yes=true`" + `.
 `
