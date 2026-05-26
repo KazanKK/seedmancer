@@ -1,6 +1,6 @@
 # Seedmancer CLI
 
-Reset your PostgreSQL or MySQL database to a saved state in seconds — export snapshots, restore them on demand, push to the cloud, pull from teammates, and generate test data with AI.
+Reset your PostgreSQL or MySQL database to a saved state in seconds — export snapshots, restore them on demand, push to the cloud, pull from teammates, and generate test data locally with Go scripts.
 
 → **Full documentation: [seedmancer.dev/docs](https://seedmancer.dev/docs)**
 
@@ -42,7 +42,7 @@ go install github.com/KazanKK/seedmancer@latest
 # 1. Initialize — creates seedmancer.yaml in the current directory
 seedmancer init
 
-# 2. Sign in (optional — needed for cloud push/pull and AI generation)
+# 2. Sign in (optional — needed for cloud push/pull)
 seedmancer login
 
 # 3. Save a snapshot

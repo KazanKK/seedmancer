@@ -59,8 +59,7 @@ the diff and ` + "`export_database`" + ` again to create a new compatible revisi
    of writing a new script from scratch.
 3. ` + "`generate_dataset_local`" + ` with the modified script — creates a fresh
    revision under the same scenario.
-4. OR ` + "`generate_dataset`" + ` with a prompt — uses the Seedmancer cloud service.
-5. ` + "`push_dataset scenario=\"<scenario>\"`" + ` — optionally publish the latest
+4. ` + "`push_dataset scenario=\"<scenario>\"`" + ` — optionally publish the latest
    revision to your cloud account.
 
 ## Safety rails already enforced
@@ -116,17 +115,14 @@ On success the tool returns ` + "`anyError: false`" + `; only then should the
 agent kick off the test command.
 `
 
-const docLocalGeneration = `# Local dataset generation (no cloud)
+const docLocalGeneration = `# Local dataset generation
 
-## When to use this instead of ` + "`generate_dataset`" + `
+## When to use local generation
 
 Use ` + "`generate_dataset_local`" + ` when:
-- You have no Seedmancer account or have exhausted your monthly quota.
-- You are offline or the cloud service is unreachable.
 - You want deterministic, hand-crafted test data with precise values.
-
-Use ` + "`generate_dataset`" + ` when you want the cloud service to fabricate a large,
-realistic dataset from a short natural-language description.
+- You are offline or prefer not to use cloud APIs.
+- You need any row count — the embedded Go interpreter runs entirely on your machine.
 
 ## Performance note for large datasets
 

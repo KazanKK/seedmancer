@@ -19,7 +19,7 @@ supports MCP, **use the tools instead of shelling out**:
 - `seed_database` instead of `seedmancer seed --id X --yes`
 - `list_datasets` / `describe_dataset` / `describe_schema` instead of
   parsing the CLI's human-readable output
-- `export_database`, `generate_dataset`, `push_dataset`, `pull_dataset`
+- `export_database`, `generate_dataset_local`, `push_dataset`, `pull_dataset`
   for the snapshot/generate/push/pull flow
 
 Call `login_info` first when you're unsure whether the host has an API

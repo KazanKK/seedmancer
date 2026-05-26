@@ -11,12 +11,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	utils "github.com/KazanKK/seedmancer/internal/utils"
 )
 
-// These helpers mirror the HTTP flows used by the CLI push/pull/generate
+// These helpers mirror the HTTP flows used by the CLI push/pull actions,
 // actions, but without any spinners, stdout logging, or interactive
 // prompts. They exist to back the Run* functions that the MCP server
 // calls. Keeping them here instead of inline in runners.go keeps that
@@ -225,86 +224,4 @@ func fetchDatasetDownload(ctx context.Context, baseURL, token, projectRoot, stor
 		Files:       extracted,
 		LiftedCount: lifted,
 	}, nil
-}
-
-// fetchGenerateJobStatus is a thin, context-aware wrapper around the
-// /generation-status endpoint used by the CLI's pollJobUntilDone.
-func fetchGenerateJobStatus(ctx context.Context, baseURL, token, jobID string) (*generateStatusResponse, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", baseURL+"/generation-status?id="+jobID, nil)
-	if err != nil {
-		return nil, fmt.Errorf("creating request: %v", err)
-	}
-	req.Header.Set("Authorization", utils.BearerAPIToken(token))
-
-	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("calling API: %v", err)
-	}
-	defer resp.Body.Close()
-
-	respBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("reading response: %v", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("status API error (HTTP %d): %s", resp.StatusCode, string(respBytes))
-	}
-
-	var status generateStatusResponse
-	if err := json.Unmarshal(respBytes, &status); err != nil {
-		return nil, fmt.Errorf("parsing status response: %v", err)
-	}
-	return &status, nil
-}
-
-// downloadGenerateArtifacts downloads every completed job file into
-// datasetDir and returns the list of written paths.
-func downloadGenerateArtifacts(ctx context.Context, files []generateFileEntry, datasetDir string) ([]string, error) {
-	if err := os.MkdirAll(datasetDir, 0755); err != nil {
-		return nil, fmt.Errorf("creating dataset dir: %v", err)
-	}
-
-	client := &http.Client{Timeout: 5 * time.Minute}
-	written := make([]string, 0, len(files))
-	for _, f := range files {
-		if f.FileURL == "" {
-			continue
-		}
-		name := filepath.Base(f.Path)
-		if name == "" || name == "." || name == "/" {
-			name = f.Table + ".csv"
-		}
-		destPath := filepath.Join(datasetDir, name)
-
-		req, err := http.NewRequestWithContext(ctx, "GET", f.FileURL, nil)
-		if err != nil {
-			return written, fmt.Errorf("creating download request: %v", err)
-		}
-		resp, err := client.Do(req)
-		if err != nil {
-			return written, fmt.Errorf("downloading %s: %v", name, err)
-		}
-		if resp.StatusCode != http.StatusOK {
-			resp.Body.Close()
-			return written, fmt.Errorf("download %s failed (HTTP %d)", name, resp.StatusCode)
-		}
-
-		out, err := os.Create(destPath)
-		if err != nil {
-			resp.Body.Close()
-			return written, fmt.Errorf("creating %s: %v", destPath, err)
-		}
-		if _, err := io.Copy(out, resp.Body); err != nil {
-			out.Close()
-			resp.Body.Close()
-			return written, fmt.Errorf("writing %s: %v", destPath, err)
-		}
-		out.Close()
-		resp.Body.Close()
-
-		written = append(written, destPath)
-	}
-	return written, nil
 }

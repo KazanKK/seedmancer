@@ -64,7 +64,7 @@ func TestToolsListIncludesCoreSurface(t *testing.T) {
 	want := []string{
 		"list_datasets", "describe_dataset", "list_schemas", "describe_schema",
 		"get_status", "list_envs", "add_env", "remove_env", "use_env",
-		"init_project", "seed_database", "export_database", "generate_dataset",
+		"init_project", "seed_database", "export_database", "generate_dataset_local",
 		"push_dataset", "pull_dataset", "login_info", "logout",
 	}
 	for _, n := range want {

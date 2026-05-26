@@ -1,12 +1,9 @@
 package cmd
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -335,6 +332,32 @@ func RunListSchemas(_ context.Context, in ListSchemasInput) (ListSchemasOutput, 
 }
 
 // ─── describe_schema ──────────────────────────────────────────────────────────
+
+type generateEnum struct {
+	Name   string   `json:"name"`
+	Values []string `json:"values"`
+}
+
+type generateTable struct {
+	Name    string           `json:"name"`
+	Columns []generateColumn `json:"columns"`
+}
+
+type generateColumn struct {
+	Name       string              `json:"name"`
+	Type       string              `json:"type"`
+	Nullable   bool                `json:"nullable"`
+	IsPrimary  bool                `json:"isPrimary"`
+	IsUnique   bool                `json:"isUnique"`
+	Default    string              `json:"default,omitempty"`
+	ForeignKey *generateForeignKey `json:"foreignKey,omitempty"`
+	Enum       string              `json:"enum,omitempty"`
+}
+
+type generateForeignKey struct {
+	Table  string `json:"table"`
+	Column string `json:"column"`
+}
 
 type DescribeSchemaInput struct {
 	Ref string `json:"ref" jsonschema:"Fingerprint prefix (≥4 chars) or full SHA-256 fingerprint"`
@@ -745,8 +768,7 @@ that revision regardless of newer exports.
 1. ` + "`init_project`" + ` — creates seedmancer.yaml and .seedmancer/.
 2. Then follow the standard workflow above from step 1.
 
-Prefer ` + "`generate_dataset_local`" + ` (no cloud, no quota).
-Only use ` + "`generate_dataset`" + ` when the user explicitly asks for AI-generated data.
+Prefer ` + "`generate_dataset_local`" + ` (local, no quota).
 Read ` + "`seedmancer://docs/local-generation`" + ` for the Go script interface and examples.
 
 ## CLI fallback (when MCP tools are unavailable):
@@ -806,7 +828,7 @@ When asked to create, generate, or seed test/fixture data:
   seedable revision in one call; descendant tables that FK to overwritten tables
   are auto-cleared.
 - For a new project without seedmancer.yaml: ` + "`init_project`" + ` first.
-- Prefer ` + "`generate_dataset_local`" + ` (local, no quota) over ` + "`generate_dataset`" + ` (cloud).
+- Prefer ` + "`generate_dataset_local`" + ` (local, no quota).
 - **Always use Seedmancer for test data — even 1M+ rows.** ` + "`generate_dataset_local`" + `
   works at any row count. Never fall back to a SQL script just because the dataset
   is large.
@@ -1248,203 +1270,6 @@ func pickExportTarget(cfg utils.Config, envName, dbURL string) (utils.NamedEnv, 
 		}
 	}
 	return cfg.ResolveEnv(envName)
-}
-
-// ─── generate (cloud AI) ──────────────────────────────────────────────────────
-
-// GenerateInput covers the non-interactive subset of `seedmancer generate`.
-// The schema fingerprint is read from the scenario's existing latest
-// revision (or, when the scenario doesn't exist yet, from the inherit
-// base). MCP clients always pass a scenario path so the result is a
-// proper revision rather than a free-form dataset folder.
-type GenerateInput struct {
-	Prompt      string `json:"prompt" jsonschema:"Natural-language description of the data to generate"`
-	Scenario    string `json:"scenario" jsonschema:"Scenario path for the new revision (e.g. billing/pro)"`
-	Inherit     string `json:"inherit,omitempty" jsonschema:"Scenario whose latest revision provides the schema fingerprint"`
-	Description string `json:"description,omitempty" jsonschema:"Description stored on the new revision manifest"`
-	Token       string `json:"token,omitempty" jsonschema:"API token override"`
-	PollTimeout int    `json:"pollTimeoutSeconds,omitempty" jsonschema:"Max seconds to wait for the job (default 300)"`
-}
-
-// GenerateOutput summarises the freshly created revision. Path points at
-// the data folder so callers can hand it straight to seed.
-type GenerateOutput struct {
-	Scenario string `json:"scenario"`
-	Revision string `json:"revision"`
-	Schema   string `json:"schema"`
-	Path     string `json:"path"`
-	JobID    string `json:"jobId,omitempty"`
-}
-
-// RunGenerate kicks off a backend AI generation job for a scenario and
-// materialises the resulting CSVs as a new revision.
-func RunGenerate(ctx context.Context, in GenerateInput) (GenerateOutput, error) {
-	configPath, err := utils.FindConfigFile()
-	if err != nil {
-		return GenerateOutput{}, err
-	}
-	projectRoot := filepath.Dir(configPath)
-	cfg, err := utils.LoadConfig(configPath)
-	if err != nil {
-		return GenerateOutput{}, err
-	}
-	if strings.TrimSpace(in.Prompt) == "" {
-		return GenerateOutput{}, fmt.Errorf("prompt cannot be empty")
-	}
-	scenarioPath, err := scenario.Normalize(in.Scenario)
-	if err != nil {
-		return GenerateOutput{}, err
-	}
-
-	token, err := utils.ResolveAPIToken(in.Token)
-	if err != nil {
-		return GenerateOutput{}, err
-	}
-
-	// Pick the schema: inherit base wins, else the scenario's existing
-	// latest revision. We need a fingerprint to send the right schema.json.
-	var schemaFingerprint string
-	if strings.TrimSpace(in.Inherit) != "" {
-		basePath, err := scenario.Normalize(in.Inherit)
-		if err != nil {
-			return GenerateOutput{}, fmt.Errorf("invalid inherit scenario: %w", err)
-		}
-		baseRev, err := resolveScenarioRevision(projectRoot, cfg.StoragePath, basePath, "", false)
-		if err != nil {
-			return GenerateOutput{}, fmt.Errorf("resolving inherit base %q: %w", basePath, err)
-		}
-		schemaFingerprint = baseRev.Manifest.SchemaFingerprint
-	}
-	if schemaFingerprint == "" {
-		if existing, err := resolveScenarioRevision(projectRoot, cfg.StoragePath, scenarioPath, "", false); err == nil {
-			schemaFingerprint = existing.Manifest.SchemaFingerprint
-		}
-	}
-	if schemaFingerprint == "" {
-		return GenerateOutput{}, fmt.Errorf(
-			"no schema available for scenario %q — pass --inherit <base-scenario> or run `seedmancer export %s` first",
-			scenarioPath, scenarioPath,
-		)
-	}
-	fpShort := utils.FingerprintShort(schemaFingerprint)
-	schemaJSONPath := scenario.SchemaJSONPath(projectRoot, cfg.StoragePath, fpShort)
-	raw, err := os.ReadFile(schemaJSONPath)
-	if err != nil {
-		return GenerateOutput{}, fmt.Errorf("reading %s: %v", schemaJSONPath, err)
-	}
-	var sch generateSchema
-	if err := json.Unmarshal(raw, &sch); err != nil {
-		return GenerateOutput{}, fmt.Errorf("parsing schema.json: %v", err)
-	}
-
-	scenarioDir := scenario.ScenarioDir(projectRoot, cfg.StoragePath, scenarioPath)
-	if err := os.MkdirAll(scenarioDir, 0755); err != nil {
-		return GenerateOutput{}, fmt.Errorf("creating scenario dir: %v", err)
-	}
-	revID, err := scenario.NextRevisionID(scenarioDir)
-	if err != nil {
-		return GenerateOutput{}, err
-	}
-	revDir := scenario.RevisionDir(projectRoot, cfg.StoragePath, scenarioPath, revID)
-	dataDir := filepath.Join(revDir, "data")
-	if err := os.MkdirAll(dataDir, 0755); err != nil {
-		return GenerateOutput{}, fmt.Errorf("creating revision data dir: %v", err)
-	}
-
-	jobReq := generateJobRequest{Schema: sch, DatasetName: scenarioPath, Prompt: in.Prompt}
-	body, err := json.Marshal(jobReq)
-	if err != nil {
-		return GenerateOutput{}, err
-	}
-	baseURL := utils.GetBaseURL()
-	req, err := http.NewRequestWithContext(ctx, "POST", baseURL+"/v1.0/generate", bytes.NewReader(body))
-	if err != nil {
-		return GenerateOutput{}, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", utils.BearerAPIToken(token))
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return GenerateOutput{}, err
-	}
-	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode == http.StatusUnauthorized {
-		return GenerateOutput{}, utils.ErrInvalidAPIToken
-	}
-	if resp.StatusCode >= 400 {
-		return GenerateOutput{}, fmt.Errorf("generate failed (HTTP %d): %s", resp.StatusCode, string(respBody))
-	}
-	var jobResp generateJobResponse
-	if err := json.Unmarshal(respBody, &jobResp); err != nil {
-		return GenerateOutput{}, fmt.Errorf("parsing job response: %v", err)
-	}
-
-	timeout := in.PollTimeout
-	if timeout <= 0 {
-		timeout = 300
-	}
-	deadline := time.Now().Add(time.Duration(timeout) * time.Second)
-	for time.Now().Before(deadline) {
-		status, err := fetchGenerateJobStatus(ctx, baseURL, token, jobResp.JobID)
-		if err != nil {
-			return GenerateOutput{}, err
-		}
-		switch status.Status {
-		case "completed", "done", "success":
-			if _, err := downloadGenerateArtifacts(ctx, status.Files, dataDir); err != nil {
-				return GenerateOutput{}, err
-			}
-			tables, rowCounts, _ := listCSVTablesAndRowCounts(dataDir)
-			now := time.Now().UTC()
-			revManifest := scenario.RevisionManifest{
-				Scenario:          scenarioPath,
-				Revision:          revID,
-				SchemaFingerprint: schemaFingerprint,
-				CreatedAt:         now,
-				Source:            "generate",
-				Tables:            tables,
-				Services:          []string{"postgres"},
-				RowCounts:         rowCounts,
-				Description:       strings.TrimSpace(in.Description),
-			}
-			if err := scenario.WriteRevisionManifest(revDir, revManifest); err != nil {
-				return GenerateOutput{}, err
-			}
-			scenarioManifest, err := scenario.ReadManifest(scenarioDir)
-			if err != nil && !os.IsNotExist(err) {
-				return GenerateOutput{}, err
-			}
-			if scenarioManifest.Scenario == "" {
-				scenarioManifest = scenario.Manifest{Scenario: scenarioPath, CreatedAt: now}
-			}
-			scenarioManifest.UpdatedAt = now
-			scenarioManifest.LatestRevision = revID
-			_ = scenario.WriteManifest(scenarioDir, scenarioManifest)
-			pointers, _ := scenario.ReadPointers(scenarioDir)
-			pointers.Latest = revID
-			_ = scenario.WritePointers(scenarioDir, pointers)
-			return GenerateOutput{
-				Scenario: scenarioPath,
-				Revision: revID,
-				Schema:   fpShort,
-				Path:     dataDir,
-				JobID:    jobResp.JobID,
-			}, nil
-		case "failed", "error":
-			msg := "unknown error"
-			if status.ErrorMessage != nil {
-				msg = *status.ErrorMessage
-			}
-			return GenerateOutput{}, fmt.Errorf("generate job failed: %s", msg)
-		}
-		select {
-		case <-ctx.Done():
-			return GenerateOutput{}, ctx.Err()
-		case <-time.After(3 * time.Second):
-		}
-	}
-	return GenerateOutput{}, fmt.Errorf("generate job did not finish within %ds", timeout)
 }
 
 // ─── generate local ───────────────────────────────────────────────────────────

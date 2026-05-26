@@ -143,7 +143,6 @@ Workflow when the user wants test data:
 Typical workflows:
   • Before running tests: call seed_database with the configured dataset id.
   • Snapshot current state: export_database → optionally push_dataset.
-  • Try new data (cloud):  generate_dataset with a prompt (requires API token + quota).
   • Try new data (local):  read seedmancer://docs/local-generation, write a Go script,
                            then call generate_dataset_local — no API, no quota needed.
                            CLI fallback: seedmancer generate-local --script-file /tmp/gen.go --schema-id <fp>

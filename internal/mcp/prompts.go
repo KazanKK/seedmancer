@@ -68,39 +68,35 @@ Success criteria:
 	s.AddPrompt(&mcp.Prompt{
 		Name:        "generate_test_data",
 		Title:       "Generate test data",
-		Description: "Generate a plan for creating a new revision under a scenario using a natural-language prompt.",
+		Description: "Generate a plan for creating a new revision under a scenario using a local Go script.",
 		Arguments: []*mcp.PromptArgument{
-			{Name: "prompt", Description: "Natural-language description of the data", Required: true},
 			{Name: "scenario", Description: "Scenario path for the new revision (e.g. 'billing/pro')", Required: true},
-			{Name: "inherit", Description: "Base scenario whose latest revision provides the schema (defaults to the scenario's existing latest)"},
+			{Name: "inherit", Description: "Base scenario whose latest revision pre-fills the new revision", Required: true},
 		},
 	}, func(ctx context.Context, req *mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
 		args := req.Params.Arguments
-		if args["prompt"] == "" {
-			return nil, fmt.Errorf("prompt argument is required")
-		}
 		if args["scenario"] == "" {
 			return nil, fmt.Errorf("scenario argument is required")
 		}
-		inheritLine := ""
-		if v := args["inherit"]; v != "" {
-			inheritLine = fmt.Sprintf(", inherit=%q", v)
+		if args["inherit"] == "" {
+			return nil, fmt.Errorf("inherit argument is required")
 		}
 
-		text := fmt.Sprintf(`Goal: synthesize a new revision under scenario %q.
+		text := fmt.Sprintf(`Goal: synthesize a new revision under scenario %q locally.
 
 Steps:
-1. Call 'describe_schema' on the scenario's existing schema (use list_history first if you need the fingerprint).
-2. Call 'generate_dataset' with prompt=%q, scenario=%q%s.
-3. After it returns, call 'describe_dataset' on the resulting dataset id to preview the generated rows.
-4. Optionally call 'pin_scenario' to mark the revision as stable, or 'push_dataset' to publish.
+1. Read seedmancer://docs/local-generation for the Go script contract.
+2. Call 'describe_schema' to get exact table and column names.
+3. Call 'generate_dataset_local' with a Go script, scenario=%q, inherit=%q.
+4. Call 'seed_database' with the scenario path to load the revision.
+5. Optionally call 'pin_scenario' to mark the revision as stable, or 'push_dataset' to publish.
 
 Success criteria:
-- 'generate_dataset' returns with a non-empty Path and a new revision id.
-- The dataset preview contains rows for every table you care about.`, args["scenario"], args["prompt"], args["scenario"], inheritLine)
+- 'generate_dataset_local' returns with a non-empty Path and a new revision id.
+- The revision contains CSVs for every table you care about.`, args["scenario"], args["scenario"], args["inherit"])
 
 		return &mcp.GetPromptResult{
-			Description: "Generate-test-data playbook",
+			Description: "Generate-test-data playbook (local)",
 			Messages: []*mcp.PromptMessage{
 				{Role: "user", Content: &mcp.TextContent{Text: text}},
 			},

@@ -189,19 +189,6 @@ func registerTools(s *mcp.Server) {
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
-		Name:  "generate_dataset",
-		Title: "Generate scenario revision via cloud AI",
-		Description: "Ask the Seedmancer cloud to synthesize a new revision under the given scenario, " +
-			"using a natural-language prompt. The schema is pinned to the scenario's existing latest " +
-			"revision, or to the `inherit` scenario when given; one of those must exist so the cloud " +
-			"knows which schema.json to consume.",
-		Annotations: &mcp.ToolAnnotations{DestructiveHint: falsePtr(), IdempotentHint: false},
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, in cmd.GenerateInput) (*mcp.CallToolResult, cmd.GenerateOutput, error) {
-		out, err := cmd.RunGenerate(ctx, in)
-		return nil, out, err
-	})
-
-	mcp.AddTool(s, &mcp.Tool{
 		Name:  "generate_dataset_local",
 		Title: "Generate scenario revision locally",
 		Description: "Run an agent-written Go script locally to synthesise a new revision under the " +
