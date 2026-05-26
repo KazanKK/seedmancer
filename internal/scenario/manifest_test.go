@@ -41,7 +41,7 @@ func TestRevisionManifestRoundTrip(t *testing.T) {
 		CreatedAt:         time.Date(2026, 4, 29, 0, 0, 0, 0, time.UTC),
 		Source:            "export",
 		Tables:            []string{"User", "Plan"},
-		Services:          []string{"postgres", "stripe"},
+		Services:          []string{"postgres"},
 		RowCounts:         map[string]int{"User": 20, "Plan": 3},
 		Description:       "billing pro test",
 	}

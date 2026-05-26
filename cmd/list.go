@@ -36,7 +36,7 @@ func ListCommand() *cli.Command {
 		Usage: "List scenarios and their pointers",
 		Description: "Walks <storagePath>/scenarios/** and prints a table with one row\n" +
 			"per scenario: latest revision, stable revision, schema fingerprint,\n" +
-			"updated time, and the service connectors snapshotted with the\n" +
+			"updated time, and the services snapshotted with the\n" +
 			"latest revision.",
 		ArgsUsage: " ",
 		Flags: []cli.Flag{

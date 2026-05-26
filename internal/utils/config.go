@@ -29,12 +29,6 @@ import (
 // installs don't get signed out. New writes go to ~/.seedmancer/credentials
 // (see credentials.go); `seedmancer login` no longer touches config files.
 //
-// Services is an optional map of named 3rd-party service connectors. Each
-// entry snapshots/restores an external service (Supabase Auth users, etc.)
-// alongside the Postgres DB so a single `seedmancer seed` resets the entire
-// test environment. Credentials are always read from environment variables
-// named in each ServiceConfig so seedmancer.yaml can be committed safely.
-//
 // Unknown keys are ignored by yaml.Unmarshal (the default). That's on
 // purpose so future keys (e.g. value_map, before_seed) can be hand-edited
 // before older CLI versions understand them without causing errors.
@@ -42,11 +36,6 @@ type Config struct {
 	StoragePath  string               `yaml:"storage_path"`
 	DefaultEnv   string               `yaml:"default_env,omitempty"`
 	Environments map[string]EnvConfig `yaml:"environments,omitempty"`
-
-	// Services holds optional 3rd-party service connector configs, keyed by
-	// a user-chosen name (e.g. "auth"). Export and seed iterate
-	// over these in sorted order after the Postgres phase.
-	Services map[string]ServiceConfig `yaml:"services,omitempty"`
 
 	// Legacy single-target fields — kept for read-compat.
 	DatabaseURL string `yaml:"database_url,omitempty"`
@@ -57,74 +46,6 @@ type Config struct {
 // EnvConfig is one named target inside `environments:`.
 type EnvConfig struct {
 	DatabaseURL string `yaml:"database_url"`
-
-	// Services holds optional 3rd-party service connector configs scoped to
-	// this environment. When present, these take precedence over any top-level
-	// `services:` block so different envs can use different credentials or
-	// connector types.
-	Services map[string]ServiceConfig `yaml:"services,omitempty"`
-}
-
-// ServiceConfig holds the configuration for one 3rd-party service connector.
-// All sensitive values (API keys, tokens) are indirected through environment
-// variable names so the config file itself never contains secrets.
-//
-// Supported types:
-//   - "supabase-auth" — Supabase Auth users. Requires URLEnv + ServiceRoleKeyEnv.
-//   - "stripe" — Stripe test-mode objects. Requires APIKeyEnv.
-type ServiceConfig struct {
-	// Type identifies which connector implementation to use.
-	// Required. Must be "supabase-auth" or "stripe".
-	Type string `yaml:"type"`
-
-	// URLEnv is the name of the environment variable holding the Supabase
-	// project URL (e.g. "SUPABASE_URL"). Used by the "supabase-auth" type.
-	URLEnv string `yaml:"url_env,omitempty"`
-
-	// ServiceRoleKeyEnv is the name of the environment variable holding the
-	// Supabase service role key. Used by the "supabase-auth" type.
-	ServiceRoleKeyEnv string `yaml:"service_role_key_env,omitempty"`
-
-	// APIKeyEnv is the name of the environment variable holding the Stripe
-	// secret key. Used by the "stripe" type. Declarative reset state belongs
-	// in _stripe.json next to dataset CSVs, not in seedmancer.yaml.
-	APIKeyEnv string `yaml:"apiKeyEnv,omitempty"`
-}
-
-// SortedServiceNames returns the names of all top-level services in
-// alphabetical order. Prefer SortedServiceNamesForEnv when an env name is
-// available so per-environment services are respected.
-func (c Config) SortedServiceNames() []string {
-	names := make([]string, 0, len(c.Services))
-	for n := range c.Services {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	return names
-}
-
-// ServicesForEnv returns the service map to use for the named environment.
-// If the env has its own services block, that is returned. Otherwise the
-// top-level services block is returned as a fallback so old configs
-// (services at the root) continue to work without modification.
-func (c Config) ServicesForEnv(envName string) map[string]ServiceConfig {
-	if env, ok := c.EffectiveEnvs()[envName]; ok && len(env.Services) > 0 {
-		return env.Services
-	}
-	return c.Services
-}
-
-// SortedServiceNamesForEnv returns service names for the given env in
-// alphabetical order. Uses ServicesForEnv so env-scoped services take
-// precedence over top-level ones.
-func (c Config) SortedServiceNamesForEnv(envName string) []string {
-	svcs := c.ServicesForEnv(envName)
-	names := make([]string, 0, len(svcs))
-	for n := range svcs {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	return names
 }
 
 // NamedEnv pairs a resolved env with its name so callers can render banners

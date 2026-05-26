@@ -34,7 +34,7 @@ func registerTools(s *mcp.Server) {
 		Name:  "list_datasets",
 		Title: "List scenarios",
 		Description: "List every scenario known on disk along with its latest/stable pointers, " +
-			"schema fingerprint, and the service connectors snapshotted with the latest revision.",
+			"schema fingerprint, and the services snapshotted with the latest revision.",
 		Annotations: readOnly,
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in cmd.ListInput) (*mcp.CallToolResult, cmd.ListOutput, error) {
 		out, err := cmd.RunList(ctx, in)
@@ -268,59 +268,6 @@ func registerTools(s *mcp.Server) {
 		Annotations: readOnly,
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in cmd.CheckInput) (*mcp.CallToolResult, cmd.CheckOutput, error) {
 		out, err := cmd.RunCheck(ctx, in)
-		return nil, out, err
-	})
-
-	// ── 3rd-party service connectors ─────────────────────────────────
-	mcp.AddTool(s, &mcp.Tool{
-		Name:  "list_services",
-		Title: "List service connectors",
-		Description: "Return the 3rd-party service connectors configured in seedmancer.yaml " +
-			"(e.g. supabase-auth). Use this to check what services are available " +
-			"before calling export_service or seed_service.",
-		Annotations: readOnly,
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, cmd.ListServicesOutput, error) {
-		out, err := cmd.RunListServices(ctx, struct{}{})
-		return nil, out, err
-	})
-
-	mcp.AddTool(s, &mcp.Tool{
-		Name:  "export_service",
-		Title: "Export service connector snapshot",
-		Description: "Snapshot a single named 3rd-party service (e.g. 'auth') into the " +
-			"given dataset folder as a sidecar JSON file. Call this after export_database " +
-			"to include service state in the same dataset. " +
-			"Credentials are read from the environment variables named in seedmancer.yaml.",
-		Annotations: &mcp.ToolAnnotations{DestructiveHint: falsePtr(), IdempotentHint: false},
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, in cmd.ExportServiceInput) (*mcp.CallToolResult, cmd.ExportServiceOutput, error) {
-		out, err := cmd.RunExportService(ctx, in)
-		return nil, out, err
-	})
-
-	mcp.AddTool(s, &mcp.Tool{
-		Name:  "seed_service",
-		Title: "Seed service connector from snapshot",
-		Description: "Wipe and restore a single named 3rd-party service from its sidecar JSON " +
-			"in the given dataset folder. Useful for resetting just Supabase Auth users without " +
-			"touching the Postgres database. " +
-			"Credentials are read from the environment variables named in seedmancer.yaml.",
-		Annotations: &mcp.ToolAnnotations{DestructiveHint: truePtr(), IdempotentHint: true},
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, in cmd.SeedServiceInput) (*mcp.CallToolResult, cmd.SeedServiceOutput, error) {
-		out, err := cmd.RunSeedService(ctx, in)
-		return nil, out, err
-	})
-
-	mcp.AddTool(s, &mcp.Tool{
-		Name:  "infer_service_mapping",
-		Title: "Propose AI mapping for a service connector",
-		Description: "Run AI inference against a Stripe service connector's existing sidecar + " +
-			"the dataset's CSV column names, and return the proposed externalIdResolution + object " +
-			"specs as a diff against the current sidecar. Read-only — does NOT modify the sidecar. " +
-			"Use this to preview AI suggestions for human approval; persist them by re-running " +
-			"export_service (which applies the same merge automatically).",
-		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, DestructiveHint: falsePtr()},
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, in cmd.InferServiceMappingInput) (*mcp.CallToolResult, cmd.InferServiceMappingOutput, error) {
-		out, err := cmd.RunInferServiceMapping(ctx, in)
 		return nil, out, err
 	})
 

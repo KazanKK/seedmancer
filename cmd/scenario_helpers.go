@@ -176,16 +176,9 @@ func countCSVDataRows(path string) (int, error) {
 	return count, nil
 }
 
-// servicesForRevision returns the sorted list of service connector
-// names that should be considered for a given env. Always includes
-// "postgres" first so the seed/export manifests carry the same
-// canonical baseline regardless of plugins.
-func servicesForRevision(cfg utils.Config, envName string) []string {
-	out := []string{"postgres"}
-	for _, n := range cfg.SortedServiceNamesForEnv(envName) {
-		out = append(out, n)
-	}
-	return out
+// servicesForRevision returns the sorted list of services recorded on a revision manifest.
+func servicesForRevision(_ utils.Config, _ string) []string {
+	return []string{"postgres"}
 }
 
 // formatExportTime renders a manifest timestamp as the human-readable

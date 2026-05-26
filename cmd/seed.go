@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -12,7 +11,6 @@ import (
 
 	db "github.com/KazanKK/seedmancer/database"
 	"github.com/KazanKK/seedmancer/internal/scenario"
-	svc "github.com/KazanKK/seedmancer/internal/services"
 	"github.com/KazanKK/seedmancer/internal/ui"
 	utils "github.com/KazanKK/seedmancer/internal/utils"
 
@@ -83,14 +81,6 @@ func SeedCommand() *cli.Command {
 				Name:  "continue-on-error",
 				Usage: "Keep seeding remaining envs after a failure (default: stop)",
 			},
-			&cli.BoolFlag{
-				Name:  "no-services",
-				Usage: "Skip 3rd-party service connector seeds (Supabase Auth, etc.)",
-			},
-			&cli.StringFlag{
-				Name:  "token",
-				Usage: "API token for plan checks (falls back to ~/.seedmancer/credentials, then SEEDMANCER_API_TOKEN)",
-			},
 		},
 		Action: func(c *cli.Context) error {
 			scenarioArg := strings.TrimSpace(c.Args().First())
@@ -150,48 +140,6 @@ func SeedCommand() *cli.Command {
 					if !ui.Confirm(msg, false) {
 						ui.Info("Skipped.")
 						return nil
-					}
-				}
-			}
-
-			if !c.Bool("no-services") && len(cfg.ServicesForEnv(targets[0].Name)) > 0 {
-				baseURL := utils.GetBaseURL()
-				token, _ := utils.ResolveAPIToken(c.String("token"))
-				if entErr := utils.CheckServiceConnectorEntitlement(baseURL, token); entErr != nil {
-					if errors.Is(entErr, utils.ErrMissingAPIToken) || errors.Is(entErr, utils.ErrInvalidAPIToken) {
-						ui.Warn("Skipping service connectors: not logged in (run `seedmancer login` to enable Pro features)")
-					} else {
-						ui.Warn("Skipping service connectors: %v", entErr)
-					}
-				} else {
-					connectors, err := svc.BuildAll(cfg.ServicesForEnv(targets[0].Name))
-					if err != nil {
-						ui.Warn("service connectors unavailable: %v", err)
-					} else {
-						svcCtx := c.Context
-						svcCtx = svc.WithDataDir(svcCtx, merged)
-						for _, t := range targets {
-							if t.DatabaseURL != "" {
-								svcCtx = svc.WithDBURL(svcCtx, t.DatabaseURL)
-								break
-							}
-						}
-						for _, nc := range connectors {
-							sidecarPath := filepath.Join(rev.DataDir, nc.SidecarFilename())
-							data, err := os.ReadFile(sidecarPath)
-							if err != nil {
-								if !os.IsNotExist(err) {
-									ui.Warn("%s: read sidecar: %v", nc.Name, err)
-								}
-								continue
-							}
-							sp := ui.StartSpinner(fmt.Sprintf("Seeding %s...", nc.Name))
-							if err := nc.Connector.Seed(svcCtx, data); err != nil {
-								sp.Stop(false, fmt.Sprintf("%s seed failed: %v", nc.Name, err))
-							} else {
-								sp.Stop(true, fmt.Sprintf("%s seeded", nc.Name))
-							}
-						}
 					}
 				}
 			}

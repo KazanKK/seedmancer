@@ -24,7 +24,7 @@ func HistoryCommand() *cli.Command {
 		ArgsUsage: "<scenario>",
 		Description: "Shows every revision under a scenario along with its pointer\n" +
 			"status (latest / stable), schema fingerprint, when it was created,\n" +
-			"and the service connectors that were snapshotted with it.",
+			"and the services that were snapshotted with it.",
 		Flags: []cli.Flag{
 			&cli.BoolFlag{
 				Name:  "json",

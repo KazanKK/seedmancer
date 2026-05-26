@@ -57,21 +57,9 @@ func ExportCommand() *cli.Command {
 				Name:  "db-url",
 				Usage: "Source database URL (ad-hoc override; takes precedence over --env)",
 			},
-			&cli.BoolFlag{
-				Name:  "no-services",
-				Usage: "Skip 3rd-party service connector exports (Supabase Auth, etc.)",
-			},
-			&cli.BoolFlag{
-				Name:  "no-ai-infer",
-				Usage: "Skip backend AI inference for service connector mapping (Stripe externalIdResolution)",
-			},
 			&cli.StringFlag{
 				Name:  "description",
 				Usage: "Optional human-readable description stored in the revision manifest",
-			},
-			&cli.StringFlag{
-				Name:  "token",
-				Usage: "API token for plan checks (falls back to ~/.seedmancer/credentials, then SEEDMANCER_API_TOKEN)",
 			},
 		},
 		Action: func(c *cli.Context) error {
@@ -84,9 +72,6 @@ func ExportCommand() *cli.Command {
 				Scenario:    scenarioArg,
 				Env:         c.String("env"),
 				DBURL:       c.String("db-url"),
-				NoServices:  c.Bool("no-services"),
-				NoAIInfer:   c.Bool("no-ai-infer"),
-				Token:       c.String("token"),
 				Description: c.String("description"),
 			})
 			if err != nil {
@@ -103,9 +88,6 @@ func ExportCommand() *cli.Command {
 					parts = append(parts, fmt.Sprintf("%s(%d)", t, out.RowCounts[t]))
 				}
 				ui.KeyValue("Tables: ", strings.Join(parts, ", "))
-			}
-			if len(out.ServicesExported) > 0 {
-				ui.KeyValue("Services: ", strings.Join(out.ServicesExported, ", "))
 			}
 			ui.KeyValue("Latest now points to: ", out.Revision)
 			return nil
