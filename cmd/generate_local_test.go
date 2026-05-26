@@ -141,13 +141,19 @@ INSERT INTO public.seedmancer_gen_books (id, author_id, title) VALUES
 		t.Fatalf("RunExport: %v", err)
 	}
 
-	// 2) Apply DML on top of baseline. We:
-	//    - delete one book
-	//    - insert a third author + book
+	// 2) Apply a FULL, self-contained, idempotent SQL on top of the
+	//    baseline. The new contract requires every populated table to
+	//    start with a wipe (TRUNCATE or unconditional DELETE FROM)
+	//    before its INSERTs so the saved dataset.sql can be re-run on
+	//    its own and reproduce the same state. We end up with:
+	//      - 3 authors (Alice, Bob, Carol)
+	//      - 2 books   (10/First, 12/Third)
 	const sqlBlock = `
-DELETE FROM seedmancer_gen_books WHERE id = 11;
-INSERT INTO seedmancer_gen_authors (id, name) VALUES (3, 'Carol');
-INSERT INTO seedmancer_gen_books   (id, author_id, title) VALUES (12, 3, 'Third Book');
+TRUNCATE TABLE seedmancer_gen_books, seedmancer_gen_authors RESTART IDENTITY CASCADE;
+INSERT INTO seedmancer_gen_authors (id, name) VALUES (1, 'Alice'), (2, 'Bob'), (3, 'Carol');
+INSERT INTO seedmancer_gen_books   (id, author_id, title) VALUES
+    (10, 1, 'First Book'),
+    (12, 3, 'Third Book');
 `
 	out, err := RunGenerateLocal(ctx, GenerateLocalInput{
 		SQL:         sqlBlock,
@@ -219,6 +225,34 @@ INSERT INTO seedmancer_gen_books   (id, author_id, title) VALUES (12, 3, 'Third 
 	if sqlOut.Revision != out.Revision {
 		t.Fatalf("get_dataset_sql revision = %q, want %q", sqlOut.Revision, out.Revision)
 	}
+
+	// Reusing the same project + baseline, verify that a delta-style
+	// SQL (INSERT without a preceding wipe) is rejected and that the
+	// half-written revision dir is cleaned up so retries start clean.
+	t.Run("rejects delta-only SQL", func(t *testing.T) {
+		const deltaSQL = `INSERT INTO seedmancer_gen_authors (id, name) VALUES (99, 'Delta');`
+		_, err := RunGenerateLocal(ctx, GenerateLocalInput{
+			SQL:      deltaSQL,
+			Scenario: "delta-attempt",
+			Inherit:  "baseline",
+			Env:      "local",
+		})
+		if err == nil {
+			t.Fatal("expected error for delta-only SQL")
+		}
+		if !strings.Contains(err.Error(), "seedmancer_gen_authors") {
+			t.Errorf("error should mention the offending table: %v", err)
+		}
+		if !strings.Contains(err.Error(), "full, idempotent") {
+			t.Errorf("error should explain the contract: %v", err)
+		}
+		// Half-written revision must not survive a rejection.
+		scenarioDir := scenario.ScenarioDir(projectRoot, ".seedmancer", "delta-attempt")
+		revDir := filepath.Join(scenarioDir, "revisions", "r001")
+		if _, statErr := os.Stat(revDir); !os.IsNotExist(statErr) {
+			t.Errorf("rejected revision dir was not cleaned up: %s (err=%v)", revDir, statErr)
+		}
+	})
 }
 
 // TestRunGetDatasetSQL_missing reports a clear error when a revision was

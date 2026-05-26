@@ -13,6 +13,7 @@ import (
 	db "github.com/KazanKK/seedmancer/database"
 	"github.com/KazanKK/seedmancer/internal/scenario"
 	"github.com/KazanKK/seedmancer/internal/schemadiff"
+	"github.com/KazanKK/seedmancer/internal/sqlcontract"
 	utils "github.com/KazanKK/seedmancer/internal/utils"
 )
 
@@ -1487,6 +1488,26 @@ func RunGenerateLocal(ctx context.Context, in GenerateLocalInput) (GenerateLocal
 	}
 	if len(tables) == 0 {
 		return GenerateLocalOutput{}, fmt.Errorf("export produced no CSV files in %s", dataDir)
+	}
+
+	// 3b) Enforce the full + idempotent SQL contract. Every populated
+	//     table must be wiped (TRUNCATE or unconditional DELETE FROM)
+	//     before its INSERTs so dataset.sql is replay-safe on its own.
+	//     The deferred RemoveAll above already cleans up revDir when we
+	//     return an error here, so no manual cleanup is needed.
+	populated := make([]string, 0, len(rowCounts))
+	for t, n := range rowCounts {
+		if n > 0 {
+			populated = append(populated, t)
+		}
+	}
+	if err := sqlcontract.Validate(in.SQL, populated); err != nil {
+		return GenerateLocalOutput{}, fmt.Errorf(
+			"SQL is not a full, idempotent script — %w; "+
+				"every populated table must start with a wipe before INSERT so "+
+				"dataset.sql can be re-run and reproduces the data on its own",
+			err,
+		)
 	}
 
 	// 4) Persist the SQL alongside the materialised CSVs. dataset.sql is

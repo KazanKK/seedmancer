@@ -55,12 +55,14 @@ func registerTools(s *mcp.Server) {
 		Name:  "get_dataset_sql",
 		Title: "Get dataset SQL",
 		Description: "Return the SQL block that was used to create a scenario revision via " +
-			"generate_dataset_local. Use this before generating a new revision — retrieve the " +
-			"existing SQL, modify it, and pass it back to generate_dataset_local instead of " +
-			"writing a new block from scratch. Defaults to the scenario's latest revision; " +
-			"pass `revision: \"rNNN\"` for a specific one or `useStable: true` for the pinned " +
-			"revision. Returns an error when the revision has no dataset.sql sidecar (e.g. it " +
-			"was produced by export_database or pull_dataset).",
+			"generate_dataset_local. Use it as a REFERENCE for what the previous revision " +
+			"produced. When generating a new revision, REWRITE the SQL as a fresh, full, " +
+			"self-contained script — do NOT append delta statements to the returned SQL. " +
+			"The next generate_dataset_local call will reject any SQL whose populated tables " +
+			"are missing a leading TRUNCATE or unconditional DELETE FROM. Defaults to the " +
+			"scenario's latest revision; pass `revision: \"rNNN\"` for a specific one or " +
+			"`useStable: true` for the pinned revision. Returns an error when the revision " +
+			"has no dataset.sql sidecar (e.g. it was produced by export_database or pull_dataset).",
 		Annotations: readOnly,
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in cmd.GetDatasetSQLInput) (*mcp.CallToolResult, cmd.GetDatasetSQLOutput, error) {
 		out, err := cmd.RunGetDatasetSQL(ctx, in)
@@ -195,10 +197,15 @@ func registerTools(s *mcp.Server) {
 		Name:  "generate_dataset_local",
 		Title: "Generate scenario revision locally",
 		Description: "Synthesise a new revision under the given scenario by running agent-written " +
-			"SQL on top of an inherit base. Pipeline: (1) seed the inherit base into the " +
-			"configured local env (CSV → COPY), (2) apply your SQL inside a transaction, " +
-			"(3) export the resulting tables back to CSV as a new revision, (4) save the SQL " +
-			"as dataset.sql alongside the CSVs so it can be retrieved later with get_dataset_sql. " +
+			"SQL. The SQL MUST be a FULL, self-contained, idempotent script: every populated " +
+			"table starts with `TRUNCATE TABLE <t> RESTART IDENTITY CASCADE` (or an unconditional " +
+			"`DELETE FROM <t>`) before its INSERTs, and running the SQL alone against an empty " +
+			"migrated schema reproduces the dataset. Partial / delta scripts are REJECTED after " +
+			"export — the error lists every offending table. Pipeline: (1) seed the inherit base " +
+			"into the configured local env (a runtime safety net, not a data source the SQL relies " +
+			"on), (2) apply your SQL inside a transaction, (3) export the resulting tables back " +
+			"to CSV as a new revision, (4) validate the SQL against the populated tables, " +
+			"(5) save the SQL as dataset.sql so it can be retrieved later with get_dataset_sql. " +
 			"Read seedmancer://docs/local-generation first for the SQL contract and examples, " +
 			"then call describe_schema to get the exact column names before writing the SQL. " +
 			"`inherit` is REQUIRED. Pointers.latest advances to the new revision automatically. " +

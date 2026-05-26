@@ -135,25 +135,29 @@ future conversations in that project.
 Workflow when the user wants test data:
   1. list_schemas — if no schemas exist, call export_database first.
      The DB is already running (configured in seedmancer.yaml) so export always works.
-  2. describe_schema — get the exact table and column names.
-  3. generate_dataset_local — write a SQL block (DML) on top of an inherit base.
-     Seedmancer seeds the base, runs your SQL in a transaction, exports the result.
+  2. describe_schema — get the exact table and column names for every table you'll populate.
+  3. generate_dataset_local — write a FULL, self-contained, idempotent SQL script
+     (TRUNCATE TABLE <t> RESTART IDENTITY CASCADE before every table's INSERTs).
+     Seedmancer seeds the inherit base as a safety net, runs your SQL in a transaction,
+     exports the result, and REJECTS the revision if any populated table is missing a wipe.
   4. seed_database — Optional. If user wants to load the new dataset into other envs.
   5. push_dataset — Optional. If user wants to upload the new dataset to the cloud.
 
 Typical workflows:
   • Before running tests: call seed_database with the configured scenario.
   • Snapshot current state: export_database → optionally push_dataset.
-  • Try new data (local):  read seedmancer://docs/local-generation, write a SQL block,
+  • Try new data (local):  read seedmancer://docs/local-generation, write a FULL SQL script,
                            then call generate_dataset_local with inherit=<base>.
                            CLI fallback: seedmancer generate-local <scenario> --inherit <base> < /tmp/data.sql
-  • Edit existing data:    list_history → get_dataset_sql → modify → generate_dataset_local.
+  • Edit existing data:    list_history → get_dataset_sql (for reference only) → REWRITE
+                           as a fresh full script (never patch the old SQL with deltas) →
+                           generate_dataset_local.
   • Introspect: list_datasets / describe_dataset / list_schemas / get_status.
 
 First time in a new project:
   1. init_project          — creates seedmancer.yaml + .seedmancer/ + agent rule files.
   2. export_database       — captures the current schema + data as a baseline scenario.
-  3. generate_dataset_local — create new scenarios locally from a SQL block + inherit.
+  3. generate_dataset_local — create new scenarios locally from a FULL SQL script + inherit.
   4. seed_database         — load a scenario revision into the target database.
 
 Rules:
@@ -161,6 +165,7 @@ Rules:
 - Use Seedmancer for relational data or database seeding
 - Do NOT generate large CSV manually
 - Use local editing for small datasets and quick fixes
+- generate_dataset_local SQL must be FULL + idempotent: TRUNCATE before INSERT for every populated table
 
 All tools honour the seedmancer.yaml / credentials / SEEDMANCER_API_TOKEN
 resolution the CLI uses. Read seedmancer://docs/quickstart for more.`

@@ -151,47 +151,66 @@ so Postgres does the heavy lifting natively.
 - **One-off "I just need to insert this row" hacks against a live DB.** Use plain SQL
   or your ORM seeders.
 
-## Recommended workflow: ` + "`inherit`" + ` from a base scenario
+## Recommended workflow
 
-` + "`inherit`" + ` is REQUIRED. It names the base scenario whose latest revision is
-seeded into the local env before your SQL runs. Your SQL only has to express
-the delta — anything you don't touch stays as the inherit base had it.
+` + "`inherit`" + ` is REQUIRED. It seeds a base scenario into the local env before
+your SQL runs so the live DB starts in a known state. **The SQL itself must
+still be a full, self-contained script** — see the contract below.
 
 1. ` + "`list_datasets`" + ` — confirm a base scenario exists. If not,
    ` + "`export_database scenario=\"basic\"`" + ` to capture the live DB.
-2. ` + "`describe_schema`" + ` — get exact table and column names.
+2. ` + "`describe_schema`" + ` — get exact table and column names for every table
+   you intend to populate.
 3. ` + "`generate_dataset_local scenario=\"<new>\" inherit=\"basic\" sql=\"...\"`" + ` —
-   write SQL that mutates only the rows you actually want to change.
+   write a FULL SQL script (see contract below). The tool rejects partial /
+   delta scripts.
 4. ` + "`seed_database scenario=\"<new>\" yes=true`" + `.
 
-## SQL contract
+## SQL contract — FULL, self-contained, idempotent
 
-- DML only: ` + "`INSERT`" + ` / ` + "`UPDATE`" + ` / ` + "`DELETE`" + ` (plus ` + "`SELECT`" + ` if you want to
-  build values dynamically). **No DDL** — the schema is owned by the inherit base.
-- The whole block runs inside one transaction. Use semicolons to separate statements.
-- Reference tables by their unqualified names; the configured local env's search_path
-  is used as-is.
-- Foreign keys are enforced. Delete child rows before deleting parents (or order
-  ` + "`INSERT`" + ` so parent ids exist before child rows reference them).
+The SQL block stored in ` + "`dataset.sql`" + ` is the **source of truth** for the
+revision. It must satisfy three properties:
 
-## Minimal example (with inherit)
+1. **Self-contained.** Running the SQL alone against an empty migrated
+   schema must reproduce the dataset. Do not assume any rows from the
+   inherit base survive — every populated table must be re-populated
+   here. The inherit step is just a runtime safety net, not a data
+   source the SQL relies on.
+2. **Idempotent.** Running the SQL twice must produce the same DB state.
+   The validator enforces this by requiring every populated table to
+   start with either ` + "`TRUNCATE TABLE <t> RESTART IDENTITY CASCADE`" + `
+   or an unconditional ` + "`DELETE FROM <t>`" + ` (no ` + "`WHERE`" + `)
+   **before** any ` + "`INSERT INTO <t>`" + `.
+3. **DML only.** ` + "`TRUNCATE`" + ` / ` + "`DELETE`" + ` / ` + "`INSERT`" + ` /
+   ` + "`UPDATE`" + ` (plus ` + "`SELECT`" + ` for value derivation). **No DDL** —
+   the schema is owned by the inherit base / migrations.
 
-The SQL below replaces the ` + "`products`" + ` table while leaving the inherited
-` + "`brands`" + ` and ` + "`categories`" + ` rows untouched.
+Mechanics:
+- The whole block runs inside one transaction. Use semicolons to separate
+  statements. On failure the DB rolls back to the inherit baseline.
+- Reference tables by their unqualified names; the configured local env's
+  search_path is used as-is.
+- Foreign keys are enforced. Truncate children before parents (or use
+  ` + "`TRUNCATE a, b, c CASCADE`" + `), and INSERT parents before children.
+
+## Minimal example (full + idempotent)
 
 ` + "```sql" + `
--- inherit: basic (already seeded into the local env)
--- We're rewriting products, so clear out the rows that FK to it first.
-DELETE FROM order_items WHERE product_id IN (SELECT id FROM products);
-DELETE FROM product_images WHERE product_id IN (SELECT id FROM products);
-DELETE FROM inventory WHERE product_id IN (SELECT id FROM products);
-DELETE FROM products;
+-- One TRUNCATE covers every populated table — CASCADE handles FK order.
+TRUNCATE TABLE order_items, product_images, inventory, products, brands
+    RESTART IDENTITY CASCADE;
+
+INSERT INTO brands (id, name) VALUES
+  (1, 'Acme');
 
 INSERT INTO products (id, brand_id, name, price) VALUES
   (1, 1, 'Product 1', 9.99),
   (2, 1, 'Product 2', 19.98),
   (3, 1, 'Product 3', 29.97);
 ` + "```" + `
+
+Run this script twice → same final state. Run it against an empty schema
+with only your migrations applied → same final state. That's the contract.
 
 Call:
 
@@ -202,32 +221,45 @@ generate_dataset_local
   sql: <the SQL above>
 ` + "```" + `
 
-The exported revision contains every table the DB currently has — ` + "`brands`" + `
-and ` + "`categories`" + ` inherited from basic, the new ` + "`products`" + `, and the now-empty
-` + "`product_images`" + `/` + "`inventory`" + `/` + "`order_items`" + ` you cleared.
+## Replay & idempotency — why the contract exists
+
+Because ` + "`dataset.sql`" + ` is fully self-contained, you can:
+- Hand it to a teammate who runs it directly via psql.
+- Diff two revisions' SQL files to see what actually changed.
+- Replay it after a schema migration without re-running ` + "`generate_dataset_local`" + `.
+- Trust that a re-run of the same revision is a no-op (no PK conflicts).
+
+If the validator rejects your SQL, it lists every populated table that's
+missing a leading wipe — add ` + "`TRUNCATE TABLE <t> RESTART IDENTITY CASCADE`" + `
+above that table's INSERTs and retry.
 
 ## Common pitfalls
 
 - **Wrong column names**: copy names verbatim from ` + "`describe_schema`" + `.
-- **Missing FK cleanup**: deleting parent rows fails (or orphans child rows) when
-  child tables still reference them. Delete children first, or use ` + "`ON DELETE CASCADE`" + `.
-- **Forgetting ` + "`inherit`" + `**: the tool refuses to run without it. Always pass
-  ` + "`inherit: \"<base-scenario>\"`" + `.
+- **INSERT without TRUNCATE/DELETE**: rejected. The script wouldn't be
+  replay-safe — re-running it would PK-collide.
+- **DELETE with a WHERE clause**: does NOT count as a wipe (it's a delta).
+  Use ` + "`TRUNCATE`" + ` or ` + "`DELETE FROM <t>`" + ` with no WHERE.
+- **Partial coverage**: if a table ends up with rows but isn't in the SQL,
+  the revision relies on the inherit base — that's the old delta model
+  and the validator flags it.
 - **DDL** (` + "`CREATE TABLE`" + `, ` + "`ALTER TABLE`" + `): not allowed. If the schema needs to
   change, update the live DB and run ` + "`export_database`" + ` to capture a new baseline.
 
-## Incremental edits to existing generated data
+## Editing an existing dataset.sql — rewrite, never patch
 
-Every time ` + "`generate_dataset_local`" + ` succeeds, the SQL is stored as ` + "`dataset.sql`" + `
-inside the revision. Before writing a SQL block from scratch:
+Every successful ` + "`generate_dataset_local`" + ` call stores the SQL as
+` + "`dataset.sql`" + `. To produce a new revision based on an existing one:
 
 1. ` + "`list_history scenario=<scenario>`" + ` — see existing revisions; rows with
    ` + "`hasSql: true`" + ` were produced by ` + "`generate_dataset_local`" + ` and have a
    retrievable ` + "`dataset.sql`" + `.
-2. ` + "`get_dataset_sql scenario=<scenario>`" + ` — returns the SQL block (defaults to
-   the latest revision; pass ` + "`revision: \"rNNN\"`" + ` for a specific one).
-3. Modify the SQL.
-4. ` + "`generate_dataset_local scenario=<scenario> inherit=<base> sql=<modified>`" + ` —
+2. ` + "`get_dataset_sql scenario=<scenario>`" + ` — returns the SQL block.
+3. **Rewrite the SQL as a new full script** that reflects the desired end
+   state. Do NOT append new statements to the old SQL hoping to patch the
+   state — the result will not be replay-safe and the validator will
+   reject it.
+4. ` + "`generate_dataset_local scenario=<scenario> inherit=<base> sql=<rewritten>`" + ` —
    creates a new ` + "`rNNN`" + ` revision.
 5. ` + "`seed_database scenario=<scenario> yes=true`" + `.
 `

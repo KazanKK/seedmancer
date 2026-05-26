@@ -68,10 +68,10 @@ Success criteria:
 	s.AddPrompt(&mcp.Prompt{
 		Name:        "generate_test_data",
 		Title:       "Generate test data",
-		Description: "Generate a plan for creating a new revision under a scenario using a SQL block on top of an inherit base.",
+		Description: "Generate a plan for creating a new revision under a scenario using a FULL, self-contained, idempotent SQL script.",
 		Arguments: []*mcp.PromptArgument{
 			{Name: "scenario", Description: "Scenario path for the new revision (e.g. 'billing/pro')", Required: true},
-			{Name: "inherit", Description: "REQUIRED base scenario; its latest revision is seeded into the local env before the SQL runs", Required: true},
+			{Name: "inherit", Description: "REQUIRED base scenario; its latest revision is seeded into the local env before the SQL runs as a safety net (the SQL itself must still be a full script)", Required: true},
 		},
 	}, func(ctx context.Context, req *mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
 		args := req.Params.Arguments
@@ -82,22 +82,28 @@ Success criteria:
 			return nil, fmt.Errorf("inherit argument is required")
 		}
 
-		text := fmt.Sprintf(`Goal: synthesize a new revision under scenario %q locally.
+		text := fmt.Sprintf(`Goal: synthesize a new revision under scenario %q locally with a FULL,
+self-contained, idempotent SQL script.
 
 Steps:
 1. Read seedmancer://docs/local-generation for the SQL contract and examples.
-2. Call 'describe_schema' to get exact table and column names.
-3. Before writing fresh SQL, check 'list_history' for prior revisions with hasSql=true
-   and 'get_dataset_sql' to retrieve and edit existing SQL instead of starting over.
-4. Call 'generate_dataset_local' with scenario=%q, inherit=%q, and a SQL block of
-   INSERT/UPDATE/DELETE statements. Seedmancer seeds the inherit base into the
-   configured local env, runs your SQL in a transaction, then exports the result.
+2. Call 'describe_schema' to get exact table and column names for every table you will populate.
+3. If a prior revision exists, call 'list_history' and 'get_dataset_sql' for REFERENCE only.
+   Do NOT patch the old SQL with delta statements — REWRITE the whole script.
+4. Call 'generate_dataset_local' with scenario=%q, inherit=%q, and a FULL SQL script:
+     - TRUNCATE TABLE <t> RESTART IDENTITY CASCADE; for every table that will have rows
+       (one combined TRUNCATE with CASCADE is fine and handles FK order automatically).
+     - INSERT INTO <t> (...) VALUES (...); for every row, ordered parents-before-children.
+     - DML only — no DDL.
+   The tool will REJECT the revision if any populated table is missing a leading wipe.
 5. Call 'seed_database' with the scenario path to load the revision into other envs.
 6. Optionally call 'pin_scenario' to mark the revision as stable, or 'push_dataset' to publish.
 
 Success criteria:
 - 'generate_dataset_local' returns with a non-empty Path, SQLPath, and a new revision id.
-- The revision's dataset.sql round-trips through 'get_dataset_sql' unchanged.`, args["scenario"], args["scenario"], args["inherit"])
+- Every populated table in the output's RowCounts has a corresponding TRUNCATE+INSERT pair in the SQL.
+- The revision's dataset.sql round-trips through 'get_dataset_sql' unchanged.
+- Running dataset.sql twice produces the same DB state (idempotency).`, args["scenario"], args["scenario"], args["inherit"])
 
 		return &mcp.GetPromptResult{
 			Description: "Generate-test-data playbook (local)",

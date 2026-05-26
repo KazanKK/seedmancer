@@ -35,22 +35,30 @@ import (
 func GenerateLocalCommand() *cli.Command {
 	return &cli.Command{
 		Name:      "generate-local",
-		Usage:     "Generate a scenario revision from an SQL block (no cloud, no quota)",
+		Usage:     "Generate a scenario revision from a FULL, idempotent SQL script",
 		ArgsUsage: "<scenario>",
-		Description: "Seeds an inherit base into the configured local env, applies the\n" +
-			"agent-written SQL on top of it, then exports the resulting tables\n" +
-			"back to CSV as a new rNNN revision. The SQL is stored alongside the\n" +
-			"CSVs as dataset.sql for later retrieval.\n\n" +
+		Description: "Seeds an inherit base into the configured local env, applies your SQL\n" +
+			"on top of it, then exports the resulting tables back to CSV as a new\n" +
+			"rNNN revision. The SQL is stored alongside the CSVs as dataset.sql.\n\n" +
+			"The SQL MUST be a FULL, self-contained, idempotent script:\n" +
+			"  - every populated table starts with TRUNCATE TABLE <t> RESTART IDENTITY\n" +
+			"    CASCADE (or an unconditional DELETE FROM <t>) before its INSERTs,\n" +
+			"  - running it twice produces the same DB state,\n" +
+			"  - running it alone on an empty migrated schema reproduces the dataset.\n" +
+			"Partial / delta scripts are rejected after export with a list of every\n" +
+			"populated table missing a leading wipe.\n\n" +
 			"Recommended: pipe the SQL via stdin so nothing is written to disk:\n\n" +
 			"  seedmancer generate-local billing/pro --inherit basic <<'EOF'\n" +
-			"  DELETE FROM order_items WHERE product_id IN (SELECT id FROM products);\n" +
-			"  DELETE FROM products;\n" +
+			"  TRUNCATE TABLE order_items, products, brands\n" +
+			"      RESTART IDENTITY CASCADE;\n" +
+			"  INSERT INTO brands (id, name) VALUES (1, 'Acme');\n" +
 			"  INSERT INTO products (id, brand_id, name, price) VALUES\n" +
 			"    (1, 1, 'Product 1', 9.99),\n" +
 			"    (2, 1, 'Product 2', 19.98);\n" +
 			"  EOF\n\n" +
 			"`--inherit` is REQUIRED — it specifies the base scenario whose\n" +
-			"latest revision is seeded into the local env before your SQL runs.\n" +
+			"latest revision is seeded into the local env before your SQL runs\n" +
+			"(safety net, not a data source the SQL relies on).\n" +
 			"NOTE: this overwrites data in the configured local env.",
 		Flags: []cli.Flag{
 			&cli.StringFlag{
