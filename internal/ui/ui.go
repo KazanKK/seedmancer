@@ -80,6 +80,18 @@ func KeyValue(key, value string) {
 	fmt.Fprintf(os.Stderr, "  %s %s\n", color(dim, key), value)
 }
 
+// PrintUpdateNotice prints the "a newer release is available" banner to
+// stderr. Modeled on the Supabase CLI notice — yellow ⚠ headline plus a
+// dim "Update:" line with the release URL. Callers are responsible for
+// gating the call (TTY, opt-out env, version comparison, etc.); this
+// helper just renders.
+func PrintUpdateNotice(current, latest, url string) {
+	fmt.Fprintln(os.Stderr)
+	headline := fmt.Sprintf("A new version of Seedmancer CLI is available: v%s (currently installed v%s)", latest, current)
+	fmt.Fprintf(os.Stderr, "%s %s\n", color(yellow, "⚠"), color(bold, headline))
+	fmt.Fprintf(os.Stderr, "  %s %s\n", color(dim, "Update:"), url)
+}
+
 // PrintLoginHint renders the "how to sign in" guide shown whenever a command
 // cannot resolve an API token. Keeping this in one place guarantees every
 // command (generate, push, pull, list, schemas) shows the exact same copy

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"os"
 	"strings"
@@ -8,8 +9,18 @@ import (
 	"github.com/KazanKK/seedmancer/cmd"
 	"github.com/KazanKK/seedmancer/internal/mcpcmd"
 	"github.com/KazanKK/seedmancer/internal/ui"
+	"github.com/KazanKK/seedmancer/internal/updatecheck"
 	utils "github.com/KazanKK/seedmancer/internal/utils"
 	"github.com/urfave/cli/v2"
+)
+
+// Version is the release tag of the binary. Goreleaser overrides this via
+// `-X main.Version=<tag>` (see .goreleaser.yml); `go build` / `go run`
+// builds keep the "dev" sentinel so the update-check goroutine knows to
+// stay out of the way for local development.
+var (
+	Version   = "dev"
+	BuildTime = ""
 )
 
 // commandHelpTemplate mirrors urfave/cli v2's default CommandHelpTemplate but
@@ -83,6 +94,7 @@ func main() {
 
 	app := &cli.App{
 		Name:            "seedmancer",
+		Version:         Version,
 		Usage:           "Schema-first database seeding — export, push, pull, restore.",
 		HideHelpCommand: true, // every subcommand still has -h / --help
 		Description: "Seedmancer organizes test data into scenarios — slash-separated\n" +
@@ -127,6 +139,13 @@ func main() {
 		},
 	}
 
+	// Kick off the (non-blocking) update check before the command
+	// runs so the goroutine has the entire command's runtime to do
+	// its work. `finishUpdateCheck` is called below for both the
+	// happy path and the error-exit path; os.Exit skips deferreds,
+	// so we invoke it explicitly rather than relying on `defer`.
+	finishUpdateCheck := updatecheck.Start(context.Background(), Version, firstSubcommand(os.Args))
+
 	if err := app.Run(reorderArgs(os.Args, app)); err != nil {
 		switch {
 		case errors.Is(err, utils.ErrMissingAPIToken):
@@ -137,8 +156,26 @@ func main() {
 		default:
 			ui.Error("%v", err)
 		}
+		finishUpdateCheck()
 		os.Exit(1)
 	}
+	finishUpdateCheck()
+}
+
+// firstSubcommand returns the first non-flag token from argv past the
+// program name. Used to suppress the update-check banner when the user
+// invoked `seedmancer mcp`, whose stdout/stderr is owned by the MCP
+// JSON-RPC transport. Returns "" when no subcommand is present (bare
+// `seedmancer` / `seedmancer --help`).
+func firstSubcommand(argv []string) string {
+	for i := 1; i < len(argv); i++ {
+		tok := argv[i]
+		if strings.HasPrefix(tok, "-") {
+			continue
+		}
+		return tok
+	}
+	return ""
 }
 
 // reorderArgs reshuffles `argv` so each subcommand's flags come before its
