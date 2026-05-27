@@ -197,6 +197,12 @@ func (m *MySQLManager) ExtractSchema() (*Schema, error) {
 			col.Default = rc.colDefault.String
 		}
 
+		// generated/virtual columns produce their value inside the DB — no CSV data needed
+		extraLower := strings.ToLower(rc.extra)
+		if strings.Contains(extraLower, "virtual generated") || strings.Contains(extraLower, "stored generated") {
+			col.IsGenerated = true
+		}
+
 		// foreign key
 		if fk, ok := fkMap[fkKey{rc.tableName, rc.columnName}]; ok {
 			col.ForeignKey = fk

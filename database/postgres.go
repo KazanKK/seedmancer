@@ -206,7 +206,9 @@ func (p *PostgresManager) ExtractSchema() (*Schema, error) {
 			unique_info.column_name IS NOT NULL as is_unique,
 			fk.foreign_table_name,
 			fk.foreign_column_name,
-			c.character_maximum_length
+			c.character_maximum_length,
+			COALESCE(c.is_generated, 'NEVER') AS is_generated,
+			c.identity_generation
 		FROM 
 			information_schema.tables t
 			JOIN information_schema.columns c ON t.table_name = c.table_name
@@ -244,7 +246,9 @@ func (p *PostgresManager) ExtractSchema() (*Schema, error) {
 		var columnDefault sql.NullString
 		var isPrimary, isUnique bool
 		var foreignTable, foreignColumn sql.NullString
-		var charMaxLength sql.NullInt64 // Added for varchar length
+		var charMaxLength sql.NullInt64
+		var isGenerated string
+		var identityGeneration sql.NullString
 
 		if err := rows.Scan(
 			&tableName,
@@ -257,7 +261,9 @@ func (p *PostgresManager) ExtractSchema() (*Schema, error) {
 			&isUnique,
 			&foreignTable,
 			&foreignColumn,
-			&charMaxLength, // Added for varchar length
+			&charMaxLength,
+			&isGenerated,
+			&identityGeneration,
 		); err != nil {
 			return nil, err
 		}
@@ -272,11 +278,12 @@ func (p *PostgresManager) ExtractSchema() (*Schema, error) {
 		}
 
 		column := Column{
-			Name:      columnName,
-			Type:      dataType,
-			Nullable:  isNullable == "YES",
-			IsPrimary: isPrimary,
-			IsUnique:  isUnique,
+			Name:        columnName,
+			Type:        dataType,
+			Nullable:    isNullable == "YES",
+			IsPrimary:   isPrimary,
+			IsUnique:    isUnique,
+			IsGenerated: isGenerated == "ALWAYS" || identityGeneration.Valid,
 		}
 
 		// Handle varchar length

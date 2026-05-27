@@ -77,6 +77,8 @@ func main() {
 	pinCmd.Category = "Local"
 	checkCmd := cmd.CheckCommand()
 	checkCmd.Category = "Local"
+	refreshCmd := cmd.RefreshCommand()
+	refreshCmd.Category = "Local"
 
 	pushCmd := cmd.PushCommand()
 	pushCmd.Category = "Remote"
@@ -132,6 +134,7 @@ func main() {
 			historyCmd,
 			pinCmd,
 			checkCmd,
+			refreshCmd,
 			pushCmd,
 			pullCmd,
 			schemasCmd,

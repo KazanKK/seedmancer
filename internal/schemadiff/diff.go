@@ -14,11 +14,14 @@ import (
 type ChangeKind string
 
 const (
-	TableAdded    ChangeKind = "table_added"
-	TableRemoved  ChangeKind = "table_removed"
-	ColumnAdded   ChangeKind = "column_added"
-	ColumnRemoved ChangeKind = "column_removed"
-	ColumnChanged ChangeKind = "column_changed"
+	TableAdded       ChangeKind = "table_added"
+	TableRemoved     ChangeKind = "table_removed"
+	ColumnAdded      ChangeKind = "column_added"
+	ColumnRemoved    ChangeKind = "column_removed"
+	ColumnChanged    ChangeKind = "column_changed"
+	ForeignKeyAdded  ChangeKind = "fk_added"
+	ForeignKeyRemoved ChangeKind = "fk_removed"
+	ForeignKeyChanged ChangeKind = "fk_changed"
 )
 
 // Change is one entry in the diff. ColumnChange holds the before/after
@@ -46,6 +49,12 @@ func (c Change) String() string {
 		return fmt.Sprintf("- %s.%s removed", c.Table, c.Column)
 	case ColumnChanged:
 		return fmt.Sprintf("~ %s.%s %s", c.Table, c.Column, c.Detail)
+	case ForeignKeyAdded:
+		return fmt.Sprintf("+ %s.%s FK -> %s", c.Table, c.Column, c.Detail)
+	case ForeignKeyRemoved:
+		return fmt.Sprintf("- %s.%s FK removed", c.Table, c.Column)
+	case ForeignKeyChanged:
+		return fmt.Sprintf("~ %s.%s FK %s", c.Table, c.Column, c.Detail)
 	}
 	return fmt.Sprintf("? %s.%s %s", c.Table, c.Column, c.Detail)
 }
@@ -69,6 +78,13 @@ type rawColumn struct {
 	Default  json.RawMessage `json:"default"`
 	IsPrimary *bool          `json:"isPrimary"`
 	IsUnique  *bool          `json:"isUnique"`
+	IsGenerated *bool        `json:"isGenerated"`
+	ForeignKey *rawForeignKey `json:"foreignKey"`
+}
+
+type rawForeignKey struct {
+	Table  string `json:"table"`
+	Column string `json:"column"`
 }
 
 // Diff parses the two schema JSON blobs and returns a sorted list of
@@ -117,6 +133,14 @@ func diffTable(table string, oldT, newT rawTable) []Change {
 				Column: name,
 				Detail: describeColumn(nc),
 			})
+			if nc.ForeignKey != nil {
+				out = append(out, Change{
+					Kind:   ForeignKeyAdded,
+					Table:  table,
+					Column: name,
+					Detail: nc.ForeignKey.Table + "." + nc.ForeignKey.Column,
+				})
+			}
 		case oOK && !nOK:
 			out = append(out, Change{
 				Kind:   ColumnRemoved,
@@ -130,6 +154,20 @@ func diffTable(table string, oldT, newT rawTable) []Change {
 					Table:  table,
 					Column: name,
 					Detail: detail,
+				})
+			}
+			if fkDetail := diffFK(oc.ForeignKey, nc.ForeignKey); fkDetail != "" {
+				kind := ForeignKeyChanged
+				if oc.ForeignKey == nil {
+					kind = ForeignKeyAdded
+				} else if nc.ForeignKey == nil {
+					kind = ForeignKeyRemoved
+				}
+				out = append(out, Change{
+					Kind:   kind,
+					Table:  table,
+					Column: name,
+					Detail: fkDetail,
 				})
 			}
 		}
@@ -158,19 +196,50 @@ func diffColumn(oc, nc rawColumn) string {
 		bits = append(bits, fmt.Sprintf("isUnique %v -> %v",
 			boolPtrVal(oc.IsUnique), boolPtrVal(nc.IsUnique)))
 	}
+	if boolPtrVal(oc.IsGenerated) != boolPtrVal(nc.IsGenerated) {
+		bits = append(bits, fmt.Sprintf("isGenerated %v -> %v",
+			boolPtrVal(oc.IsGenerated), boolPtrVal(nc.IsGenerated)))
+	}
 	if len(bits) == 0 {
 		return ""
 	}
 	return joinComma(bits)
 }
 
+// diffFK returns a human-readable description when the FK target changed,
+// or empty string when both are nil or equal.
+func diffFK(old, new *rawForeignKey) string {
+	oldRef := fkRef(old)
+	newRef := fkRef(new)
+	if oldRef == newRef {
+		return ""
+	}
+	if old == nil {
+		return "-> " + newRef
+	}
+	if new == nil {
+		return "(removed)"
+	}
+	return oldRef + " -> " + newRef
+}
+
+func fkRef(fk *rawForeignKey) string {
+	if fk == nil {
+		return ""
+	}
+	return fk.Table + "." + fk.Column
+}
+
 // describeColumn renders the new-column detail line: type plus
-// nullable/default when interesting.
+// nullable/default/generated when interesting.
 func describeColumn(c rawColumn) string {
 	bits := []string{c.Type}
 	bits = append(bits, fmt.Sprintf("nullable=%v", boolPtrVal(c.Nullable)))
 	if len(c.Default) > 0 && string(c.Default) != "null" {
 		bits = append(bits, "default="+rawDisplay(c.Default))
+	}
+	if boolPtrVal(c.IsGenerated) {
+		bits = append(bits, "generated")
 	}
 	return joinSpace(bits)
 }

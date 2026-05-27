@@ -177,4 +177,18 @@ func registerResources(s *mcp.Server) {
 			}},
 		}, nil
 	})
+
+	s.AddResource(&mcp.Resource{
+		URI:         "seedmancer://docs/refresh",
+		Name:        "Schema drift refresh",
+		Title:       "Refresh outdated scenario revisions",
+		Description: "How to use the four refresh MCP tools to update scenario CSVs after a schema change.",
+		MIMEType:    "text/markdown",
+	}, func(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
+		return &mcp.ReadResourceResult{
+			Contents: []*mcp.ResourceContents{{
+				URI: req.Params.URI, MIMEType: "text/markdown", Text: docRefresh,
+			}},
+		}, nil
+	})
 }

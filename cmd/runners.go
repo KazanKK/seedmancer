@@ -785,10 +785,28 @@ SQL script outside the tool.
 
 ## Schema drift
 
-If the database schema changed since you last exported, run ` + "`check_scenario`" + `
-to compare. ` + "`seed_database`" + ` refuses to seed mismatched schemas unless you
-pass ` + "`force: true`" + `; usually the right fix is a fresh ` + "`export_database`" + ` to
-create a new revision.
+If the database schema changed since you last exported, use the refresh workflow:
+
+1. ` + "`check_state_schema`" + ` — see all changes classified as auto/likely/decision/breaking.
+2. ` + "`create_refresh_plan`" + ` — builds a plan; auto changes are filled in, decision
+   changes are stubs you must populate.
+3. ` + "`validate_refresh_plan`" + ` — verify the plan before applying.
+4. ` + "`apply_refresh_plan`" + ` — transforms CSVs and commits a new revision.
+5. ` + "`seed_database`" + ` — loads the refreshed revision.
+
+Read ` + "`seedmancer://docs/refresh`" + ` for the full workflow, all operation types,
+and how to handle decision/breaking changes.
+
+**dataset.sql is NEVER deleted.** It stays on every revision as a permanent AI
+reference. Refresh-produced revisions use ` + "`refresh-plan.json`" + ` as their
+operational record.
+
+**CLI alternative:**
+` + "```" + `
+seedmancer refresh billing/pro          # interactive
+seedmancer refresh billing/pro --yes    # auto-apply safe changes only
+seedmancer refresh billing/pro --plan   # preview only
+` + "```" + `
 
 ## Pinning a known-good revision
 
@@ -871,8 +889,7 @@ When asked to create, generate, or seed test/fixture data:
   optionally ` + "`revision`" + `) to retrieve it, modify the SQL, and pass it back to
   ` + "`generate_dataset_local`" + ` with the same scenario path and ` + "`inherit`" + `. A new
   ` + "`rNNN`" + ` revision is created automatically.
-- **Schema drift**: run ` + "`check_scenario`" + ` if the DB schema changed since the
-  last export. ` + "`seed_database`" + ` refuses mismatched schemas unless ` + "`force: true`" + `.
+- **Schema drift**: use the refresh workflow if the DB schema changed: ` + "`check_state_schema`" + ` → ` + "`create_refresh_plan`" + ` → ` + "`validate_refresh_plan`" + ` → ` + "`apply_refresh_plan`" + `. Read ` + "`seedmancer://docs/refresh`" + ` for details. ` + "`dataset.sql`" + ` is NEVER deleted — it stays as a permanent AI reference.
 - **Pin for CI**: use ` + "`pin_scenario`" + ` to mark a revision as stable; CI uses
   ` + "`seed_database`" + ` with ` + "`useStable: true`" + ` to lock onto it.
 - **CLI fallback** (when MCP tools are unavailable): pipe the SQL via stdin heredoc.

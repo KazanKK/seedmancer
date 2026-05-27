@@ -268,6 +268,58 @@ func registerTools(s *mcp.Server) {
 		return nil, out, err
 	})
 
+	// ── Schema drift and refresh ──────────────────────────────────────
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:  "check_state_schema",
+		Title: "Check scenario schema drift (structured)",
+		Description: "Compare a scenario revision's stored schema with the live database schema. " +
+			"Returns a structured drift report with changes classified as auto/likely/decision/breaking. " +
+			"Use this instead of check_scenario when you need to drive a refresh workflow.",
+		Annotations: readOnly,
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in cmd.CheckStateSchemaInput) (*mcp.CallToolResult, cmd.CheckStateSchemaOutput, error) {
+		out, err := cmd.RunCheckStateSchema(ctx, in)
+		return nil, out, err
+	})
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:  "create_refresh_plan",
+		Title: "Create refresh plan",
+		Description: "Analyse schema drift for a scenario and build a refresh plan. " +
+			"Auto and likely changes are filled in automatically; decision/breaking changes " +
+			"are left as stubs for you to populate before calling apply_refresh_plan. " +
+			"You can also supply your own operations array to skip the classifier.",
+		Annotations: &mcp.ToolAnnotations{DestructiveHint: falsePtr()},
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in cmd.CreateRefreshPlanInput) (*mcp.CallToolResult, cmd.CreateRefreshPlanOutput, error) {
+		out, err := cmd.RunCreateRefreshPlan(ctx, in)
+		return nil, out, err
+	})
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:  "validate_refresh_plan",
+		Title: "Validate refresh plan",
+		Description: "Validate a refresh plan against the old and new schema. " +
+			"Returns a list of validation errors (empty = valid). " +
+			"Always call this before apply_refresh_plan.",
+		Annotations: readOnly,
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in cmd.ValidateRefreshPlanInput) (*mcp.CallToolResult, cmd.ValidateRefreshPlanOutput, error) {
+		out, err := cmd.RunValidateRefreshPlan(ctx, in)
+		return nil, out, err
+	})
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:  "apply_refresh_plan",
+		Title: "Apply refresh plan",
+		Description: "Apply a refresh plan to a scenario's base revision. Transforms CSVs in a " +
+			"temp directory, then commits the result as a new rNNN revision and advances " +
+			"pointers.latest. The base revision is never modified. " +
+			"ALWAYS run validate_refresh_plan first.",
+		Annotations: &mcp.ToolAnnotations{DestructiveHint: falsePtr(), IdempotentHint: false},
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in cmd.ApplyRefreshPlanInput) (*mcp.CallToolResult, cmd.ApplyRefreshPlanOutput, error) {
+		out, err := cmd.RunApplyRefreshPlan(ctx, in)
+		return nil, out, err
+	})
+
 	// ── Auth surface ─────────────────────────────────────────────────
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "login_info",

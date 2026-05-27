@@ -206,15 +206,19 @@ func guardSchemaMatch(t utils.NamedEnv, rev resolvedRevision) error {
 			"  Revision: %s\n"+
 			"  Dataset schema: %s\n"+
 			"  Current schema: %s\n\n"+
-			"This dataset may fail to seed because the database schema has changed.\n"+
-			"Run:\n"+
+			"The database schema has changed — seeding may fail.\n"+
+			"Update the revision to match the current schema:\n"+
+			"  seedmancer refresh %s\n"+
+			"\n"+
+			"Or inspect what changed:\n"+
 			"  seedmancer check %s\n"+
 			"\n"+
-			"Or force anyway:\n"+
+			"Or force seed anyway:\n"+
 			"  seedmancer seed %s --force",
 		targetDisplay(t), rev.Scenario, rev.RevID,
 		utils.FingerprintShort(rev.Manifest.SchemaFingerprint),
 		utils.FingerprintShort(currentFP),
+		rev.Scenario,
 		rev.Scenario, rev.Scenario,
 	)
 }
