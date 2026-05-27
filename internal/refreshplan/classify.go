@@ -108,8 +108,9 @@ func buildOpsForChange(ch driftreport.AnnotatedChange) []Operation {
 		}
 
 	case schemadiff.TableRemoved:
-		// Cannot auto-handle; stub only.
-		ops = append(ops, stubOp(ch))
+		// No CSV operation can address a removed table.
+		// The Breaking entry in the drift report is sufficient to block auto-apply.
+		return nil
 	}
 
 	return ops
@@ -141,9 +142,6 @@ func stubOp(ch driftreport.AnnotatedChange) Operation {
 		op.Op = OpSetConstant
 	case schemadiff.ForeignKeyAdded:
 		op.Op = OpFillForeignKey
-	case schemadiff.TableRemoved:
-		op.Op = ""
-		op.Reasoning = "table removed — manual intervention required"
 	default:
 		op.Op = OpSetConstant
 	}
