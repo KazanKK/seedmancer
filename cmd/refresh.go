@@ -66,8 +66,8 @@ func RefreshCommand() *cli.Command {
 }
 
 func runRefreshOne(c *cli.Context, scenarioArg string) error {
-	// Step 1: always build the plan first (PlanOnly=true) so we can show it
-	// before asking the user to confirm.
+	// Phase 1: connect to DB, introspect schema, compute drift, build plan.
+	spinner := ui.StartSpinner(fmt.Sprintf("Checking schema drift for %s…", scenarioArg))
 	out, err := RunRefresh(c.Context, RefreshInput{
 		Scenario:  scenarioArg,
 		Revision:  c.String("revision"),
@@ -80,26 +80,27 @@ func runRefreshOne(c *cli.Context, scenarioArg string) error {
 		AI:        c.Bool("ai"),
 	})
 	if err != nil {
+		spinner.Stop(false, err.Error())
 		return err
 	}
+	spinner.Stop(true, fmt.Sprintf("refresh %s @ %s", out.Scenario, out.BaseRevision))
 
 	if c.Bool("json") {
 		return outputJSON(out)
 	}
 
-	// Step 2: print drift summary + full operation list.
-	ui.Title(fmt.Sprintf("refresh %s @ %s", out.Scenario, out.BaseRevision))
+	// Print drift summary + full operation list.
 	printDriftSummary(out.DriftReport)
 	if out.DriftReport.HasDrift {
 		printPlan(out.Plan)
 	}
 
-	// Step 3: --plan flag or no drift → preview only, stop here.
+	// --plan flag or no drift → preview only, stop here.
 	if c.Bool("plan") || !out.DriftReport.HasDrift {
 		return nil
 	}
 
-	// Step 4: confirm before applying (skipped with --yes or --json).
+	// Confirm before applying (skipped with --yes).
 	if !c.Bool("yes") {
 		if !confirmApply(len(out.Plan.Operations), out.BaseRevision) {
 			ui.Info("Aborted.")
@@ -107,7 +108,8 @@ func runRefreshOne(c *cli.Context, scenarioArg string) error {
 		}
 	}
 
-	// Step 5: apply the plan.
+	// Phase 2: second DB introspection + CSV transformation.
+	spinner = ui.StartSpinner("Applying refresh plan…")
 	applyOut, err := RunApplyRefreshPlan(c.Context, ApplyRefreshPlanInput{
 		Scenario:  scenarioArg,
 		Revision:  c.String("revision"),
@@ -117,10 +119,10 @@ func runRefreshOne(c *cli.Context, scenarioArg string) error {
 		Plan:      out.Plan,
 	})
 	if err != nil {
+		spinner.Stop(false, err.Error())
 		return err
 	}
-
-	ui.Success("Created %s %s", out.Scenario, applyOut.NewRevision)
+	spinner.Stop(true, fmt.Sprintf("Created %s %s", out.Scenario, applyOut.NewRevision))
 	ui.Info("Run:  seedmancer seed %s", out.Scenario)
 	return nil
 }
