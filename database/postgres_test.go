@@ -88,9 +88,20 @@ func TestParseArrayString(t *testing.T) {
 
 func TestProcessCSVValue_nulls(t *testing.T) {
 	p := &PostgresManager{}
-	for _, v := range []string{"", "NULL", "null"} {
+	// Explicit NULL markers always map to SQL NULL for any type.
+	for _, v := range []string{"NULL", "null"} {
 		if got := p.processCSVValue(v, "text"); got != nil {
 			t.Errorf("processCSVValue(%q) = %v, want nil", v, got)
+		}
+	}
+	// Empty string is SQL NULL for non-text types.
+	if got := p.processCSVValue("", "integer"); got != nil {
+		t.Errorf("processCSVValue(%q, integer) = %v, want nil", "", got)
+	}
+	// Empty string is a valid value for text-family types.
+	for _, colType := range []string{"text", "character varying", "varchar(255)", "char"} {
+		if got := p.processCSVValue("", colType); got != "" {
+			t.Errorf("processCSVValue(%q, %s) = %v, want empty string", "", colType, got)
 		}
 	}
 }

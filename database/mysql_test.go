@@ -88,9 +88,20 @@ func (e *fakeError) Error() string { return e.msg }
 
 func TestMySQLProcessCSVValue_nulls(t *testing.T) {
 	m := &MySQLManager{}
-	for _, v := range []string{"", "NULL", "null"} {
+	// Explicit NULL markers always map to SQL NULL for any type.
+	for _, v := range []string{"NULL", "null"} {
 		if got := m.processCSVValue(v, "varchar"); got != nil {
 			t.Errorf("processCSVValue(%q) = %v, want nil", v, got)
+		}
+	}
+	// Empty string is SQL NULL for non-text types.
+	if got := m.processCSVValue("", "int"); got != nil {
+		t.Errorf("processCSVValue(%q, int) = %v, want nil", "", got)
+	}
+	// Empty string is a valid value for text-family types.
+	for _, colType := range []string{"text", "tinytext", "mediumtext", "longtext", "varchar(255)", "char"} {
+		if got := m.processCSVValue("", colType); got != "" {
+			t.Errorf("processCSVValue(%q, %s) = %v, want empty string", "", colType, got)
 		}
 	}
 }
