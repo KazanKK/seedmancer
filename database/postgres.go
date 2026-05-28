@@ -819,13 +819,26 @@ func (p *PostgresManager) importCSV(tableName, csvPath string, schema *Schema) e
 
 // Helper function to process CSV values based on column type
 func (p *PostgresManager) processCSVValue(value string, columnType string) interface{} {
-	// Handle NULL values
-	if value == "" || value == "NULL" || value == "null" {
+	// Explicit NULL markers always map to SQL NULL.
+	if value == "NULL" || value == "null" {
 		return nil
 	}
 
 	// Convert value based on column type
 	colType := strings.ToLower(columnType)
+
+	// For text-family types, an empty string is a valid value (""), not NULL.
+	isTextType := colType == "text" ||
+		strings.HasPrefix(colType, "character varying") ||
+		strings.HasPrefix(colType, "varchar") ||
+		strings.HasPrefix(colType, "char(") ||
+		colType == "char"
+
+	// For all other types, an empty string in a CSV cell means SQL NULL
+	// (the value was absent / not set).
+	if value == "" && !isTextType {
+		return nil
+	}
 
 	// Handle JSON and JSONB types
 	if colType == "json" || colType == "jsonb" {

@@ -901,10 +901,20 @@ func (m *MySQLManager) importCSV(table Table, csvPath string) error {
 
 // processCSVValue converts a raw CSV string to a typed Go value for MySQL.
 func (m *MySQLManager) processCSVValue(value, columnType string) interface{} {
-	if value == "" || value == "NULL" || value == "null" {
+	// Explicit NULL markers always map to SQL NULL.
+	if value == "NULL" || value == "null" {
 		return nil
 	}
 	ct := strings.ToLower(columnType)
+
+	// For text-family types, an empty string is a valid value (""), not NULL.
+	isTextType := ct == "text" || ct == "tinytext" || ct == "mediumtext" || ct == "longtext" ||
+		strings.HasPrefix(ct, "varchar") || strings.HasPrefix(ct, "char(") || ct == "char"
+
+	// For all other types, an empty string in a CSV cell means SQL NULL.
+	if value == "" && !isTextType {
+		return nil
+	}
 
 	if ct == "json" {
 		var js interface{}

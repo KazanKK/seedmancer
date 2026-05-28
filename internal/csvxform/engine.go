@@ -53,6 +53,7 @@ func Apply(plan refreshplan.Plan, srcDir, dstDir string, newSchemaJSON []byte) e
 	}
 
 	newCols := parseNewSchemaCols(newSchemaJSON)
+	schemaDefaults := parseSchemaDefaults(newSchemaJSON)
 
 	// Walk all CSVs in srcDir.
 	entries, err := os.ReadDir(srcDir)
@@ -78,9 +79,10 @@ func Apply(plan refreshplan.Plan, srcDir, dstDir string, newSchemaJSON []byte) e
 		dstPath := filepath.Join(dstDir, e.Name())
 
 		ops := tableOpsMap[tableName]
-		colOrder := newCols[tableName] // desired output column order
+		colOrder := newCols[tableName]
+		colDefaults := schemaDefaults[tableName]
 
-		if err := transformCSV(srcPath, dstPath, tableName, ops, colOrder); err != nil {
+		if err := transformCSV(srcPath, dstPath, tableName, ops, colOrder, colDefaults); err != nil {
 			return fmt.Errorf("transforming %s: %w", tableName, err)
 		}
 	}
@@ -93,8 +95,9 @@ func Apply(plan refreshplan.Plan, srcDir, dstDir string, newSchemaJSON []byte) e
 			continue // already handled above
 		}
 		colOrder := newCols[tableName]
+		colDefaults := schemaDefaults[tableName]
 		dstPath := filepath.Join(dstDir, tableName+".csv")
-		if err := transformCSV("", dstPath, tableName, ops, colOrder); err != nil {
+		if err := transformCSV("", dstPath, tableName, ops, colOrder, colDefaults); err != nil {
 			return fmt.Errorf("creating %s: %w", tableName, err)
 		}
 	}
@@ -104,8 +107,9 @@ func Apply(plan refreshplan.Plan, srcDir, dstDir string, newSchemaJSON []byte) e
 
 // transformCSV reads srcPath (empty string = create new file), applies ops
 // row-by-row, and writes the result to dstPath. colOrder controls the output
-// header; if nil the existing header order is preserved.
-func transformCSV(srcPath, dstPath, tableName string, ops []refreshplan.Operation, colOrder []string) error {
+// header; if nil the existing header order is preserved. colDefaults maps
+// column name to its DB default string, used by strategy=default.
+func transformCSV(srcPath, dstPath, tableName string, ops []refreshplan.Operation, colOrder []string, colDefaults map[string]string) error {
 	// Separate ops by kind for efficient dispatch.
 	var (
 		drops      = map[string]bool{}
@@ -229,7 +233,7 @@ func transformCSV(srcPath, dstPath, tableName string, ops []refreshplan.Operatio
 		}
 		for col, op := range addCols {
 			if _, exists := rowMap[col]; !exists {
-				rowMap[col] = generateValue(op)
+				rowMap[col] = generateValue(op, colDefaults)
 			}
 		}
 
@@ -250,7 +254,7 @@ func transformCSV(srcPath, dstPath, tableName string, ops []refreshplan.Operatio
 	return nil
 }
 
-func generateValue(op refreshplan.Operation) string {
+func generateValue(op refreshplan.Operation, colDefaults map[string]string) string {
 	switch op.Op {
 	case refreshplan.OpGenerateUUID:
 		return newUUID()
@@ -263,7 +267,12 @@ func generateValue(op refreshplan.Operation) string {
 	case refreshplan.StrategyTimestamp:
 		return time.Now().UTC().Format(time.RFC3339)
 	case refreshplan.StrategyDefault:
-		return "" // will use DB default on seed
+		if colDefaults != nil {
+			if def, ok := colDefaults[op.Column]; ok {
+				return def
+			}
+		}
+		return ""
 	case refreshplan.StrategyEmpty:
 		return ""
 	case refreshplan.StrategyConstant:
@@ -310,10 +319,50 @@ func rawToString(v json.RawMessage) string {
 	return string(v)
 }
 
+// parseSchemaDefaults returns a map of table -> column -> DB default string.
+// The default is the raw DB default value stringified (e.g. "" for DEFAULT '',
+// "0" for DEFAULT 0). Missing or null defaults produce no entry in the map.
+func parseSchemaDefaults(schemaJSON []byte) map[string]map[string]string {
+	result := map[string]map[string]string{}
+	if len(schemaJSON) == 0 {
+		return result
+	}
+	var raw struct {
+		Tables []struct {
+			Name    string `json:"name"`
+			Columns []struct {
+				Name    string          `json:"name"`
+				Default json.RawMessage `json:"default"`
+			} `json:"columns"`
+		} `json:"tables"`
+	}
+	if err := json.Unmarshal(schemaJSON, &raw); err != nil {
+		return result
+	}
+	for _, t := range raw.Tables {
+		colDefaults := map[string]string{}
+		for _, c := range t.Columns {
+			if len(c.Default) == 0 || string(c.Default) == "null" {
+				continue
+			}
+			// Unwrap JSON string; keep numbers/booleans as their literal text.
+			var s string
+			if err := json.Unmarshal(c.Default, &s); err == nil {
+				colDefaults[c.Name] = s
+			} else {
+				colDefaults[c.Name] = string(c.Default)
+			}
+		}
+		if len(colDefaults) > 0 {
+			result[t.Name] = colDefaults
+		}
+	}
+	return result
+}
+
 // parseNewSchemaCols returns a map of table -> ordered column names from schema.json.
 // Generated columns are excluded (they don't appear in CSVs).
-func parseNewSchemaCols(schemaJSON []byte) map[string][]string {
-	result := map[string][]string{}
+func parseNewSchemaCols(schemaJSON []byte) map[string][]string {	result := map[string][]string{}
 	if len(schemaJSON) == 0 {
 		return result
 	}
