@@ -66,16 +66,16 @@ func RefreshCommand() *cli.Command {
 }
 
 func runRefreshOne(c *cli.Context, scenarioArg string) error {
-	planFile := c.String("plan-file")
-
+	// Step 1: always build the plan first (PlanOnly=true) so we can show it
+	// before asking the user to confirm.
 	out, err := RunRefresh(c.Context, RefreshInput{
 		Scenario:  scenarioArg,
 		Revision:  c.String("revision"),
 		UseStable: c.Bool("stable"),
 		Env:       c.String("env"),
 		DBURL:     c.String("db-url"),
-		PlanOnly:  c.Bool("plan"),
-		PlanFile:  planFile,
+		PlanOnly:  true,
+		PlanFile:  c.String("plan-file"),
 		Yes:       c.Bool("yes"),
 		AI:        c.Bool("ai"),
 	})
@@ -87,21 +87,40 @@ func runRefreshOne(c *cli.Context, scenarioArg string) error {
 		return outputJSON(out)
 	}
 
-	// Human-readable output.
+	// Step 2: print drift summary + full operation list.
 	ui.Title(fmt.Sprintf("refresh %s @ %s", out.Scenario, out.BaseRevision))
 	printDriftSummary(out.DriftReport)
-
-	if out.PlanOnly {
+	if out.DriftReport.HasDrift {
 		printPlan(out.Plan)
+	}
+
+	// Step 3: --plan flag or no drift → preview only, stop here.
+	if c.Bool("plan") || !out.DriftReport.HasDrift {
 		return nil
 	}
 
-	if out.NewRevision == "" {
-		ui.Info("No new revision created (nothing to apply).")
-		return nil
+	// Step 4: confirm before applying (skipped with --yes or --json).
+	if !c.Bool("yes") {
+		if !confirmApply(len(out.Plan.Operations), out.BaseRevision) {
+			ui.Info("Aborted.")
+			return nil
+		}
 	}
 
-	ui.Success("Created %s %s", out.Scenario, out.NewRevision)
+	// Step 5: apply the plan.
+	applyOut, err := RunApplyRefreshPlan(c.Context, ApplyRefreshPlanInput{
+		Scenario:  scenarioArg,
+		Revision:  c.String("revision"),
+		UseStable: c.Bool("stable"),
+		Env:       c.String("env"),
+		DBURL:     c.String("db-url"),
+		Plan:      out.Plan,
+	})
+	if err != nil {
+		return err
+	}
+
+	ui.Success("Created %s %s", out.Scenario, applyOut.NewRevision)
 	ui.Info("Run:  seedmancer seed %s", out.Scenario)
 	return nil
 }
@@ -187,27 +206,95 @@ func printDriftSummary(r driftreport.Report) {
 
 func printPlan(p refreshplan.Plan) {
 	if len(p.Operations) == 0 {
-		ui.Info("Plan: (empty — nothing to do)")
+		ui.Info("Operations: (empty — nothing to do)")
 		return
 	}
-	ui.Info("Plan:")
-	for i, op := range p.Operations {
-		line := fmt.Sprintf("  [%d] %s %s", i+1, op.Op, op.Table)
+
+	// Pre-calculate column widths for alignment.
+	maxTarget, maxOp := 0, 0
+	for _, op := range p.Operations {
+		target := op.Table
 		if op.Column != "" {
-			line += "." + op.Column
+			target += "." + op.Column
 		}
-		if op.Strategy != "" {
-			line += " strategy=" + string(op.Strategy)
+		if len(target) > maxTarget {
+			maxTarget = len(target)
 		}
-		v := op.ValueString()
-		if v != "" {
-			line += fmt.Sprintf(" value=%q", v)
+		if len(string(op.Op)) > maxOp {
+			maxOp = len(string(op.Op))
 		}
-		if op.Source != "" {
-			line += " [" + string(op.Source) + "]"
-		}
-		ui.Info("%s", line)
 	}
+
+	ui.Info("Operations (%d):", len(p.Operations))
+	for _, op := range p.Operations {
+		symbol := "~"
+		switch op.Op {
+		case refreshplan.OpAddColumn, refreshplan.OpCreateRow,
+			refreshplan.OpGenerateUUID, refreshplan.OpGenerateTimestamp:
+			symbol = "+"
+		case refreshplan.OpDropColumn:
+			symbol = "-"
+		case "":
+			symbol = "✗"
+		}
+
+		target := op.Table
+		if op.Column != "" {
+			target += "." + op.Column
+		}
+
+		detail := ""
+		if op.Strategy != "" {
+			detail += "strategy=" + string(op.Strategy)
+		}
+		if v := op.ValueString(); v != "" {
+			if detail != "" {
+				detail += " "
+			}
+			detail += fmt.Sprintf("value=%q", v)
+		}
+		if op.FromColumn != "" {
+			if detail != "" {
+				detail += " "
+			}
+			detail += "from=" + op.FromColumn
+		}
+		if op.RefTable != "" {
+			if detail != "" {
+				detail += " "
+			}
+			detail += fmt.Sprintf("ref=%s.%s", op.RefTable, op.RefColumn)
+		}
+
+		src := ""
+		if op.Source != "" {
+			src = "[" + string(op.Source) + "]"
+		} else if op.Op == "" {
+			src = "[breaking]"
+		}
+
+		opStr := string(op.Op)
+		if opStr == "" {
+			opStr = "manual"
+		}
+
+		ui.Info("  %s %-*s  %-*s  %-30s %s",
+			symbol,
+			maxTarget, target,
+			maxOp, opStr,
+			detail,
+			src,
+		)
+	}
+}
+
+// confirmApply prints a prompt and returns true only if the user types "y" or "yes".
+func confirmApply(opCount int, baseRev string) bool {
+	fmt.Fprintf(os.Stderr, "\nApply %d operation(s) from %s? [y/N]: ", opCount, baseRev)
+	scanner := bufio.NewScanner(os.Stdin)
+	scanner.Scan()
+	ans := strings.TrimSpace(strings.ToLower(scanner.Text()))
+	return ans == "y" || ans == "yes"
 }
 
 // ─── Runners ─────────────────────────────────────────────────────────────────
