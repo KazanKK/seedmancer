@@ -320,8 +320,10 @@ func rawToString(v json.RawMessage) string {
 }
 
 // parseSchemaDefaults returns a map of table -> column -> DB default string.
-// The default is the raw DB default value stringified (e.g. "" for DEFAULT '',
-// "0" for DEFAULT 0). Missing or null defaults produce no entry in the map.
+// The default is the actual value to write into a CSV cell (e.g. "[]" for a
+// json column with DEFAULT '[]', "" for TEXT DEFAULT ''). Missing or null
+// defaults, and function-call defaults like now() or nextval(), produce no
+// entry in the map.
 func parseSchemaDefaults(schemaJSON []byte) map[string]map[string]string {
 	result := map[string]map[string]string{}
 	if len(schemaJSON) == 0 {
@@ -348,16 +350,51 @@ func parseSchemaDefaults(schemaJSON []byte) map[string]map[string]string {
 			// Unwrap JSON string; keep numbers/booleans as their literal text.
 			var s string
 			if err := json.Unmarshal(c.Default, &s); err == nil {
-				colDefaults[c.Name] = s
+				// s is a Go string — may still be a PG expression like '[]'::json
+				s = unquotePGDefault(s)
 			} else {
-				colDefaults[c.Name] = string(c.Default)
+				// Non-string JSON (number, bool, array, object) — use as-is.
+				s = string(c.Default)
 			}
+			if s == "" {
+				continue
+			}
+			colDefaults[c.Name] = s
 		}
 		if len(colDefaults) > 0 {
 			result[t.Name] = colDefaults
 		}
 	}
 	return result
+}
+
+// unquotePGDefault normalises a PostgreSQL default expression into a plain
+// CSV-safe value:
+//
+//   - '[]'::json     → []
+//   - '{}'::jsonb    → {}
+//   - ''::text / ''  → (empty string, returned as "")
+//   - 0              → 0
+//   - now()          → "" (function call — no static value)
+//   - nextval(...)   → "" (sequence — not a static value)
+func unquotePGDefault(s string) string {
+	// Strip trailing ::typename cast (e.g. ::json, ::jsonb, ::text, ::integer).
+	if idx := strings.LastIndex(s, "::"); idx >= 0 {
+		s = s[:idx]
+	}
+	s = strings.TrimSpace(s)
+	// Single-quoted string literal: 'value' → value (unescape '' → ').
+	if len(s) >= 2 && s[0] == '\'' && s[len(s)-1] == '\'' {
+		inner := s[1 : len(s)-1]
+		return strings.ReplaceAll(inner, "''", "'")
+	}
+	// Function call or identifier (now(), nextval, true, false, etc.) that
+	// starts with a letter — these are not static seeded values.
+	if len(s) > 0 && ((s[0] >= 'a' && s[0] <= 'z') || (s[0] >= 'A' && s[0] <= 'Z')) {
+		return ""
+	}
+	// Numeric literal, JSON array/object literal, boolean — return as-is.
+	return s
 }
 
 // parseNewSchemaCols returns a map of table -> ordered column names from schema.json.
