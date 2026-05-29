@@ -368,32 +368,48 @@ func parseSchemaDefaults(schemaJSON []byte) map[string]map[string]string {
 	return result
 }
 
-// unquotePGDefault normalises a PostgreSQL default expression into a plain
-// CSV-safe value:
+// unquotePGDefault normalises a database default expression into a plain
+// CSV-safe static value. Works for both PostgreSQL and MySQL defaults.
 //
-//   - '[]'::json     → []
-//   - '{}'::jsonb    → {}
-//   - ''::text / ''  → (empty string, returned as "")
-//   - 0              → 0
-//   - now()          → "" (function call — no static value)
-//   - nextval(...)   → "" (sequence — not a static value)
+//   - '[]'::jsonb          → []
+//   - '{}'::jsonb          → {}
+//   - ''::text             → (empty string)
+//   - false / true         → false / true  (PG boolean literal)
+//   - active               → active        (MySQL plain enum literal)
+//   - 0 / 3.14             → 0 / 3.14
+//   - now()                → ""  (function call — no static value)
+//   - CURRENT_TIMESTAMP    → ""  (dynamic keyword — no static value)
+//   - nextval(...)         → ""  (sequence — not a static value)
 func unquotePGDefault(s string) string {
-	// Strip trailing ::typename cast (e.g. ::json, ::jsonb, ::text, ::integer).
+	// Strip trailing PostgreSQL ::typename cast (e.g. ::json, ::jsonb, ::text).
 	if idx := strings.LastIndex(s, "::"); idx >= 0 {
 		s = s[:idx]
 	}
 	s = strings.TrimSpace(s)
+
 	// Single-quoted string literal: 'value' → value (unescape '' → ').
 	if len(s) >= 2 && s[0] == '\'' && s[len(s)-1] == '\'' {
 		inner := s[1 : len(s)-1]
 		return strings.ReplaceAll(inner, "''", "'")
 	}
-	// Function call or identifier (now(), nextval, true, false, etc.) that
-	// starts with a letter — these are not static seeded values.
-	if len(s) > 0 && ((s[0] >= 'a' && s[0] <= 'z') || (s[0] >= 'A' && s[0] <= 'Z')) {
+
+	// Any expression containing "(" is a function call — no static value.
+	if strings.Contains(s, "(") {
 		return ""
 	}
-	// Numeric literal, JSON array/object literal, boolean — return as-is.
+
+	// Known dynamic SQL keywords that have no usable static CSV value.
+	// Checked case-insensitively after the cast has been stripped.
+	lower := strings.ToLower(s)
+	switch lower {
+	case "current_timestamp", "current_date", "current_time",
+		"current_user", "localtime", "localtimestamp",
+		"now", "nextval", "gen_random_uuid", "uuid_generate":
+		return ""
+	}
+
+	// Everything else is a static value: boolean literals (true/false),
+	// numeric literals, MySQL plain enum identifiers, JSON arrays/objects, etc.
 	return s
 }
 

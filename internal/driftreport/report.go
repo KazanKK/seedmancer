@@ -264,9 +264,10 @@ func classify(ch schemadiff.Change, newIdx, oldIdx map[colKey]rawColumnForDrift,
 			ac.AutoReason = "nullable column — fill with empty"
 			ac.Suggestion = &OpSuggestion{Op: "add_column", Strategy: "constant", Value: ""}
 		} else if hasDefault {
+			strategy := detectDefaultStrategy(col.Default, col.Type)
 			ac.Category = Auto
-			ac.AutoReason = "column has a default — fill with default"
-			ac.Suggestion = &OpSuggestion{Op: "add_column", Strategy: "default"}
+			ac.AutoReason = "column has a default — fill with " + strategy
+			ac.Suggestion = &OpSuggestion{Op: "add_column", Strategy: strategy}
 		} else if col.ForeignKey != nil {
 			ac.Category = Decision
 			ac.AutoReason = fmt.Sprintf("required FK column references %s.%s — need a valid parent row", col.ForeignKey.Table, col.ForeignKey.Column)
@@ -361,4 +362,52 @@ func boolVal(b *bool) bool {
 		return false
 	}
 	return *b
+}
+
+// detectDefaultStrategy returns the refresh-plan strategy that best fits a
+// column default. It handles both PostgreSQL (with ::cast suffixes and
+// single-quoted literals) and MySQL (plain raw strings).
+//
+//   - Dynamic functions (now(), CURRENT_TIMESTAMP, gen_random_uuid …) → "timestamp" or "uuid"
+//   - Static values (false, 0, 'CUSTOM'::text, active …)              → "default"
+func detectDefaultStrategy(raw json.RawMessage, colType string) string {
+	// Decode the raw JSON value into a plain string.
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		// Non-string JSON (number, bool, array) — always static.
+		return "default"
+	}
+
+	// Strip PostgreSQL ::typename cast suffix.
+	if idx := strings.LastIndex(s, "::"); idx >= 0 {
+		s = s[:idx]
+	}
+	s = strings.TrimSpace(s)
+
+	// Normalise to lower-case for keyword matching.
+	lower := strings.ToLower(s)
+
+	// UUID-generating functions.
+	if strings.Contains(lower, "gen_random_uuid") || strings.Contains(lower, "uuid_generate") {
+		return "uuid"
+	}
+
+	// Timestamp/date dynamic defaults — function calls or bare keywords.
+	isTimestampDynamic := strings.Contains(lower, "(") || // any function call
+		lower == "current_timestamp" ||
+		lower == "current_date" ||
+		lower == "current_time" ||
+		lower == "localtime" ||
+		lower == "localtimestamp" ||
+		lower == "now"
+
+	if isTimestampDynamic {
+		ct := strings.ToLower(colType)
+		if strings.Contains(ct, "time") || strings.Contains(ct, "date") {
+			return "timestamp"
+		}
+		// For non-timestamp columns with a function default (unusual), fall through.
+	}
+
+	return "default"
 }

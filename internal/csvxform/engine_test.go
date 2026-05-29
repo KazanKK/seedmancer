@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/KazanKK/seedmancer/internal/csvxform"
@@ -190,6 +191,171 @@ func TestApply_noOps_copiesUnchanged(t *testing.T) {
 	if rows[1][1] != "99.99" {
 		t.Errorf("expected total=99.99 preserved, got %q", rows[1][1])
 	}
+}
+
+// TestApply_addColumn_default_types verifies that strategy=default correctly
+// extracts the static value from various DB default formats and writes it into
+// the CSV — covering PostgreSQL cast syntax, plain booleans, integers, and
+// MySQL plain-string enum defaults.
+func TestApply_addColumn_default_types(t *testing.T) {
+	cases := []struct {
+		name        string
+		schemaJSON  string // full schema JSON for the table
+		col         string // column being added
+		wantValue   string // expected CSV cell value
+	}{
+		{
+			name: "pg_jsonb_default_array",
+			schemaJSON: makeSchemaWithDefault("items", []colDef{
+				{name: "id"},
+				{name: "tags", defaultVal: `"'[]'::jsonb"`},
+			}),
+			col:       "tags",
+			wantValue: "[]",
+		},
+		{
+			name: "pg_text_empty_default",
+			schemaJSON: makeSchemaWithDefault("items", []colDef{
+				{name: "id"},
+				{name: "bio", defaultVal: `"''::text"`},
+			}),
+			col:       "bio",
+			wantValue: "",
+		},
+		{
+			name: "pg_boolean_false_default",
+			schemaJSON: makeSchemaWithDefault("items", []colDef{
+				{name: "id"},
+				{name: "active", defaultVal: `"false"`},
+			}),
+			col:       "active",
+			wantValue: "false",
+		},
+		{
+			name: "pg_boolean_true_default",
+			schemaJSON: makeSchemaWithDefault("items", []colDef{
+				{name: "id"},
+				{name: "published", defaultVal: `"true"`},
+			}),
+			col:       "published",
+			wantValue: "true",
+		},
+		{
+			name: "pg_integer_zero_default",
+			schemaJSON: makeSchemaWithDefault("items", []colDef{
+				{name: "id"},
+				{name: "count", defaultVal: `"0"`},
+			}),
+			col:       "count",
+			wantValue: "0",
+		},
+		{
+			name: "pg_enum_with_cast",
+			schemaJSON: makeSchemaWithDefault("items", []colDef{
+				{name: "id"},
+				{name: "status", defaultVal: `"'ACTIVE'::\"Status\""`},
+			}),
+			col:       "status",
+			wantValue: "ACTIVE",
+		},
+		{
+			name: "mysql_plain_enum_default",
+			schemaJSON: makeSchemaWithDefault("items", []colDef{
+				{name: "id"},
+				{name: "role", defaultVal: `"member"`},
+			}),
+			col:       "role",
+			wantValue: "member",
+		},
+		{
+			name: "mysql_boolean_tinyint_zero",
+			schemaJSON: makeSchemaWithDefault("items", []colDef{
+				{name: "id"},
+				{name: "enabled", defaultVal: `"0"`},
+			}),
+			col:       "enabled",
+			wantValue: "0",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srcDir := t.TempDir()
+			dstDir := t.TempDir()
+
+			writeCSV(t, filepath.Join(srcDir, "items.csv"), [][]string{
+				{"id"},
+				{"1"},
+			})
+
+			plan := refreshplan.Plan{
+				Operations: []refreshplan.Operation{
+					{
+						Op:       refreshplan.OpAddColumn,
+						Table:    "items",
+						Column:   tc.col,
+						Strategy: refreshplan.StrategyDefault,
+					},
+				},
+			}
+
+			if err := csvxform.Apply(plan, srcDir, dstDir, []byte(tc.schemaJSON)); err != nil {
+				t.Fatalf("Apply: %v", err)
+			}
+
+			rows := readCSV(t, filepath.Join(dstDir, "items.csv"))
+			if len(rows) < 2 {
+				t.Fatal("expected header + data row")
+			}
+			// Find the column index in the header.
+			colIdx := -1
+			for i, h := range rows[0] {
+				if h == tc.col {
+					colIdx = i
+					break
+				}
+			}
+			if colIdx < 0 {
+				t.Fatalf("column %q not found in header %v", tc.col, rows[0])
+			}
+			got := rows[1][colIdx]
+			if got != tc.wantValue {
+				t.Errorf("column %q: got %q, want %q", tc.col, got, tc.wantValue)
+			}
+		})
+	}
+}
+
+// colDef is a column descriptor for makeSchemaWithDefault.
+type colDef struct {
+	name       string
+	defaultVal string // raw JSON value, e.g. `"false"` or `"'[]'::jsonb"` — empty = no default
+}
+
+// makeSchemaWithDefault builds a schema JSON that includes column defaults.
+func makeSchemaWithDefault(table string, cols []colDef) string {
+	type colShape struct {
+		Name    string `json:"name"`
+		Default string `json:"default,omitempty"`
+	}
+	type tableShape struct {
+		Name    string     `json:"name"`
+		Columns []colShape `json:"columns"`
+	}
+	type schema struct {
+		Tables []tableShape `json:"tables"`
+	}
+	// Build JSON manually to preserve raw default values.
+	colParts := make([]string, len(cols))
+	for i, c := range cols {
+		if c.defaultVal != "" {
+			colParts[i] = `{"name":` + `"` + c.name + `"` + `,"default":` + c.defaultVal + `}`
+		} else {
+			colParts[i] = `{"name":"` + c.name + `"}`
+		}
+	}
+	colsJSON := "[" + strings.Join(colParts, ",") + "]"
+	return `{"tables":[{"name":"` + table + `","columns":` + colsJSON + `}]}`
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
