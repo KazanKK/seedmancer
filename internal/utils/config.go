@@ -42,6 +42,11 @@ type Config struct {
 
 	APIToken string `yaml:"api_token,omitempty"`
 
+	// ExcludeTables lists table names that should be excluded from AI-driven
+	// generate and refresh operations. Use this for framework-managed system
+	// tables (e.g. _prisma_migrations) that should never be seeded with fake data.
+	ExcludeTables []string `yaml:"exclude_tables,omitempty"`
+
 	// Refresh contains user-defined rules for automating schema-drift resolution.
 	Refresh RefreshConfig `yaml:"refresh,omitempty"`
 }

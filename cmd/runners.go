@@ -1,9 +1,12 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -352,32 +355,6 @@ func RunListSchemas(_ context.Context, in ListSchemasInput) (ListSchemasOutput, 
 }
 
 // ─── describe_schema ──────────────────────────────────────────────────────────
-
-type generateEnum struct {
-	Name   string   `json:"name"`
-	Values []string `json:"values"`
-}
-
-type generateTable struct {
-	Name    string           `json:"name"`
-	Columns []generateColumn `json:"columns"`
-}
-
-type generateColumn struct {
-	Name       string              `json:"name"`
-	Type       string              `json:"type"`
-	Nullable   bool                `json:"nullable"`
-	IsPrimary  bool                `json:"isPrimary"`
-	IsUnique   bool                `json:"isUnique"`
-	Default    string              `json:"default,omitempty"`
-	ForeignKey *generateForeignKey `json:"foreignKey,omitempty"`
-	Enum       string              `json:"enum,omitempty"`
-}
-
-type generateForeignKey struct {
-	Table  string `json:"table"`
-	Column string `json:"column"`
-}
 
 type DescribeSchemaInput struct {
 	Ref string `json:"ref" jsonschema:"Fingerprint prefix (≥4 chars) or full SHA-256 fingerprint"`
@@ -1324,6 +1301,181 @@ func pickExportTarget(cfg utils.Config, envName, dbURL string) (utils.NamedEnv, 
 	return cfg.ResolveEnv(envName)
 }
 
+// ─── generate (cloud AI) ──────────────────────────────────────────────────────
+
+// GenerateInput covers the non-interactive subset of `seedmancer generate`.
+// The schema fingerprint is read from the scenario's existing latest
+// revision (or, when the scenario doesn't exist yet, from the inherit
+// base). MCP clients always pass a scenario path so the result is a
+// proper revision rather than a free-form dataset folder.
+type GenerateInput struct {
+	Prompt      string `json:"prompt" jsonschema:"Natural-language description of the data to generate"`
+	Scenario    string `json:"scenario" jsonschema:"Scenario path for the new revision (e.g. billing/pro)"`
+	Inherit     string `json:"inherit,omitempty" jsonschema:"Scenario whose latest revision provides the schema fingerprint"`
+	Description string `json:"description,omitempty" jsonschema:"Description stored on the new revision manifest"`
+	Token       string `json:"token,omitempty" jsonschema:"API token override"`
+	Env         string `json:"env,omitempty" jsonschema:"Named environment to connect to when auto-exporting schema"`
+	DBURL       string `json:"dbUrl,omitempty" jsonschema:"Ad-hoc database URL when auto-exporting schema"`
+}
+
+// GenerateOutput summarises the freshly created revision. Path points at
+// the data folder so callers can hand it straight to seed.
+type GenerateOutput struct {
+	Scenario string `json:"scenario"`
+	Revision string `json:"revision"`
+	Schema   string `json:"schema"`
+	Path     string `json:"path"`
+}
+
+// RunGenerate uses the Seedmancer cloud API to generate a full SQL dataset
+// from a schema + prompt, then materialises it as a new revision by running
+// the SQL locally via RunGenerateLocal.
+func RunGenerate(ctx context.Context, in GenerateInput) (GenerateOutput, error) {
+	configPath, err := utils.FindConfigFile()
+	if err != nil {
+		return GenerateOutput{}, err
+	}
+	projectRoot := filepath.Dir(configPath)
+	cfg, err := utils.LoadConfig(configPath)
+	if err != nil {
+		return GenerateOutput{}, err
+	}
+	if strings.TrimSpace(in.Prompt) == "" {
+		return GenerateOutput{}, fmt.Errorf("prompt cannot be empty")
+	}
+	scenarioPath, err := scenario.Normalize(in.Scenario)
+	if err != nil {
+		return GenerateOutput{}, err
+	}
+
+	token, err := utils.ResolveAPIToken(in.Token)
+	if err != nil {
+		return GenerateOutput{}, err
+	}
+
+	// Always export the current database schema so we get the freshest type
+	// information (allowedValues, FK graph, etc.) regardless of any cached
+	// fingerprint stored with a previous revision.
+	target, tErr := pickExportTarget(cfg, in.Env, in.DBURL)
+	if tErr != nil {
+		return GenerateOutput{}, fmt.Errorf("cannot connect to DB to export schema: %w", tErr)
+	}
+	fp, raw, fErr := fingerprintCurrentDB(target)
+	if fErr != nil {
+		return GenerateOutput{}, fmt.Errorf("exporting schema from DB: %w", fErr)
+	}
+	fpShortVal := utils.FingerprintShort(fp)
+	schemaDir := scenario.SchemaStoreDir(projectRoot, cfg.StoragePath, fpShortVal)
+	if err := os.MkdirAll(schemaDir, 0755); err != nil {
+		return GenerateOutput{}, err
+	}
+	schemaJSONDest := scenario.SchemaJSONPath(projectRoot, cfg.StoragePath, fpShortVal)
+	if err := os.WriteFile(schemaJSONDest, raw, 0644); err != nil {
+		return GenerateOutput{}, err
+	}
+
+	// If --inherit is given, record the inherit fingerprint so RunGenerateLocal
+	// can seed the base before applying the generated SQL.
+	var inheritFingerprint string
+	if strings.TrimSpace(in.Inherit) != "" {
+		basePath, err := scenario.Normalize(in.Inherit)
+		if err != nil {
+			return GenerateOutput{}, fmt.Errorf("invalid inherit scenario: %w", err)
+		}
+		baseRev, err := resolveScenarioRevision(projectRoot, cfg.StoragePath, basePath, "", false)
+		if err != nil {
+			return GenerateOutput{}, fmt.Errorf("resolving inherit base %q: %w", basePath, err)
+		}
+		inheritFingerprint = baseRev.Manifest.SchemaFingerprint
+	}
+	_ = inheritFingerprint
+
+	apiSchema, err := buildAPISchema(raw, cfg.ExcludeTables)
+	if err != nil {
+		return GenerateOutput{}, err
+	}
+
+	// Call /generate-sql — synchronous, returns a full SQL script directly.
+	generatedSQL, err := callGenerateSQL(ctx, utils.GetBaseURL(), token, apiSchema, in.Prompt)
+	if err != nil {
+		return GenerateOutput{}, err
+	}
+
+	// Reorder INSERT blocks by FK topology so parent tables always come before
+	// child tables, regardless of the order the AI chose.
+	generatedSQL = reorderInsertsByFK(generatedSQL, buildFKGraph(raw))
+
+	// Save draft immediately so it is inspectable if execution fails.
+	scenarioDir := scenario.ScenarioDir(projectRoot, cfg.StoragePath, scenarioPath)
+	draftPath := filepath.Join(scenarioDir, "generate-draft.sql")
+	_ = os.WriteFile(draftPath, []byte(generatedSQL), 0644)
+
+	// Run the SQL locally and snapshot as a new revision.
+	localOut, err := RunGenerateLocal(ctx, GenerateLocalInput{
+		SQL:         generatedSQL,
+		Scenario:    scenarioPath,
+		Inherit:     in.Inherit,
+		Env:         in.Env,
+		DBURL:       in.DBURL,
+		Description: in.Description,
+	})
+	if err != nil {
+		return GenerateOutput{}, err
+	}
+	// Clean up the draft on success — the SQL lives in revDir/dataset.sql.
+	_ = os.Remove(draftPath)
+	return GenerateOutput{
+		Scenario: localOut.Scenario,
+		Revision: localOut.Revision,
+		Schema:   localOut.Schema,
+		Path:     localOut.Path,
+	}, nil
+}
+
+// callGenerateSQL calls the /generate-sql endpoint and returns the full
+// idempotent SQL script produced by the AI.
+func callGenerateSQL(ctx context.Context, baseURL, token string, schema generateSchema, prompt string) (string, error) {
+	payload := struct {
+		Schema generateSchema `json:"schema"`
+		Prompt string         `json:"prompt,omitempty"`
+	}{Schema: schema, Prompt: prompt}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	req, err := http.NewRequestWithContext(ctx, "POST", baseURL+"/generate-sql", bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", utils.BearerAPIToken(token))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == http.StatusUnauthorized {
+		return "", utils.ErrInvalidAPIToken
+	}
+	if resp.StatusCode == http.StatusPaymentRequired {
+		return "", formatLimitError(respBody)
+	}
+	if resp.StatusCode >= 400 {
+		return "", fmt.Errorf("generate-sql failed (HTTP %d): %s", resp.StatusCode, string(respBody))
+	}
+	var result struct {
+		SQL string `json:"sql"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return "", fmt.Errorf("parsing generate-sql response: %v", err)
+	}
+	if strings.TrimSpace(result.SQL) == "" {
+		return "", fmt.Errorf("generate-sql returned empty SQL")
+	}
+	return result.SQL, nil
+}
+
 // ─── generate local ───────────────────────────────────────────────────────────
 
 // GenerateLocalInput is the input for RunGenerateLocal. The agent provides
@@ -1370,24 +1522,15 @@ func DatasetSQLPath(revDir string) string {
 }
 
 // RunGenerateLocal materialises a new revision by:
-//  1. Seeding the inherit base into the configured local env (CSV → COPY,
-//     same path as `seed_database`).
+//  1. (Optional) Seeding the inherit base into the configured local env.
 //  2. Applying the agent-written SQL on top of that state inside a single
-//     transaction. A failure rolls back, leaving the env at the inherit
-//     baseline so the next attempt starts from a known state.
+//     transaction.
 //  3. Exporting the resulting tables back to CSV as a new revision under
 //     `scenario`. Pointers.latest advances to the new revision.
-//  4. Saving the raw SQL inside the revision as dataset.sql so agents can
-//     retrieve it later via get_dataset_sql instead of re-reading CSVs.
+//  4. Saving the raw SQL inside the revision as dataset.sql.
 func RunGenerateLocal(ctx context.Context, in GenerateLocalInput) (GenerateLocalOutput, error) {
 	if strings.TrimSpace(in.SQL) == "" {
 		return GenerateLocalOutput{}, fmt.Errorf("sql cannot be empty")
-	}
-	if strings.TrimSpace(in.Inherit) == "" {
-		return GenerateLocalOutput{}, fmt.Errorf(
-			"inherit is required — generate_dataset_local always seeds a base scenario first " +
-				"(run `seedmancer export <baseline>` and pass inherit=<baseline>)",
-		)
 	}
 
 	configPath, err := utils.FindConfigFile()
@@ -1404,61 +1547,54 @@ func RunGenerateLocal(ctx context.Context, in GenerateLocalInput) (GenerateLocal
 	if err != nil {
 		return GenerateLocalOutput{}, err
 	}
-	inheritPath, err := scenario.Normalize(in.Inherit)
-	if err != nil {
-		return GenerateLocalOutput{}, fmt.Errorf("invalid inherit scenario: %w", err)
-	}
 
-	// Resolve target env up front so a misconfigured env never wastes a
-	// half-written revision id. dbUrl/env precedence mirrors RunExport.
 	target, err := pickExportTarget(cfg, in.Env, in.DBURL)
 	if err != nil {
 		return GenerateLocalOutput{}, err
 	}
 
-	// Resolve the inherit base before any side effects so a typo doesn't
-	// leave the local env in a half-restored state.
-	baseRev, err := resolveScenarioRevision(projectRoot, cfg.StoragePath, inheritPath, "", false)
-	if err != nil {
-		return GenerateLocalOutput{}, fmt.Errorf("resolving inherit base %q: %w", inheritPath, err)
-	}
-	baseFingerprint := baseRev.Manifest.SchemaFingerprint
-	fpShort := utils.FingerprintShort(baseFingerprint)
+	// Track inherit info separately — only populated when --inherit is given.
+	var baseFingerprint string
+	var inheritedFrom, inheritedRevID string
 
-	// 1) Seed the inherit base into the target env. Reuses the exact same
-	//    CSV → COPY restore path as the seed_database tool so any quirks
-	//    (sequence resets, trigger handling, FK ordering) only have to be
-	//    correct in one place.
-	//    Force: true because generate_dataset_local owns the DB state for
-	//    the duration of the call — the schema fingerprint check that gates
-	//    a regular seed would block legitimate generate calls whenever the
-	//    live DB has any drift from the base. The freshly exported revision
-	//    will reflect the actual DB state regardless.
-	seedOut, err := RunSeed(ctx, SeedInput{
-		Scenario: inheritPath,
-		Env:      target.Name,
-		DBURL:    in.DBURL,
-		Yes:      true,
-		Force:    true,
-	})
-	if err != nil {
-		return GenerateLocalOutput{}, fmt.Errorf("seeding inherit base %q: %w", inheritPath, err)
-	}
-	if seedOut.AnyError {
-		for _, r := range seedOut.Results {
-			if r.Error != "" {
-				return GenerateLocalOutput{}, fmt.Errorf(
-					"seeding inherit base %q failed on env %q: %s",
-					inheritPath, r.Env, r.Error,
-				)
-			}
+	if strings.TrimSpace(in.Inherit) != "" {
+		inheritPath, nErr := scenario.Normalize(in.Inherit)
+		if nErr != nil {
+			return GenerateLocalOutput{}, fmt.Errorf("invalid inherit scenario: %w", nErr)
 		}
-		return GenerateLocalOutput{}, fmt.Errorf("seeding inherit base %q failed", inheritPath)
+		baseRev, rErr := resolveScenarioRevision(projectRoot, cfg.StoragePath, inheritPath, "", false)
+		if rErr != nil {
+			return GenerateLocalOutput{}, fmt.Errorf("resolving inherit base %q: %w", inheritPath, rErr)
+		}
+		baseFingerprint = baseRev.Manifest.SchemaFingerprint
+		inheritedFrom = inheritPath
+		inheritedRevID = baseRev.RevID
+
+		// Seed the inherit base before running the SQL.
+		seedOut, sErr := RunSeed(ctx, SeedInput{
+			Scenario: inheritPath,
+			Env:      target.Name,
+			DBURL:    in.DBURL,
+			Yes:      true,
+			Force:    true,
+		})
+		if sErr != nil {
+			return GenerateLocalOutput{}, fmt.Errorf("seeding inherit base %q: %w", inheritPath, sErr)
+		}
+		if seedOut.AnyError {
+			for _, r := range seedOut.Results {
+				if r.Error != "" {
+					return GenerateLocalOutput{}, fmt.Errorf(
+						"seeding inherit base %q failed on env %q: %s",
+						inheritPath, r.Env, r.Error,
+					)
+				}
+			}
+			return GenerateLocalOutput{}, fmt.Errorf("seeding inherit base %q failed", inheritPath)
+		}
 	}
 
-	// 2) Apply the agent-written SQL on top of the seeded state, wrapped
-	//    in a transaction by ExecSQL. If it fails, the env is left at the
-	//    inherit baseline (clean recovery — caller can re-run).
+	// Apply the agent-written SQL against the current DB state.
 	manager, normalizedURL, err := db.NewManager(target.DatabaseURL)
 	if err != nil {
 		return GenerateLocalOutput{}, err
@@ -1467,10 +1603,35 @@ func RunGenerateLocal(ctx context.Context, in GenerateLocalInput) (GenerateLocal
 		return GenerateLocalOutput{}, fmt.Errorf("connecting to database: %v", err)
 	}
 	if err := manager.ExecSQL(in.SQL); err != nil {
-		return GenerateLocalOutput{}, fmt.Errorf("applying SQL on top of %q: %w", inheritPath, err)
+		if inheritedFrom != "" {
+			return GenerateLocalOutput{}, fmt.Errorf("applying SQL on top of %q: %w", inheritedFrom, err)
+		}
+		return GenerateLocalOutput{}, fmt.Errorf("applying SQL: %w", err)
 	}
 
-	// 3) Materialise the resulting state into a brand-new revision dir.
+	// If we didn't get the fingerprint from an inherit base, export it now.
+	if baseFingerprint == "" {
+		fp, schemaJSON, fErr := fingerprintCurrentDB(target)
+		if fErr != nil {
+			return GenerateLocalOutput{}, fmt.Errorf("fingerprinting current DB: %w", fErr)
+		}
+		baseFingerprint = fp
+		fpShortVal := utils.FingerprintShort(fp)
+		schemaDir := scenario.SchemaStoreDir(projectRoot, cfg.StoragePath, fpShortVal)
+		if mkErr := os.MkdirAll(schemaDir, 0755); mkErr != nil {
+			return GenerateLocalOutput{}, mkErr
+		}
+		schemaJSONDest := scenario.SchemaJSONPath(projectRoot, cfg.StoragePath, fpShortVal)
+		if _, statErr := os.Stat(schemaJSONDest); os.IsNotExist(statErr) {
+			if wErr := os.WriteFile(schemaJSONDest, schemaJSON, 0644); wErr != nil {
+				return GenerateLocalOutput{}, wErr
+			}
+		}
+	}
+
+	fpShort := utils.FingerprintShort(baseFingerprint)
+
+	// Materialise the resulting state into a brand-new revision dir.
 	scenarioDir := scenario.ScenarioDir(projectRoot, cfg.StoragePath, scenarioPath)
 	if err := os.MkdirAll(scenarioDir, 0755); err != nil {
 		return GenerateLocalOutput{}, fmt.Errorf("creating scenario dir: %w", err)
@@ -1485,9 +1646,6 @@ func RunGenerateLocal(ctx context.Context, in GenerateLocalInput) (GenerateLocal
 		return GenerateLocalOutput{}, fmt.Errorf("creating revision data dir: %w", err)
 	}
 
-	// Defer cleanup on the way out — only triggered when we don't reach
-	// the successful return path. This keeps partial revisions off disk
-	// without papering over real errors.
 	success := false
 	defer func() {
 		if !success {
@@ -1507,17 +1665,30 @@ func RunGenerateLocal(ctx context.Context, in GenerateLocalInput) (GenerateLocal
 		return GenerateLocalOutput{}, fmt.Errorf("export produced no CSV files in %s", dataDir)
 	}
 
-	// 3b) Enforce the full + idempotent SQL contract. Every populated
-	//     table must be wiped (TRUNCATE or unconditional DELETE FROM)
-	//     before its INSERTs so dataset.sql is replay-safe on its own.
-	//     The deferred RemoveAll above already cleans up revDir when we
-	//     return an error here, so no manual cleanup is needed.
 	populated := make([]string, 0, len(rowCounts))
 	for t, n := range rowCounts {
 		if n > 0 {
 			populated = append(populated, t)
 		}
 	}
+
+	// Exclude tables that the user has opted out of (e.g. _prisma_migrations).
+	// These tables may have pre-existing rows from the DB but were intentionally
+	// not included in the generated SQL, so the validator should skip them.
+	if len(cfg.ExcludeTables) > 0 {
+		excludeSet := make(map[string]struct{}, len(cfg.ExcludeTables))
+		for _, t := range cfg.ExcludeTables {
+			excludeSet[strings.ToLower(t)] = struct{}{}
+		}
+		filtered := populated[:0]
+		for _, t := range populated {
+			if _, skip := excludeSet[strings.ToLower(t)]; !skip {
+				filtered = append(filtered, t)
+			}
+		}
+		populated = filtered
+	}
+
 	if err := sqlcontract.Validate(in.SQL, populated); err != nil {
 		return GenerateLocalOutput{}, fmt.Errorf(
 			"SQL is not a full, idempotent script — %w; "+
@@ -1527,8 +1698,6 @@ func RunGenerateLocal(ctx context.Context, in GenerateLocalInput) (GenerateLocal
 		)
 	}
 
-	// 4) Persist the SQL alongside the materialised CSVs. dataset.sql is
-	//    the agent-readable source of truth; the CSVs are the seed format.
 	sqlPath := DatasetSQLPath(revDir)
 	if err := os.WriteFile(sqlPath, []byte(in.SQL), 0644); err != nil {
 		return GenerateLocalOutput{}, fmt.Errorf("writing %s: %w", datasetSQLName, err)
@@ -1578,8 +1747,8 @@ func RunGenerateLocal(ctx context.Context, in GenerateLocalInput) (GenerateLocal
 		Tables:             tables,
 		RowCounts:          rowCounts,
 		GeneratorSQLStored: true,
-		InheritedFrom:      inheritPath,
-		InheritedRevision:  baseRev.RevID,
+		InheritedFrom:      inheritedFrom,
+		InheritedRevision:  inheritedRevID,
 		Env:                target.Name,
 	}, nil
 }

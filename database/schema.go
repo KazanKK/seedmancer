@@ -1,16 +1,17 @@
 package db
 
 type Column struct {
-	Name        string      `json:"name"`
-	Type        string      `json:"type"` // Database type (e.g. text, integer, timestamp)
-	Varchar     *string     `json:"varchar,omitempty"`
-	Nullable    bool        `json:"nullable"`
-	Default     interface{} `json:"default,omitempty"`
-	IsPrimary   bool        `json:"isPrimary"`
-	IsUnique    bool        `json:"isUnique"`
-	ForeignKey  *ForeignKey `json:"foreignKey,omitempty"`
-	Enum        string      `json:"enum,omitempty"`
-	IsGenerated bool        `json:"isGenerated,omitempty"` // true for computed/generated/identity columns
+	Name          string      `json:"name"`
+	Type          string      `json:"type"` // Database type (e.g. text, integer, timestamp)
+	Varchar       *string     `json:"varchar,omitempty"`
+	Nullable      bool        `json:"nullable"`
+	Default       interface{} `json:"default,omitempty"`
+	IsPrimary     bool        `json:"isPrimary"`
+	IsUnique      bool        `json:"isUnique"`
+	ForeignKey    *ForeignKey `json:"foreignKey,omitempty"`
+	Enum          string      `json:"enum,omitempty"`
+	IsGenerated   bool        `json:"isGenerated,omitempty"` // true for computed/generated/identity columns
+	AllowedValues []string    `json:"allowedValues,omitempty"` // values extracted from IN-based CHECK constraints
 }
 
 type ForeignKey struct {

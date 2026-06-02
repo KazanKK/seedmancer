@@ -68,21 +68,43 @@ Success criteria:
 	s.AddPrompt(&mcp.Prompt{
 		Name:        "generate_test_data",
 		Title:       "Generate test data",
-		Description: "Generate a plan for creating a new revision under a scenario using a FULL, self-contained, idempotent SQL script.",
+		Description: "Generate a plan for creating a new revision under a scenario using AI (cloud) or a local SQL script.",
 		Arguments: []*mcp.PromptArgument{
 			{Name: "scenario", Description: "Scenario path for the new revision (e.g. 'billing/pro')", Required: true},
-			{Name: "inherit", Description: "REQUIRED base scenario; its latest revision is seeded into the local env before the SQL runs as a safety net (the SQL itself must still be a full script)", Required: true},
+			{Name: "prompt", Description: "Natural-language description of the data to generate (used for cloud AI mode)"},
+			{Name: "inherit", Description: "Base scenario whose latest revision provides the schema fingerprint"},
 		},
 	}, func(ctx context.Context, req *mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
 		args := req.Params.Arguments
 		if args["scenario"] == "" {
 			return nil, fmt.Errorf("scenario argument is required")
 		}
-		if args["inherit"] == "" {
-			return nil, fmt.Errorf("inherit argument is required")
+
+		inheritLine := ""
+		if v := args["inherit"]; v != "" {
+			inheritLine = fmt.Sprintf(", inherit=%q", v)
 		}
 
-		text := fmt.Sprintf(`Goal: synthesize a new revision under scenario %q locally with a FULL,
+		var text string
+		if args["prompt"] != "" {
+			// Cloud AI path
+			text = fmt.Sprintf(`Goal: synthesize a new revision under scenario %q using cloud AI.
+
+Steps:
+1. Call 'describe_schema' on the scenario's existing schema (use list_history first if you need the fingerprint).
+2. Call 'generate_dataset' with prompt=%q, scenario=%q%s.
+3. After it returns, call 'describe_dataset' on the resulting dataset id to preview the generated rows.
+4. Optionally call 'pin_scenario' to mark the revision as stable, or 'push_dataset' to publish.
+
+Success criteria:
+- 'generate_dataset' returns with a non-empty Path and a new revision id.
+- The dataset preview contains rows for every table you care about.`, args["scenario"], args["prompt"], args["scenario"], inheritLine)
+		} else {
+			// Local SQL path
+			if args["inherit"] == "" {
+				return nil, fmt.Errorf("inherit argument is required when prompt is not given")
+			}
+			text = fmt.Sprintf(`Goal: synthesize a new revision under scenario %q locally with a FULL,
 self-contained, idempotent SQL script.
 
 Steps:
@@ -90,23 +112,17 @@ Steps:
 2. Call 'describe_schema' to get exact table and column names for every table you will populate.
 3. If a prior revision exists, call 'list_history' and 'get_dataset_sql' for REFERENCE only.
    Do NOT patch the old SQL with delta statements — REWRITE the whole script.
-4. Call 'generate_dataset_local' with scenario=%q, inherit=%q, and a FULL SQL script:
-     - TRUNCATE TABLE <t> RESTART IDENTITY CASCADE; for every table that will have rows
-       (one combined TRUNCATE with CASCADE is fine and handles FK order automatically).
-     - INSERT INTO <t> (...) VALUES (...); for every row, ordered parents-before-children.
-     - DML only — no DDL.
-   The tool will REJECT the revision if any populated table is missing a leading wipe.
+4. Call 'generate_dataset_local' with scenario=%q, inherit=%q, and a FULL SQL script.
 5. Call 'seed_database' with the scenario path to load the revision into other envs.
 6. Optionally call 'pin_scenario' to mark the revision as stable, or 'push_dataset' to publish.
 
 Success criteria:
-- 'generate_dataset_local' returns with a non-empty Path, SQLPath, and a new revision id.
-- Every populated table in the output's RowCounts has a corresponding TRUNCATE+INSERT pair in the SQL.
-- The revision's dataset.sql round-trips through 'get_dataset_sql' unchanged.
-- Running dataset.sql twice produces the same DB state (idempotency).`, args["scenario"], args["scenario"], args["inherit"])
+- 'generate_dataset_local' returns with a non-empty Path and a new revision id.
+- Every populated table has a corresponding TRUNCATE+INSERT pair in the SQL.`, args["scenario"], args["scenario"], args["inherit"])
+		}
 
 		return &mcp.GetPromptResult{
-			Description: "Generate-test-data playbook (local)",
+			Description: "Generate-test-data playbook",
 			Messages: []*mcp.PromptMessage{
 				{Role: "user", Content: &mcp.TextContent{Text: text}},
 			},

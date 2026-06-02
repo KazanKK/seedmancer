@@ -13,17 +13,14 @@ import (
 	"github.com/urfave/cli/v2"
 )
 
-// GenerateLocalCommand runs an agent-written SQL block on top of an inherit
-// base and snapshots the resulting state as a new revision under the named
-// scenario. Pipeline:
+// GenerateLocalCommand runs an agent-written SQL block, optionally on top of
+// an inherit base, and snapshots the resulting state as a new revision.
+// Pipeline:
 //
-//  1. Seed the inherit base into the configured local env (CSV → COPY,
-//     same path as `seedmancer seed`).
-//  2. Apply the user-provided SQL inside a single transaction. On failure
-//     the env is left at the inherit baseline.
+//  1. (Optional) Seed the inherit base into the configured local env.
+//  2. Apply the user-provided SQL inside a single transaction.
 //  3. Export the resulting tables to CSV under a fresh rNNN revision.
-//  4. Save the raw SQL alongside the CSVs as dataset.sql so agents can
-//     retrieve it later with `seedmancer mcp` get_dataset_sql.
+//  4. Save the raw SQL alongside the CSVs as dataset.sql.
 //
 // Recommended invocation (SQL piped via stdin so it never touches disk):
 //
@@ -37,28 +34,21 @@ func GenerateLocalCommand() *cli.Command {
 		Name:      "generate-local",
 		Usage:     "Generate a scenario revision from a FULL, idempotent SQL script",
 		ArgsUsage: "<scenario>",
-		Description: "Seeds an inherit base into the configured local env, applies your SQL\n" +
-			"on top of it, then exports the resulting tables back to CSV as a new\n" +
-			"rNNN revision. The SQL is stored alongside the CSVs as dataset.sql.\n\n" +
+		Description: "Applies your SQL against the local env, then exports the resulting\n" +
+			"tables to CSV as a new rNNN revision. The SQL is stored alongside\n" +
+			"the CSVs as dataset.sql.\n\n" +
 			"The SQL MUST be a FULL, self-contained, idempotent script:\n" +
 			"  - every populated table starts with TRUNCATE TABLE <t> RESTART IDENTITY\n" +
 			"    CASCADE (or an unconditional DELETE FROM <t>) before its INSERTs,\n" +
 			"  - running it twice produces the same DB state,\n" +
-			"  - running it alone on an empty migrated schema reproduces the dataset.\n" +
-			"Partial / delta scripts are rejected after export with a list of every\n" +
-			"populated table missing a leading wipe.\n\n" +
-			"Recommended: pipe the SQL via stdin so nothing is written to disk:\n\n" +
+			"  - running it alone on an empty migrated schema reproduces the dataset.\n\n" +
+			"Use --inherit to seed a base scenario before your SQL runs (optional):\n\n" +
 			"  seedmancer generate-local billing/pro --inherit basic <<'EOF'\n" +
 			"  TRUNCATE TABLE order_items, products, brands\n" +
 			"      RESTART IDENTITY CASCADE;\n" +
 			"  INSERT INTO brands (id, name) VALUES (1, 'Acme');\n" +
-			"  INSERT INTO products (id, brand_id, name, price) VALUES\n" +
-			"    (1, 1, 'Product 1', 9.99),\n" +
-			"    (2, 1, 'Product 2', 19.98);\n" +
 			"  EOF\n\n" +
-			"`--inherit` is REQUIRED — it specifies the base scenario whose\n" +
-			"latest revision is seeded into the local env before your SQL runs\n" +
-			"(safety net, not a data source the SQL relies on).\n" +
+			"Without --inherit, the SQL runs directly against the current DB state.\n" +
 			"NOTE: this overwrites data in the configured local env.",
 		Flags: []cli.Flag{
 			&cli.StringFlag{
@@ -69,7 +59,7 @@ func GenerateLocalCommand() *cli.Command {
 			&cli.StringFlag{
 				Name:    "inherit",
 				Aliases: []string{"b"},
-				Usage:   "REQUIRED. Base scenario whose latest revision is seeded before the SQL runs",
+				Usage:   "Base scenario to seed before running SQL (optional — omit to run against current DB state)",
 			},
 			&cli.StringFlag{
 				Name:    "env",
@@ -91,11 +81,6 @@ func GenerateLocalCommand() *cli.Command {
 				return fmt.Errorf("usage: seedmancer generate-local <scenario>")
 			}
 			inherit := strings.TrimSpace(c.String("inherit"))
-			if inherit == "" {
-				return fmt.Errorf(
-					"--inherit is required (run `seedmancer export <baseline>` first, then pass --inherit <baseline>)",
-				)
-			}
 
 			sqlFile := strings.TrimSpace(c.String("sql-file"))
 			var sqlBody []byte
@@ -135,7 +120,9 @@ func GenerateLocalCommand() *cli.Command {
 			ui.Success("Generated revision: %s @ %s", out.Scenario, out.Revision)
 			ui.KeyValue("Schema: ", out.Schema)
 			ui.KeyValue("Tables: ", strings.Join(out.Tables, ", "))
-			ui.KeyValue("Inherited from: ", fmt.Sprintf("%s @ %s", out.InheritedFrom, out.InheritedRevision))
+			if out.InheritedFrom != "" {
+				ui.KeyValue("Inherited from: ", fmt.Sprintf("%s @ %s", out.InheritedFrom, out.InheritedRevision))
+			}
 			ui.KeyValue("Env used: ", out.Env)
 			ui.KeyValue("SQL saved: ", out.SQLPath)
 			ui.KeyValue("Run: ", fmt.Sprintf("seedmancer seed %s", out.Scenario))

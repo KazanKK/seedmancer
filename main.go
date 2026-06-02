@@ -67,6 +67,9 @@ func main() {
 	generateLocalCmd := cmd.GenerateLocalCommand()
 	generateLocalCmd.Category = "Local"
 	generateLocalCmd.Hidden = true
+	generateCmd := cmd.GenerateCommand()
+	generateCmd.Category = "Local"
+	generateCmd.Hidden = true
 	seedCmd := cmd.SeedCommand()
 	seedCmd.Category = "Local"
 	listCmd := cmd.ListCommand()
@@ -97,7 +100,7 @@ func main() {
 	app := &cli.App{
 		Name:            "seedmancer",
 		Version:         Version,
-		Usage:           "Schema-first database seeding — export, push, pull, restore.",
+		Usage:           "Schema-first database seeding — export, AI-generate, push, pull, restore.",
 		HideHelpCommand: true, // every subcommand still has -h / --help
 		Description: "Seedmancer organizes test data into scenarios — slash-separated\n" +
 			"paths like `billing/pro` — with built-in revisioning. Every export\n" +
@@ -129,6 +132,7 @@ func main() {
 			envCmd,
 			exportCmd,
 			generateLocalCmd,
+			generateCmd,
 			seedCmd,
 			listCmd,
 			historyCmd,

@@ -26,21 +26,20 @@ func TestDatasetSQLPath_layout(t *testing.T) {
 	}
 }
 
-// TestRunGenerateLocal_rejectsMissingInherit verifies that the inherit
-// argument is required up front, before the runner touches the DB. This
-// is enforced at the top of RunGenerateLocal so a stray call from a
-// legacy script can't accidentally seed an empty baseline.
+// TestRunGenerateLocal_rejectsMissingInherit verifies that omitting --inherit
+// no longer returns an error at the validation stage (inherit is now optional).
+// Without a valid seedmancer.yaml the runner will fail on config lookup, which
+// is fine — the test just ensures the old "inherit is required" guard is gone.
 func TestRunGenerateLocal_rejectsMissingInherit(t *testing.T) {
 	_, err := RunGenerateLocal(context.Background(), GenerateLocalInput{
 		SQL:      "SELECT 1;",
 		Scenario: "x",
-		// Inherit intentionally empty.
+		// Inherit intentionally empty — should no longer error here.
 	})
-	if err == nil {
-		t.Fatal("expected error when inherit is missing")
-	}
-	if !strings.Contains(err.Error(), "inherit is required") {
-		t.Fatalf("unexpected error: %v", err)
+	// The runner will fail on config lookup (no seedmancer.yaml in test env),
+	// but it must NOT produce the old "inherit is required" error.
+	if err != nil && strings.Contains(err.Error(), "inherit is required") {
+		t.Fatalf("inherit should no longer be required, but got: %v", err)
 	}
 }
 

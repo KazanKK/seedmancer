@@ -55,19 +55,17 @@ revisions unless ` + "`force: true`" + ` is set.
 - ` + "`check_state_schema scenario=\"<name>\"`" + ` — returns a structured drift report
   with changes classified as auto / likely / decision / breaking.
 
-**Fix drift with the refresh workflow:**
-1. ` + "`check_state_schema`" + ` — see what changed.
-2. ` + "`create_refresh_plan`" + ` — builds a plan; auto changes are filled in, decision
-   changes are left as stubs for you to populate.
-3. ` + "`validate_refresh_plan`" + ` — verify the plan against old and new schemas.
-4. ` + "`apply_refresh_plan`" + ` — transforms CSVs and commits a new ` + "`rNNN`" + ` revision.
-5. ` + "`seed_database`" + ` — loads the fresh revision.
+**Fix drift with the AI refresh workflow:**
+1. ` + "`check_state_schema`" + ` — inspect what changed (optional; apply_ai_refresh does this internally too).
+2. ` + "`apply_ai_refresh`" + ` — sends the existing data + schema diff to the Seedmancer AI backend,
+   which adapts every row to the new schema and commits a new ` + "`rNNN`" + ` revision.
+3. ` + "`seed_database`" + ` — loads the fresh revision.
 
-Read ` + "`seedmancer://docs/refresh`" + ` for the full workflow and all operation types.
+Read ` + "`seedmancer://docs/refresh`" + ` for the full workflow.
 
 **dataset.sql note:** ` + "`dataset.sql`" + ` is NEVER deleted. It stays on every
-revision as a permanent AI reference. Revisions created by ` + "`apply_refresh_plan`" + `
-use ` + "`refresh-plan.json`" + ` as their operational record instead.
+revision as a permanent AI reference. Revisions created by ` + "`apply_ai_refresh`" + `
+include a new ` + "`dataset.sql`" + ` with the AI-generated SQL.
 
 ## Need new data?
 
@@ -285,103 +283,57 @@ Every successful ` + "`generate_dataset_local`" + ` call stores the SQL as
 ` + "`dataset.sql`" + ` is **never deleted**. It stays on every revision as a permanent
 AI reference regardless of how the revision was created.
 
-Revisions created by ` + "`apply_refresh_plan`" + ` use ` + "`refresh-plan.json`" + ` as their
-operational record (source of truth for what was transformed) rather than
-` + "`dataset.sql`" + `. Both files may coexist — the SQL from the base revision is
-preserved for reference.
+Revisions created by ` + "`apply_ai_refresh`" + ` include a new ` + "`dataset.sql`" + ` with
+the AI-generated SQL that produced the revision. This can be retrieved and
+edited for future ` + "`generate_dataset_local`" + ` calls.
 `
 
 const docRefresh = `# Schema drift refresh (for agents)
 
 The refresh system updates an outdated scenario revision so its CSVs match
-the current database schema.
+the current database schema. The AI backend adapts existing rows to the new
+schema — preserving all data and only modifying what schema drift requires.
 
-## The four-step MCP flow
+## The two-step MCP flow
 
 ` + "```" + `
-check_state_schema → create_refresh_plan → validate_refresh_plan → apply_refresh_plan
+check_state_schema (optional) → apply_ai_refresh
 ` + "```" + `
 
-### 1. check_state_schema
+### 1. check_state_schema (optional)
 
 Returns a structured drift report with every change classified as:
 
 | Category | Meaning |
 |---|---|
-| **auto** | Safe to apply without asking — nullable column added, column removed, FK removed |
-| **likely** | High-confidence suggestion (rename heuristic, type widening) — user should confirm |
-| **decision** | Ambiguous intent — required column without default, FK added to existing column |
-| **breaking** | Cannot safely transform — PK changed, type incompatible narrowing, table removed |
+| **auto** | Safe — nullable column added, column removed, FK removed |
+| **likely** | High-confidence (rename heuristic, type widening) |
+| **decision** | Ambiguous — required column without default, FK added |
+| **breaking** | PK changed, type incompatible narrowing, table removed |
 
-### 2. create_refresh_plan
+You can call this first to show the user what changed, but it is not required
+before apply_ai_refresh — that tool detects drift internally.
 
-Builds a refresh plan. By default it runs the auto-classifier and returns:
-- Fully populated operations for **auto** changes.
-- Suggestive operations (source: "suggestion") for **likely** changes.
-- Stub operations (source: "") for **decision** changes — you must fill
-  these in before calling validate/apply.
+### 2. apply_ai_refresh
 
-You can skip the classifier entirely by passing your own operations array.
+Sends the existing data and schema diff to the Seedmancer AI backend, which:
+- Reads the existing data (dataset.sql if available, else CSVs converted to SQL)
+- Receives the new schema and schema diff
+- Produces modified SQL: same rows, new columns filled in, removed columns
+  dropped, type-changed values converted
+- Runs the SQL against the local database
+- Exports updated tables as a new rNNN revision
+- Saves the AI SQL as dataset.sql on the new revision
+- Advances pointers.latest
 
-### 3. validate_refresh_plan
+**Required fields:** scenario (required), env or dbUrl (required — points at the
+local database with the new schema already applied).
 
-Always run this before apply_refresh_plan. It checks:
-- Table/column existence in old and new schemas.
-- Required fields per operation type.
-- FK target consistency.
-
-### 4. apply_refresh_plan
-
-Transforms the base revision's CSVs in a temp directory, then commits the
-result as a new rNNN revision. The base revision is never modified.
-Advances pointers.latest.
-
-## Operation types
-
-| Op | What it does |
-|---|---|
-| add_column | Adds a new column to every row. Strategies: constant, default, empty, uuid, timestamp, derive |
-| drop_column | Removes a column from the CSV |
-| rename_column | Renames fromColumn to column |
-| set_constant | Overwrites a column's value with a fixed value on every row |
-| copy_column | Copies fromColumn into column |
-| create_row | Appends new rows to a table (e.g. to seed a missing parent) |
-| fill_foreign_key | Fills an FK column using refTable / refColumn |
-| generate_uuid | Generates a new v4 UUID per row |
-| generate_timestamp | Fills with current UTC time (RFC3339) per row |
-
-## Handling decision changes
-
-For each stub operation (source: ""), you must decide:
-
-1. Set a constant value: strategy: "constant", value: "..."
-2. Create a parent row first: add a create_row op for the parent table,
-   then a set_constant or fill_foreign_key op for the child column.
-3. Derive from another column: strategy: "derive", fromColumn: "..."
-4. Generate UUID / timestamp: use generate_uuid or generate_timestamp ops.
+**Optional:** prompt — extra context for the AI (e.g. "keep email addresses realistic").
 
 ## dataset.sql role
 
 dataset.sql is NEVER deleted and persists on every revision as a permanent
-AI reference. Refresh-produced revisions use refresh-plan.json as their
-operational record (source of truth for what was transformed). Both may coexist
-on the same revision directory.
-
-## Saved rules in seedmancer.yaml
-
-Users can persist decisions in seedmancer.yaml:
-
-` + "```yaml" + `
-refresh:
-  rules:
-    User.roleId:
-      strategy: constant
-      value: role_user
-    User.status:
-      strategy: constant
-      value: active
-` + "```" + `
-
-Rules are applied automatically before the interactive prompt, keyed by
-table.column.
+AI reference. Refresh-produced revisions include a new dataset.sql containing
+the AI-generated SQL that created the revision.
 `

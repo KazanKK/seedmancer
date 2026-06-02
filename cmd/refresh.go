@@ -4,20 +4,21 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/urfave/cli/v2"
 
 	db "github.com/KazanKK/seedmancer/database"
-	"github.com/KazanKK/seedmancer/internal/csvxform"
 	"github.com/KazanKK/seedmancer/internal/driftreport"
-	"github.com/KazanKK/seedmancer/internal/refreshplan"
 	"github.com/KazanKK/seedmancer/internal/scenario"
 	"github.com/KazanKK/seedmancer/internal/schemadiff"
 	"github.com/KazanKK/seedmancer/internal/ui"
@@ -29,33 +30,24 @@ import (
 func RefreshCommand() *cli.Command {
 	return &cli.Command{
 		Name:      "refresh",
-		Usage:     "Update a scenario revision to match the current database schema",
+		Usage:     "Update a scenario revision to match the current database schema using AI",
 		ArgsUsage: "<scenario>",
 		Description: "Detects schema drift between a stored revision and the live database,\n" +
-			"then creates a new revision whose CSVs conform to the current schema.\n" +
-			"The original revision is never modified.\n\n" +
+			"then uses AI to adapt the existing data to the new schema and creates a\n" +
+			"new revision. The original revision is never modified.\n\n" +
 			"Examples:\n" +
 			"  seedmancer refresh billing/pro\n" +
-			"  seedmancer refresh billing/pro --plan          # preview only\n" +
-			"  seedmancer refresh billing/pro --plan-file refresh-plan.json\n" +
-			"  seedmancer refresh billing/pro --yes           # auto-apply safe changes only\n" +
-			"  seedmancer refresh --all                       # refresh every outdated scenario",
+			"  seedmancer refresh billing/pro --yes           # skip confirmation\n" +
+			"  seedmancer refresh billing/pro --prompt 'keep user emails realistic'",
 		Flags: []cli.Flag{
 			&cli.StringFlag{Name: "env", Aliases: []string{"e"}, Usage: "Named environment to connect to"},
 			&cli.StringFlag{Name: "db-url", Usage: "Ad-hoc database URL (overrides --env)"},
 			&cli.StringFlag{Name: "revision", Aliases: []string{"r"}, Usage: "Base revision to refresh from (defaults to latest)"},
 			&cli.BoolFlag{Name: "stable", Usage: "Use the stable revision as base"},
-			&cli.BoolFlag{Name: "plan", Usage: "Print the plan and exit without applying"},
-			&cli.StringFlag{Name: "plan-file", Usage: "Path to an existing refresh-plan.json to apply"},
-			&cli.BoolFlag{Name: "yes", Usage: "Non-interactive: apply Auto changes only; fail if Decision/Breaking remain"},
-			&cli.BoolFlag{Name: "ai", Usage: "Send unresolved drift to Seedmancer backend AI for planning (requires Pro)"},
-			&cli.BoolFlag{Name: "all", Usage: "Refresh every scenario that has schema drift"},
-			&cli.BoolFlag{Name: "json", Usage: "Output JSON"},
+			&cli.BoolFlag{Name: "yes", Usage: "Non-interactive: skip confirmation prompt"},
+			&cli.StringFlag{Name: "prompt", Usage: "Extra context passed to the AI (e.g. 'keep user names realistic')"},
 		},
 		Action: func(c *cli.Context) error {
-			if c.Bool("all") {
-				return runRefreshAll(c)
-			}
 			scenarioArg := strings.TrimSpace(c.Args().First())
 			if scenarioArg == "" {
 				return fmt.Errorf("usage: seedmancer refresh <scenario>")
@@ -66,7 +58,6 @@ func RefreshCommand() *cli.Command {
 }
 
 func runRefreshOne(c *cli.Context, scenarioArg string) error {
-	// Phase 1: connect to DB, introspect schema, compute drift, build plan.
 	spinner := ui.StartSpinner(fmt.Sprintf("Checking schema drift for %s…", scenarioArg))
 	out, err := RunRefresh(c.Context, RefreshInput{
 		Scenario:  scenarioArg,
@@ -74,10 +65,8 @@ func runRefreshOne(c *cli.Context, scenarioArg string) error {
 		UseStable: c.Bool("stable"),
 		Env:       c.String("env"),
 		DBURL:     c.String("db-url"),
-		PlanOnly:  true,
-		PlanFile:  c.String("plan-file"),
+		Prompt:    c.String("prompt"),
 		Yes:       c.Bool("yes"),
-		AI:        c.Bool("ai"),
 	})
 	if err != nil {
 		spinner.Stop(false, err.Error())
@@ -85,39 +74,54 @@ func runRefreshOne(c *cli.Context, scenarioArg string) error {
 	}
 	spinner.Stop(true, fmt.Sprintf("refresh %s @ %s", out.Scenario, out.BaseRevision))
 
-	if c.Bool("json") {
-		return outputJSON(out)
-	}
-
-	// Print drift summary + full operation list.
 	printDriftSummary(out.DriftReport)
-	if out.DriftReport.HasDrift {
-		printPlan(out.Plan)
-	}
 
-	// --plan flag or no drift → preview only, stop here.
-	if c.Bool("plan") || !out.DriftReport.HasDrift {
+	if !out.DriftReport.HasDrift {
+		if out.DriftReport.OldSchemaFP != out.DriftReport.NewSchemaFP {
+			if err := syncRevisionFingerprint(out.ProjectRoot, out.StoragePath, out.DriftReport, out.NewSchemaJSON); err != nil {
+				ui.Warn("could not update fingerprint: %v", err)
+			} else {
+				ui.Success("Fingerprint synced (%s → %s)", utils.FingerprintShort(out.DriftReport.OldSchemaFP), utils.FingerprintShort(out.DriftReport.NewSchemaFP))
+			}
+		}
 		return nil
 	}
 
-	// Confirm before applying (skipped with --yes).
 	if !c.Bool("yes") {
-		if !confirmApply(len(out.Plan.Operations), out.BaseRevision) {
+		if !confirmApply(out.Scenario) {
 			ui.Info("Aborted.")
 			return nil
 		}
 	}
 
-	// Phase 2: second DB introspection + CSV transformation.
-	spinner = ui.StartSpinner("Applying refresh plan…")
-	applyOut, err := RunApplyRefreshPlan(c.Context, ApplyRefreshPlanInput{
-		Scenario:  scenarioArg,
-		Revision:  c.String("revision"),
-		UseStable: c.Bool("stable"),
-		Env:       c.String("env"),
-		DBURL:     c.String("db-url"),
-		Plan:      out.Plan,
+	spinner = ui.StartSpinner("Generating refreshed data with AI…")
+	genResult, err := runGenerateRefreshSQL(c.Context, applyAIRefreshInput{
+		Scenario:      scenarioArg,
+		Revision:      c.String("revision"),
+		UseStable:     c.Bool("stable"),
+		Env:           c.String("env"),
+		DBURL:         c.String("db-url"),
+		Prompt:        c.String("prompt"),
+		DriftReport:   out.DriftReport,
+		NewSchemaJSON: out.NewSchemaJSON,
 	})
+	if err != nil {
+		spinner.Stop(false, err.Error())
+		return err
+	}
+	spinner.Stop(true, "SQL generated")
+
+	printSQLSummary(genResult.existingSQL, genResult.generatedSQL)
+
+	if !c.Bool("yes") {
+		if !confirmApplySQL() {
+			ui.Info("Aborted. Generated SQL saved to refresh-draft.sql")
+			return nil
+		}
+	}
+
+	spinner = ui.StartSpinner("Applying refreshed data…")
+	applyOut, err := runApplyGeneratedSQL(c.Context, genResult)
 	if err != nil {
 		spinner.Stop(false, err.Error())
 		return err
@@ -127,172 +131,101 @@ func runRefreshOne(c *cli.Context, scenarioArg string) error {
 	return nil
 }
 
-func runRefreshAll(c *cli.Context) error {
-	configPath, err := utils.FindConfigFile()
-	if err != nil {
-		return err
-	}
-	cfg, err := utils.LoadConfig(configPath)
-	if err != nil {
-		return err
-	}
-	projectRoot := filepath.Dir(configPath)
-
-	scenarios, _, err := scenario.WalkScenarios(projectRoot, cfg.StoragePath)
-	if err != nil {
-		return fmt.Errorf("listing scenarios: %w", err)
-	}
-	if len(scenarios) == 0 {
-		ui.Info("No scenarios found.")
-		return nil
-	}
-
-	var succeeded, skipped, failed []string
-	for _, sc := range scenarios {
-		out, err := RunRefresh(c.Context, RefreshInput{
-			Scenario: sc,
-			Env:      c.String("env"),
-			DBURL:    c.String("db-url"),
-			Yes:      true,
-		})
-		if err != nil {
-			ui.Warn("%s: %v", sc, err)
-			failed = append(failed, sc)
-			continue
-		}
-		if !out.DriftReport.HasDrift {
-			skipped = append(skipped, sc)
-			continue
-		}
-		if out.NewRevision == "" {
-			ui.Warn("%s: drift detected but requires manual intervention", sc)
-			failed = append(failed, sc)
-			continue
-		}
-		ui.Success("%s → %s", sc, out.NewRevision)
-		succeeded = append(succeeded, sc)
-	}
-
-	fmt.Println()
-	ui.Info("Refreshed: %d  Skipped (no drift): %d  Failed: %d", len(succeeded), len(skipped), len(failed))
-	if len(failed) > 0 {
-		return fmt.Errorf("%d scenario(s) need manual attention: %s", len(failed), strings.Join(failed, ", "))
-	}
-	return nil
-}
-
 func printDriftSummary(r driftreport.Report) {
 	if !r.HasDrift {
 		ui.Success("No schema drift — revision is up to date.")
 		return
 	}
 	ui.Info("Schema drift detected:")
-	for cat, n := range r.Counts {
+
+	// Group changes by table, preserving order.
+	type tableGroup struct {
+		name    string
+		changes []driftreport.AnnotatedChange
+	}
+	var groups []tableGroup
+	idx := map[string]int{}
+	for _, ch := range r.Changes {
+		if _, ok := idx[ch.Table]; !ok {
+			idx[ch.Table] = len(groups)
+			groups = append(groups, tableGroup{name: ch.Table})
+		}
+		i := idx[ch.Table]
+		groups[i].changes = append(groups[i].changes, ch)
+	}
+
+	catSymbol := func(cat driftreport.Category) string {
+		switch cat {
+		case driftreport.Auto:
+			return "✓"
+		case driftreport.Likely:
+			return "?"
+		case driftreport.Decision:
+			return "!"
+		case driftreport.Breaking:
+			return "✗"
+		default:
+			return "~"
+		}
+	}
+
+	fmt.Fprintln(os.Stderr)
+	for _, g := range groups {
+		fmt.Fprintf(os.Stderr, "  %s\n", g.name)
+		for _, ch := range g.changes {
+			sym := catSymbol(ch.Category)
+			switch ch.Kind {
+			case schemadiff.TableAdded:
+				fmt.Fprintf(os.Stderr, "    %s  table added\n", sym)
+			case schemadiff.TableRemoved:
+				fmt.Fprintf(os.Stderr, "    %s  table removed\n", sym)
+			case schemadiff.ColumnAdded:
+				if ch.Detail != "" {
+					fmt.Fprintf(os.Stderr, "    %s  %s  added (%s)\n", sym, ch.Column, ch.Detail)
+				} else {
+					fmt.Fprintf(os.Stderr, "    %s  %s  added\n", sym, ch.Column)
+				}
+			case schemadiff.ColumnRemoved:
+				fmt.Fprintf(os.Stderr, "    %s  %s  removed\n", sym, ch.Column)
+			case schemadiff.ColumnChanged:
+				fmt.Fprintf(os.Stderr, "    %s  %s  %s\n", sym, ch.Column, ch.Detail)
+			case schemadiff.ForeignKeyAdded:
+				fmt.Fprintf(os.Stderr, "    %s  %s  FK added -> %s\n", sym, ch.Column, ch.Detail)
+			case schemadiff.ForeignKeyRemoved:
+				fmt.Fprintf(os.Stderr, "    %s  %s  FK removed\n", sym, ch.Column)
+			case schemadiff.ForeignKeyChanged:
+				fmt.Fprintf(os.Stderr, "    %s  %s  FK changed -> %s\n", sym, ch.Column, ch.Detail)
+			default:
+				fmt.Fprintf(os.Stderr, "    %s  %s  %s\n", sym, ch.Column, ch.Detail)
+			}
+		}
+		fmt.Fprintln(os.Stderr)
+	}
+
+	// Summary counts line.
+	var parts []string
+	order := []driftreport.Category{driftreport.Breaking, driftreport.Decision, driftreport.Likely, driftreport.Auto}
+	for _, cat := range order {
+		n := r.Counts[cat]
 		if n == 0 {
 			continue
 		}
-		symbol := "~"
-		switch cat {
-		case driftreport.Auto:
-			symbol = "✓"
-		case driftreport.Likely:
-			symbol = "?"
-		case driftreport.Decision:
-			symbol = "!"
-		case driftreport.Breaking:
-			symbol = "✗"
-		}
-		ui.Info("  %s %s: %d change(s)", symbol, cat, n)
+		sym := catSymbol(cat)
+		parts = append(parts, fmt.Sprintf("%s %s: %d", sym, cat, n))
 	}
+	fmt.Fprintf(os.Stderr, "  (%s)\n", strings.Join(parts, ", "))
 }
 
-func printPlan(p refreshplan.Plan) {
-	if len(p.Operations) == 0 {
-		ui.Info("Operations: (empty — nothing to do)")
-		return
-	}
-
-	// Pre-calculate column widths for alignment.
-	maxTarget, maxOp := 0, 0
-	for _, op := range p.Operations {
-		target := op.Table
-		if op.Column != "" {
-			target += "." + op.Column
-		}
-		if len(target) > maxTarget {
-			maxTarget = len(target)
-		}
-		if len(string(op.Op)) > maxOp {
-			maxOp = len(string(op.Op))
-		}
-	}
-
-	ui.Info("Operations (%d):", len(p.Operations))
-	for _, op := range p.Operations {
-		symbol := "~"
-		switch op.Op {
-		case refreshplan.OpAddColumn, refreshplan.OpCreateRow,
-			refreshplan.OpGenerateUUID, refreshplan.OpGenerateTimestamp:
-			symbol = "+"
-		case refreshplan.OpDropColumn:
-			symbol = "-"
-		case "":
-			symbol = "✗"
-		}
-
-		target := op.Table
-		if op.Column != "" {
-			target += "." + op.Column
-		}
-
-		detail := ""
-		if op.Strategy != "" {
-			detail += "strategy=" + string(op.Strategy)
-		}
-		if v := op.ValueString(); v != "" {
-			if detail != "" {
-				detail += " "
-			}
-			detail += fmt.Sprintf("value=%q", v)
-		}
-		if op.FromColumn != "" {
-			if detail != "" {
-				detail += " "
-			}
-			detail += "from=" + op.FromColumn
-		}
-		if op.RefTable != "" {
-			if detail != "" {
-				detail += " "
-			}
-			detail += fmt.Sprintf("ref=%s.%s", op.RefTable, op.RefColumn)
-		}
-
-		src := ""
-		if op.Source != "" {
-			src = "[" + string(op.Source) + "]"
-		} else if op.Op == "" {
-			src = "[breaking]"
-		}
-
-		opStr := string(op.Op)
-		if opStr == "" {
-			opStr = "manual"
-		}
-
-		ui.Info("  %s %-*s  %-*s  %-30s %s",
-			symbol,
-			maxTarget, target,
-			maxOp, opStr,
-			detail,
-			src,
-		)
-	}
+func confirmApply(scenarioName string) bool {
+	fmt.Fprintf(os.Stderr, "\nRefresh %q with AI? [y/N]: ", scenarioName)
+	scanner := bufio.NewScanner(os.Stdin)
+	scanner.Scan()
+	ans := strings.TrimSpace(strings.ToLower(scanner.Text()))
+	return ans == "y" || ans == "yes"
 }
 
-// confirmApply prints a prompt and returns true only if the user types "y" or "yes".
-func confirmApply(opCount int, baseRev string) bool {
-	fmt.Fprintf(os.Stderr, "\nApply %d operation(s) from %s? [y/N]: ", opCount, baseRev)
+func confirmApplySQL() bool {
+	fmt.Fprintf(os.Stderr, "Apply generated SQL? [y/N]: ")
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Scan()
 	ans := strings.TrimSpace(strings.ToLower(scanner.Text()))
@@ -310,10 +243,12 @@ type CheckStateSchemaInput struct {
 	DBURL     string `json:"dbUrl,omitempty"`
 }
 
-// CheckStateSchemaOutput is the output for check_state_schema — a full
-// structured drift report rather than the flat string-list of RunCheck.
+// CheckStateSchemaOutput is the output for check_state_schema.
 type CheckStateSchemaOutput struct {
 	driftreport.Report
+	// NewSchemaJSON is the current DB schema — included so callers can pass
+	// it straight to apply_ai_refresh without a second DB round-trip.
+	NewSchemaJSON []byte `json:"-"`
 }
 
 // RunCheckStateSchema returns a structured drift report for a scenario.
@@ -348,13 +283,16 @@ func RunCheckStateSchema(_ context.Context, in CheckStateSchemaInput) (CheckStat
 
 	oldFP := rev.Manifest.SchemaFingerprint
 	if currentFP == oldFP {
-		return CheckStateSchemaOutput{Report: driftreport.Report{
-			Scenario:     scenarioPath,
-			BaseRevision: rev.RevID,
-			OldSchemaFP:  oldFP,
-			NewSchemaFP:  currentFP,
-			HasDrift:     false,
-		}}, nil
+		return CheckStateSchemaOutput{
+			Report: driftreport.Report{
+				Scenario:     scenarioPath,
+				BaseRevision: rev.RevID,
+				OldSchemaFP:  oldFP,
+				NewSchemaFP:  currentFP,
+				HasDrift:     false,
+			},
+			NewSchemaJSON: currentJSON,
+		}, nil
 	}
 
 	storedJSONPath := scenario.SchemaJSONPath(projectRoot, cfg.StoragePath, utils.FingerprintShort(oldFP))
@@ -369,349 +307,36 @@ func RunCheckStateSchema(_ context.Context, in CheckStateSchemaInput) (CheckStat
 	}
 
 	report := driftreport.Build(scenarioPath, rev.RevID, oldFP, currentFP, changes, storedJSON, currentJSON)
-	return CheckStateSchemaOutput{Report: report}, nil
+	return CheckStateSchemaOutput{Report: report, NewSchemaJSON: currentJSON}, nil
 }
 
-// CreateRefreshPlanInput is the input for the MCP tool create_refresh_plan.
-type CreateRefreshPlanInput struct {
-	Scenario  string `json:"scenario"`
-	Revision  string `json:"revision,omitempty"`
-	UseStable bool   `json:"useStable,omitempty"`
-	Env       string `json:"env,omitempty"`
-	DBURL     string `json:"dbUrl,omitempty"`
-	// Operations overrides the auto-classified plan. If supplied the classifier
-	// is skipped and these operations are validated and returned.
-	Operations []refreshplan.Operation `json:"operations,omitempty"`
-}
-
-type CreateRefreshPlanOutput struct {
-	Plan             refreshplan.Plan            `json:"plan"`
-	DriftReport      driftreport.Report          `json:"driftReport"`
-	ValidationErrors []refreshplan.ValidationError `json:"validationErrors,omitempty"`
-}
-
-// RunCreateRefreshPlan derives a refresh plan from the drift report. When
-// Operations is provided the classifier is skipped and those ops are used.
-func RunCreateRefreshPlan(ctx context.Context, in CreateRefreshPlanInput) (CreateRefreshPlanOutput, error) {
-	csIn := CheckStateSchemaInput{
-		Scenario:  in.Scenario,
-		Revision:  in.Revision,
-		UseStable: in.UseStable,
-		Env:       in.Env,
-		DBURL:     in.DBURL,
-	}
-	csOut, err := RunCheckStateSchema(ctx, csIn)
-	if err != nil {
-		return CreateRefreshPlanOutput{}, err
-	}
-
-	configPath, err := utils.FindConfigFile()
-	if err != nil {
-		return CreateRefreshPlanOutput{}, err
-	}
-	cfg, err := utils.LoadConfig(configPath)
-	if err != nil {
-		return CreateRefreshPlanOutput{}, err
-	}
-	projectRoot := filepath.Dir(configPath)
-
-	scenarioPath, _ := scenario.Normalize(in.Scenario)
-	rev, err := resolveScenarioRevision(projectRoot, cfg.StoragePath, scenarioPath, in.Revision, in.UseStable)
-	if err != nil {
-		return CreateRefreshPlanOutput{}, err
-	}
-
-	storedJSONPath := scenario.SchemaJSONPath(projectRoot, cfg.StoragePath, utils.FingerprintShort(rev.Manifest.SchemaFingerprint))
-	oldSchemaJSON, _ := os.ReadFile(storedJSONPath)
-
-	target, err := pickExportTarget(cfg, in.Env, in.DBURL)
-	if err != nil {
-		return CreateRefreshPlanOutput{}, err
-	}
-	_, newSchemaJSON, err := fingerprintCurrentDB(target)
-	if err != nil {
-		return CreateRefreshPlanOutput{}, err
-	}
-
-	var plan refreshplan.Plan
-	if len(in.Operations) > 0 {
-		plan = refreshplan.Plan{
-			Scenario:                scenarioPath,
-			BaseRevision:            rev.RevID,
-			TargetSchemaFingerprint: csOut.NewSchemaFP,
-			CreatedAt:               time.Now().UTC(),
-			PlanSource:              "user",
-			Operations:              in.Operations,
-		}
-	} else {
-		plan = refreshplan.Classify(csOut.Report)
-		// Apply saved rules from config before returning.
-		plan = applySavedRules(plan, cfg.Refresh.Rules)
-	}
-
-	validationErrors := refreshplan.Validate(plan, oldSchemaJSON, newSchemaJSON)
-	return CreateRefreshPlanOutput{
-		Plan:             plan,
-		DriftReport:      csOut.Report,
-		ValidationErrors: validationErrors,
-	}, nil
-}
-
-// ValidateRefreshPlanInput is the input for validate_refresh_plan.
-type ValidateRefreshPlanInput struct {
-	Scenario  string                  `json:"scenario"`
-	Revision  string                  `json:"revision,omitempty"`
-	UseStable bool                    `json:"useStable,omitempty"`
-	Env       string                  `json:"env,omitempty"`
-	DBURL     string                  `json:"dbUrl,omitempty"`
-	Plan      refreshplan.Plan        `json:"plan"`
-}
-
-type ValidateRefreshPlanOutput struct {
-	Valid            bool                        `json:"valid"`
-	Errors           []refreshplan.ValidationError `json:"errors,omitempty"`
-	ErrorSummary     string                      `json:"errorSummary,omitempty"`
-}
-
-func RunValidateRefreshPlan(ctx context.Context, in ValidateRefreshPlanInput) (ValidateRefreshPlanOutput, error) {
-	configPath, err := utils.FindConfigFile()
-	if err != nil {
-		return ValidateRefreshPlanOutput{}, err
-	}
-	cfg, err := utils.LoadConfig(configPath)
-	if err != nil {
-		return ValidateRefreshPlanOutput{}, err
-	}
-	projectRoot := filepath.Dir(configPath)
-
-	scenarioPath, _ := scenario.Normalize(in.Scenario)
-	rev, err := resolveScenarioRevision(projectRoot, cfg.StoragePath, scenarioPath, in.Revision, in.UseStable)
-	if err != nil {
-		return ValidateRefreshPlanOutput{}, err
-	}
-
-	storedJSONPath := scenario.SchemaJSONPath(projectRoot, cfg.StoragePath, utils.FingerprintShort(rev.Manifest.SchemaFingerprint))
-	oldSchemaJSON, _ := os.ReadFile(storedJSONPath)
-
-	target, err := pickExportTarget(cfg, in.Env, in.DBURL)
-	if err != nil {
-		return ValidateRefreshPlanOutput{}, err
-	}
-	_, newSchemaJSON, err := fingerprintCurrentDB(target)
-	if err != nil {
-		return ValidateRefreshPlanOutput{}, err
-	}
-
-	errs := refreshplan.Validate(in.Plan, oldSchemaJSON, newSchemaJSON)
-	return ValidateRefreshPlanOutput{
-		Valid:        len(errs) == 0,
-		Errors:       errs,
-		ErrorSummary: refreshplan.ValidationSummary(errs),
-	}, nil
-}
-
-// ApplyRefreshPlanInput is the input for apply_refresh_plan.
-type ApplyRefreshPlanInput struct {
-	Scenario  string               `json:"scenario"`
-	Revision  string               `json:"revision,omitempty"`
-	UseStable bool                 `json:"useStable,omitempty"`
-	Env       string               `json:"env,omitempty"`
-	DBURL     string               `json:"dbUrl,omitempty"`
-	Plan      refreshplan.Plan     `json:"plan"`
-}
-
-type ApplyRefreshPlanOutput struct {
-	Scenario     string `json:"scenario"`
-	BaseRevision string `json:"baseRevision"`
-	NewRevision  string `json:"newRevision"`
-	Schema       string `json:"schema"`
-	DataDir      string `json:"dataDir"`
-}
-
-// RunApplyRefreshPlan transforms the base revision's CSVs using the plan,
-// writes the result as a new revision, and advances pointers.latest.
-func RunApplyRefreshPlan(ctx context.Context, in ApplyRefreshPlanInput) (ApplyRefreshPlanOutput, error) {
-	configPath, err := utils.FindConfigFile()
-	if err != nil {
-		return ApplyRefreshPlanOutput{}, err
-	}
-	cfg, err := utils.LoadConfig(configPath)
-	if err != nil {
-		return ApplyRefreshPlanOutput{}, err
-	}
-	projectRoot := filepath.Dir(configPath)
-
-	scenarioPath, err := scenario.Normalize(in.Scenario)
-	if err != nil {
-		return ApplyRefreshPlanOutput{}, err
-	}
-
-	rev, err := resolveScenarioRevision(projectRoot, cfg.StoragePath, scenarioPath, in.Revision, in.UseStable)
-	if err != nil {
-		return ApplyRefreshPlanOutput{}, err
-	}
-
-	// Obtain current schema JSON for column ordering.
-	target, err := pickExportTarget(cfg, in.Env, in.DBURL)
-	if err != nil {
-		return ApplyRefreshPlanOutput{}, err
-	}
-	currentFP, currentSchemaJSON, err := fingerprintCurrentDB(target)
-	if err != nil {
-		return ApplyRefreshPlanOutput{}, err
-	}
-
-	// Determine next revision id.
-	scenarioDir := scenario.ScenarioDir(projectRoot, cfg.StoragePath, scenarioPath)
-	newRevID, err := scenario.NextRevisionID(scenarioDir)
-	if err != nil {
-		return ApplyRefreshPlanOutput{}, fmt.Errorf("computing next revision id: %w", err)
-	}
-
-	newRevDir := scenario.RevisionDir(projectRoot, cfg.StoragePath, scenarioPath, newRevID)
-	newDataDir := filepath.Join(newRevDir, "data")
-
-	// Prepare a temp directory for the transformation so a crash doesn't
-	// leave a half-written revision.
-	tmpDir, err := os.MkdirTemp("", "seedmancer-refresh-*")
-	if err != nil {
-		return ApplyRefreshPlanOutput{}, fmt.Errorf("creating temp dir: %w", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	// Apply the plan to the base revision's data directory.
-	if err := csvxform.Apply(in.Plan, rev.DataDir, tmpDir, currentSchemaJSON); err != nil {
-		return ApplyRefreshPlanOutput{}, fmt.Errorf("applying refresh plan: %w", err)
-	}
-
-	// Commit: move temp data into the new revision directory.
-	if err := os.MkdirAll(newDataDir, 0755); err != nil {
-		return ApplyRefreshPlanOutput{}, fmt.Errorf("creating revision dir: %w", err)
-	}
-
-	// Write plan JSON sidecar first (before data so any failure leaves the
-	// old revision intact).
-	planJSON, err := json.MarshalIndent(in.Plan, "", "  ")
-	if err != nil {
-		return ApplyRefreshPlanOutput{}, err
-	}
-	if err := os.WriteFile(filepath.Join(newRevDir, "refresh-plan.json"), planJSON, 0644); err != nil {
-		return ApplyRefreshPlanOutput{}, fmt.Errorf("writing refresh-plan.json: %w", err)
-	}
-
-	// Copy transformed CSVs from tmpDir to newDataDir.
-	entries, err := os.ReadDir(tmpDir)
-	if err != nil {
-		return ApplyRefreshPlanOutput{}, err
-	}
-	for _, e := range entries {
-		src := filepath.Join(tmpDir, e.Name())
-		dst := filepath.Join(newDataDir, e.Name())
-		if err := copyFilePath(src, dst); err != nil {
-			return ApplyRefreshPlanOutput{}, fmt.Errorf("copying %s: %w", e.Name(), err)
-		}
-	}
-
-	// Preserve dataset.sql from base revision (AI reference — never deleted).
-	if srcSQL := DatasetSQLPath(rev.RevDir); fileExists(srcSQL) {
-		if err := copyFilePath(srcSQL, DatasetSQLPath(newRevDir)); err != nil {
-			return ApplyRefreshPlanOutput{}, fmt.Errorf("copying dataset.sql: %w", err)
-		}
-	}
-
-	// Write new schema to the schema store.
-	fpShort := utils.FingerprintShort(currentFP)
-	schemaDir := scenario.SchemaStoreDir(projectRoot, cfg.StoragePath, fpShort)
-	if err := os.MkdirAll(schemaDir, 0755); err != nil {
-		return ApplyRefreshPlanOutput{}, err
-	}
-	schemaJSONPath := filepath.Join(schemaDir, "schema.json")
-	if !fileExists(schemaJSONPath) {
-		if err := os.WriteFile(schemaJSONPath, currentSchemaJSON, 0644); err != nil {
-			return ApplyRefreshPlanOutput{}, err
-		}
-	}
-
-	// Count rows for manifest.
-	tables, rowCounts, err := listCSVTablesAndRowCounts(newDataDir)
-	if err != nil {
-		return ApplyRefreshPlanOutput{}, err
-	}
-
-	// Write revision manifest.
-	revManifest := scenario.RevisionManifest{
-		Scenario:          scenarioPath,
-		Revision:          newRevID,
-		SchemaFingerprint: currentFP,
-		CreatedAt:         time.Now().UTC(),
-		Source:            "refresh",
-		Tables:            tables,
-		RowCounts:         rowCounts,
-		Services:          []string{"postgres"},
-	}
-	if err := scenario.WriteRevisionManifest(newRevDir, revManifest); err != nil {
-		return ApplyRefreshPlanOutput{}, err
-	}
-
-	// Also export function/trigger sidecars so the new revision's schema
-	// store is self-contained.
-	if err := exportSchemaToStore(target, schemaDir); err != nil {
-		// Non-fatal — schema.json is the critical part.
-		ui.Debug("refresh: could not export schema sidecars: %v", err)
-	}
-
-	// Update scenario manifest and pointers.
-	scenarioManifest, _ := scenario.ReadManifest(scenarioDir)
-	if scenarioManifest.Scenario == "" {
-		scenarioManifest = scenario.Manifest{Scenario: scenarioPath, CreatedAt: time.Now().UTC()}
-	}
-	scenarioManifest.UpdatedAt = time.Now().UTC()
-	scenarioManifest.LatestRevision = newRevID
-	if err := scenario.WriteManifest(scenarioDir, scenarioManifest); err != nil {
-		return ApplyRefreshPlanOutput{}, err
-	}
-
-	pointers, _ := scenario.ReadPointers(scenarioDir)
-	pointers.Latest = newRevID
-	if err := scenario.WritePointers(scenarioDir, pointers); err != nil {
-		return ApplyRefreshPlanOutput{}, err
-	}
-
-	return ApplyRefreshPlanOutput{
-		Scenario:     scenarioPath,
-		BaseRevision: rev.RevID,
-		NewRevision:  newRevID,
-		Schema:       fpShort,
-		DataDir:      newDataDir,
-	}, nil
-}
-
-// RefreshInput is the combined input for the top-level RunRefresh function.
+// RefreshInput is the input for the drift-check phase of RunRefresh.
 type RefreshInput struct {
 	Scenario  string `json:"scenario"`
 	Revision  string `json:"revision,omitempty"`
 	UseStable bool   `json:"useStable,omitempty"`
 	Env       string `json:"env,omitempty"`
 	DBURL     string `json:"dbUrl,omitempty"`
-	PlanOnly  bool   `json:"planOnly,omitempty"`
-	PlanFile  string `json:"planFile,omitempty"`
-	Yes       bool   `json:"yes,omitempty"` // non-interactive
-	AI        bool   `json:"ai,omitempty"`  // call backend AI planner (Pro)
+	Prompt    string `json:"prompt,omitempty"`
+	Yes       bool   `json:"yes,omitempty"`
 }
 
+// RefreshOutput is returned after the drift-check phase.
 type RefreshOutput struct {
-	Scenario     string             `json:"scenario"`
-	BaseRevision string             `json:"baseRevision"`
-	NewRevision  string             `json:"newRevision,omitempty"`
-	Schema       string             `json:"schema,omitempty"`
-	DriftReport  driftreport.Report `json:"driftReport"`
-	Plan         refreshplan.Plan   `json:"plan"`
-	PlanOnly     bool               `json:"planOnly,omitempty"`
+	Scenario      string             `json:"scenario"`
+	BaseRevision  string             `json:"baseRevision"`
+	NewRevision   string             `json:"newRevision,omitempty"`
+	Schema        string             `json:"schema,omitempty"`
+	DriftReport   driftreport.Report `json:"driftReport"`
+	NewSchemaJSON []byte             `json:"-"`
+	// ProjectRoot and StoragePath are populated so callers (e.g. runRefreshOne)
+	// can perform follow-up writes like syncing a stale fingerprint.
+	ProjectRoot string `json:"-"`
+	StoragePath string `json:"-"`
 }
 
-// RunRefresh orchestrates the full refresh flow:
-//
-//	check → classify → (optional prompt/AI) → validate → apply
+// RunRefresh performs the drift-check phase and returns a RefreshOutput.
+// When called via MCP, follow up with RunApplyAIRefresh to complete the refresh.
 func RunRefresh(ctx context.Context, in RefreshInput) (RefreshOutput, error) {
 	configPath, err := utils.FindConfigFile()
 	if err != nil {
@@ -721,8 +346,8 @@ func RunRefresh(ctx context.Context, in RefreshInput) (RefreshOutput, error) {
 	if err != nil {
 		return RefreshOutput{}, err
 	}
+	projectRoot := filepath.Dir(configPath)
 
-	// 1. Check for drift.
 	csOut, err := RunCheckStateSchema(ctx, CheckStateSchemaInput{
 		Scenario:  in.Scenario,
 		Revision:  in.Revision,
@@ -733,328 +358,790 @@ func RunRefresh(ctx context.Context, in RefreshInput) (RefreshOutput, error) {
 	if err != nil {
 		return RefreshOutput{}, err
 	}
+	return RefreshOutput{
+		Scenario:      csOut.Scenario,
+		BaseRevision:  csOut.BaseRevision,
+		DriftReport:   csOut.Report,
+		NewSchemaJSON: csOut.NewSchemaJSON,
+		ProjectRoot:   projectRoot,
+		StoragePath:   cfg.StoragePath,
+	}, nil
+}
 
-	out := RefreshOutput{
-		Scenario:     csOut.Scenario,
-		BaseRevision: csOut.BaseRevision,
-		DriftReport:  csOut.Report,
-		PlanOnly:     in.PlanOnly,
+// ApplyAIRefreshInput is the input for the apply phase of an AI refresh.
+type ApplyAIRefreshInput struct {
+	Scenario  string             `json:"scenario"`
+	Revision  string             `json:"revision,omitempty"`
+	UseStable bool               `json:"useStable,omitempty"`
+	Env       string             `json:"env,omitempty"`
+	DBURL     string             `json:"dbUrl,omitempty"`
+	Prompt    string             `json:"prompt,omitempty"`
+	Token     string             `json:"token,omitempty"`
+}
+
+// ApplyAIRefreshOutput is the result of the apply phase.
+type ApplyAIRefreshOutput struct {
+	Scenario     string `json:"scenario"`
+	BaseRevision string `json:"baseRevision"`
+	NewRevision  string `json:"newRevision"`
+	Schema       string `json:"schema"`
+	DataDir      string `json:"dataDir"`
+}
+
+// applyAIRefreshInput is the internal full input (includes pre-computed drift).
+type applyAIRefreshInput struct {
+	Scenario      string
+	Revision      string
+	UseStable     bool
+	Env           string
+	DBURL         string
+	Prompt        string
+	Token         string
+	DriftReport   driftreport.Report
+	NewSchemaJSON []byte
+}
+
+// RunApplyAIRefresh is the MCP-callable variant that re-runs drift detection
+// internally. Use runApplyAIRefresh directly from CLI to avoid a second
+// DB round-trip.
+func RunApplyAIRefresh(ctx context.Context, in ApplyAIRefreshInput) (ApplyAIRefreshOutput, error) {
+	configPath, err := utils.FindConfigFile()
+	if err != nil {
+		return ApplyAIRefreshOutput{}, err
 	}
-
-	if !csOut.HasDrift {
-		return out, nil
+	cfg, err := utils.LoadConfig(configPath)
+	if err != nil {
+		return ApplyAIRefreshOutput{}, err
 	}
+	projectRoot := filepath.Dir(configPath)
 
-	// 2. Build the plan — either from file, AI, classifier, or interactive prompt.
-	var plan refreshplan.Plan
-	if in.PlanFile != "" {
-		plan, err = loadPlanFile(in.PlanFile)
-		if err != nil {
-			return RefreshOutput{}, err
-		}
-	} else {
-		// Start with auto-classification.
-		projectRoot := filepath.Dir(configPath)
-		scenarioPath, _ := scenario.Normalize(in.Scenario)
-		rev, err := resolveScenarioRevision(projectRoot, cfg.StoragePath, scenarioPath, in.Revision, in.UseStable)
-		if err != nil {
-			return RefreshOutput{}, err
-		}
-		oldFP := rev.Manifest.SchemaFingerprint
-		storedJSONPath := scenario.SchemaJSONPath(projectRoot, cfg.StoragePath, utils.FingerprintShort(oldFP))
-		oldSchemaJSON, _ := os.ReadFile(storedJSONPath)
-
-		target, err := pickExportTarget(cfg, in.Env, in.DBURL)
-		if err != nil {
-			return RefreshOutput{}, err
-		}
-		_, newSchemaJSON, err := fingerprintCurrentDB(target)
-		if err != nil {
-			return RefreshOutput{}, err
-		}
-
-		plan = refreshplan.Classify(csOut.Report)
-		plan = applySavedRules(plan, cfg.Refresh.Rules)
-
-		hasUnresolved := hasUnresolvedOps(plan)
-
-		if hasUnresolved && in.AI {
-			plan, err = callAIPlanner(ctx, csOut.Report, oldSchemaJSON, newSchemaJSON, cfg)
-			if err != nil {
-				ui.Warn("AI planner failed: %v — falling back to interactive", err)
-			}
-		}
-
-		if hasUnresolved && !in.Yes && !in.AI {
-			plan, err = interactiveResolve(plan, csOut.Report)
-			if err != nil {
-				return RefreshOutput{}, err
-			}
-		}
-
-		if in.Yes && hasUnresolvedOps(plan) {
-			return RefreshOutput{}, fmt.Errorf(
-				"schema drift in %s requires manual decisions (Decision/Breaking changes present).\n"+
-					"Run without --yes to resolve interactively:\n  seedmancer refresh %s",
-				in.Scenario, in.Scenario,
-			)
-		}
-
-		// Validate the final plan.
-		errs := refreshplan.Validate(plan, oldSchemaJSON, newSchemaJSON)
-		if len(errs) > 0 {
-			return RefreshOutput{}, fmt.Errorf("plan validation failed:\n%s", refreshplan.ValidationSummary(errs))
-		}
-	}
-
-	out.Plan = plan
-
-	if in.PlanOnly {
-		return out, nil
-	}
-
-	// 3. Apply the plan.
-	applyOut, err := RunApplyRefreshPlan(ctx, ApplyRefreshPlanInput{
+	csOut, err := RunCheckStateSchema(ctx, CheckStateSchemaInput{
 		Scenario:  in.Scenario,
 		Revision:  in.Revision,
 		UseStable: in.UseStable,
 		Env:       in.Env,
 		DBURL:     in.DBURL,
-		Plan:      plan,
 	})
 	if err != nil {
-		return RefreshOutput{}, err
+		return ApplyAIRefreshOutput{}, err
+	}
+	if !csOut.HasDrift {
+		if csOut.OldSchemaFP != csOut.NewSchemaFP {
+			if syncErr := syncRevisionFingerprint(projectRoot, cfg.StoragePath, csOut.Report, csOut.NewSchemaJSON); syncErr != nil {
+				return ApplyAIRefreshOutput{}, fmt.Errorf("syncing fingerprint: %w", syncErr)
+			}
+		}
+		return ApplyAIRefreshOutput{}, fmt.Errorf("no schema drift detected for %s — nothing to refresh", in.Scenario)
+	}
+	return runApplyAIRefresh(ctx, applyAIRefreshInput{
+		Scenario:      in.Scenario,
+		Revision:      in.Revision,
+		UseStable:     in.UseStable,
+		Env:           in.Env,
+		DBURL:         in.DBURL,
+		Prompt:        in.Prompt,
+		Token:         in.Token,
+		DriftReport:   csOut.Report,
+		NewSchemaJSON: csOut.NewSchemaJSON,
+	})
+}
+
+// generateRefreshResult carries all state produced by runGenerateRefreshSQL
+// so that runApplyGeneratedSQL can continue without re-reading config or the DB.
+type generateRefreshResult struct {
+	generatedSQL  string
+	existingSQL   string
+	scenarioDir   string
+	projectRoot   string
+	scenarioPath  string
+	cfg           utils.Config
+	rev           resolvedRevision
+	target        utils.NamedEnv
+	newSchemaJSON []byte
+	driftReport   driftreport.Report
+}
+
+// runGenerateRefreshSQL covers steps 1–4: resolve revision, load existing SQL,
+// build schema, call the AI backend, and save refresh-draft.sql.
+func runGenerateRefreshSQL(ctx context.Context, in applyAIRefreshInput) (generateRefreshResult, error) {
+	configPath, err := utils.FindConfigFile()
+	if err != nil {
+		return generateRefreshResult{}, err
+	}
+	projectRoot := filepath.Dir(configPath)
+	cfg, err := utils.LoadConfig(configPath)
+	if err != nil {
+		return generateRefreshResult{}, err
 	}
 
-	out.NewRevision = applyOut.NewRevision
-	out.Schema = applyOut.Schema
-	return out, nil
+	scenarioPath, err := scenario.Normalize(in.Scenario)
+	if err != nil {
+		return generateRefreshResult{}, err
+	}
+
+	rev, err := resolveScenarioRevision(projectRoot, cfg.StoragePath, scenarioPath, in.Revision, in.UseStable)
+	if err != nil {
+		return generateRefreshResult{}, err
+	}
+
+	// ── 1. Build existing SQL from dataset.sql or CSVs ────────────────────────
+	fkGraph := buildFKGraph(in.NewSchemaJSON)
+	existingSQL, err := loadExistingSQL(rev.RevDir, rev.DataDir, fkGraph)
+	if err != nil {
+		return generateRefreshResult{}, fmt.Errorf("loading existing data: %w", err)
+	}
+
+	// ── 2. Build schema diff text ─────────────────────────────────────────────
+	schemaDiff := buildSchemaDiffText(in.DriftReport)
+
+	// ── 3. Build API schema from new schema JSON ──────────────────────────────
+	apiSchema, err := buildAPISchema(in.NewSchemaJSON, cfg.ExcludeTables)
+	if err != nil {
+		return generateRefreshResult{}, fmt.Errorf("parsing new schema: %w", err)
+	}
+
+	// ── 4. Call /generate-refresh-sql backend ─────────────────────────────────
+	token, err := utils.ResolveAPIToken(in.Token)
+	if err != nil {
+		return generateRefreshResult{}, fmt.Errorf("AI refresh requires a Seedmancer account — run `seedmancer login` first: %w", err)
+	}
+
+	generatedSQL, err := callGenerateRefreshSQL(ctx, token, apiSchema, schemaDiff, existingSQL, in.Prompt)
+	if err != nil {
+		return generateRefreshResult{}, err
+	}
+
+	// Save generated SQL as a draft immediately so it is inspectable even if
+	// execution fails. Overwritten on every refresh attempt.
+	scenarioDir := scenario.ScenarioDir(projectRoot, cfg.StoragePath, scenarioPath)
+	draftPath := filepath.Join(scenarioDir, "refresh-draft.sql")
+	_ = os.WriteFile(draftPath, []byte(generatedSQL), 0644)
+
+	target, err := pickExportTarget(cfg, in.Env, in.DBURL)
+	if err != nil {
+		return generateRefreshResult{}, err
+	}
+
+	return generateRefreshResult{
+		generatedSQL:  generatedSQL,
+		existingSQL:   existingSQL,
+		scenarioDir:   scenarioDir,
+		projectRoot:   projectRoot,
+		scenarioPath:  scenarioPath,
+		cfg:           cfg,
+		rev:           rev,
+		target:        target,
+		newSchemaJSON: in.NewSchemaJSON,
+		driftReport:   in.DriftReport,
+	}, nil
+}
+
+// runApplyGeneratedSQL covers steps 5–7: connect to DB, execute SQL, export
+// CSVs, and write the new revision manifest + pointers.
+func runApplyGeneratedSQL(ctx context.Context, r generateRefreshResult) (ApplyAIRefreshOutput, error) {
+	manager, normalizedURL, err := db.NewManager(r.target.DatabaseURL)
+	if err != nil {
+		return ApplyAIRefreshOutput{}, err
+	}
+	if err := manager.ConnectWithDSN(normalizedURL); err != nil {
+		return ApplyAIRefreshOutput{}, fmt.Errorf("connecting to database: %w", err)
+	}
+
+	if err := manager.ExecSQL(r.generatedSQL); err != nil {
+		return ApplyAIRefreshOutput{}, fmt.Errorf("executing AI-generated SQL: %w", err)
+	}
+
+	// ── 6. Export updated tables to CSV as a new revision ─────────────────────
+	newRevID, err := scenario.NextRevisionID(r.scenarioDir)
+	if err != nil {
+		return ApplyAIRefreshOutput{}, fmt.Errorf("computing next revision id: %w", err)
+	}
+
+	newRevDir := scenario.RevisionDir(r.projectRoot, r.cfg.StoragePath, r.scenarioPath, newRevID)
+	newDataDir := filepath.Join(newRevDir, "data")
+	if err := os.MkdirAll(newDataDir, 0755); err != nil {
+		return ApplyAIRefreshOutput{}, fmt.Errorf("creating revision dir: %w", err)
+	}
+
+	if err := manager.ExportToCSV(newDataDir); err != nil {
+		return ApplyAIRefreshOutput{}, fmt.Errorf("exporting refreshed data: %w", err)
+	}
+
+	// ── 7. Save dataset.sql, schema store, manifest, pointers ─────────────────
+	currentFP := r.driftReport.NewSchemaFP
+	fpShort := utils.FingerprintShort(currentFP)
+	schemaDir := scenario.SchemaStoreDir(r.projectRoot, r.cfg.StoragePath, fpShort)
+	if err := os.MkdirAll(schemaDir, 0755); err != nil {
+		return ApplyAIRefreshOutput{}, err
+	}
+	schemaJSONPath := filepath.Join(schemaDir, "schema.json")
+	if !fileExists(schemaJSONPath) {
+		if err := os.WriteFile(schemaJSONPath, r.newSchemaJSON, 0644); err != nil {
+			return ApplyAIRefreshOutput{}, err
+		}
+	}
+
+	if err := exportSchemaToStore(r.target, schemaDir); err != nil {
+		ui.Debug("refresh: could not export schema sidecars: %v", err)
+	}
+
+	if err := os.WriteFile(DatasetSQLPath(newRevDir), []byte(r.generatedSQL), 0644); err != nil {
+		return ApplyAIRefreshOutput{}, fmt.Errorf("writing dataset.sql: %w", err)
+	}
+
+	tables, rowCounts, err := listCSVTablesAndRowCounts(newDataDir)
+	if err != nil {
+		return ApplyAIRefreshOutput{}, err
+	}
+
+	revManifest := scenario.RevisionManifest{
+		Scenario:          r.scenarioPath,
+		Revision:          newRevID,
+		SchemaFingerprint: currentFP,
+		CreatedAt:         time.Now().UTC(),
+		Source:            "refresh",
+		Tables:            tables,
+		RowCounts:         rowCounts,
+		Services:          []string{"postgres"},
+	}
+	if err := scenario.WriteRevisionManifest(newRevDir, revManifest); err != nil {
+		return ApplyAIRefreshOutput{}, err
+	}
+
+	scenarioManifest, _ := scenario.ReadManifest(r.scenarioDir)
+	if scenarioManifest.Scenario == "" {
+		scenarioManifest = scenario.Manifest{Scenario: r.scenarioPath, CreatedAt: time.Now().UTC()}
+	}
+	scenarioManifest.UpdatedAt = time.Now().UTC()
+	scenarioManifest.LatestRevision = newRevID
+	_ = scenario.WriteManifest(r.scenarioDir, scenarioManifest)
+
+	pointers, _ := scenario.ReadPointers(r.scenarioDir)
+	pointers.Latest = newRevID
+	_ = scenario.WritePointers(r.scenarioDir, pointers)
+
+	return ApplyAIRefreshOutput{
+		Scenario:     r.scenarioPath,
+		BaseRevision: r.rev.RevID,
+		NewRevision:  newRevID,
+		Schema:       fpShort,
+		DataDir:      newDataDir,
+	}, nil
+}
+
+// runApplyAIRefresh is the internal implementation — a thin wrapper used by
+// RunApplyAIRefresh (MCP) that calls both phases without interactive prompts.
+func runApplyAIRefresh(ctx context.Context, in applyAIRefreshInput) (ApplyAIRefreshOutput, error) {
+	genResult, err := runGenerateRefreshSQL(ctx, in)
+	if err != nil {
+		return ApplyAIRefreshOutput{}, err
+	}
+	return runApplyGeneratedSQL(ctx, genResult)
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-func loadPlanFile(path string) (refreshplan.Plan, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return refreshplan.Plan{}, fmt.Errorf("reading plan file %s: %w", path, err)
+// loadExistingSQL returns the existing data as a SQL string.
+// Prefers dataset.sql from the revision; falls back to converting CSVs.
+func loadExistingSQL(revDir, dataDir string, fkGraph map[string]map[string]struct{}) (string, error) {
+	sqlPath := DatasetSQLPath(revDir)
+	if fileExists(sqlPath) {
+		data, err := os.ReadFile(sqlPath)
+		if err != nil {
+			return "", err
+		}
+		return string(data), nil
 	}
-	var plan refreshplan.Plan
-	if err := json.Unmarshal(data, &plan); err != nil {
-		return refreshplan.Plan{}, fmt.Errorf("parsing plan file %s: %w", path, err)
-	}
-	return plan, nil
+	// No dataset.sql — convert CSVs to TRUNCATE+INSERT SQL.
+	return csvDirToSQL(dataDir, fkGraph)
 }
 
-// applySavedRules replaces placeholder operations in a plan with resolved
-// operations from the user's saved rules in seedmancer.yaml.
-func applySavedRules(plan refreshplan.Plan, rules map[string]utils.RefreshRule) refreshplan.Plan {
-	if len(rules) == 0 {
-		return plan
+// csvDirToSQL reads all <table>.csv files from dataDir and produces a
+// self-contained TRUNCATE+INSERT SQL script. fkGraph is used to topologically
+// sort INSERT statements so parent tables are emitted before child tables,
+// preventing FK constraint violations.
+func csvDirToSQL(dataDir string, fkGraph map[string]map[string]struct{}) (string, error) {
+	entries, err := os.ReadDir(dataDir)
+	if err != nil {
+		return "", fmt.Errorf("reading data dir: %w", err)
 	}
-	for i, op := range plan.Operations {
-		if op.Source != "" {
-			continue // already resolved
-		}
-		key := op.Table + "." + op.Column
-		rule, ok := rules[key]
-		if !ok {
+
+	var sb strings.Builder
+	tableNames := make([]string, 0)
+	type tableData struct {
+		name    string
+		headers []string
+		rows    [][]string
+	}
+	tables := make([]tableData, 0)
+
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".csv") {
 			continue
 		}
-		plan.Operations[i].Strategy = refreshplan.Strategy(rule.Strategy)
-		if rule.Value != "" {
-			plan.Operations[i].Value = refreshplan.StringValue(rule.Value)
-		}
-		if rule.FromColumn != "" {
-			plan.Operations[i].FromColumn = rule.FromColumn
-		}
-		plan.Operations[i].Source = refreshplan.SourceRule
-		plan.Operations[i].Reasoning = "applied saved rule from seedmancer.yaml"
-	}
-	return plan
-}
+		tableName := strings.TrimSuffix(e.Name(), ".csv")
+		tableNames = append(tableNames, tableName)
 
-// hasUnresolvedOps returns true if any operation has an empty Source
-// (meaning it still needs a user/AI decision).
-func hasUnresolvedOps(plan refreshplan.Plan) bool {
-	for _, op := range plan.Operations {
-		if op.Source == "" && op.Op != "" {
-			return true
+		f, err := os.Open(filepath.Join(dataDir, e.Name()))
+		if err != nil {
+			return "", fmt.Errorf("opening %s: %w", e.Name(), err)
 		}
-	}
-	return false
-}
-
-// interactiveResolve prompts the user for each unresolved operation.
-func interactiveResolve(plan refreshplan.Plan, report driftreport.Report) (refreshplan.Plan, error) {
-	_ = report // may be used for context in future
-
-	scanner := bufio.NewScanner(os.Stdin)
-	for i, op := range plan.Operations {
-		if op.Source != "" || op.Op == "" {
+		r := csv.NewReader(f)
+		records, err := r.ReadAll()
+		f.Close()
+		if err != nil {
+			return "", fmt.Errorf("parsing %s: %w", e.Name(), err)
+		}
+		if len(records) == 0 {
+			tables = append(tables, tableData{name: tableName})
 			continue
 		}
-
-		fmt.Fprintf(os.Stderr, "\n")
-		ui.Warn("Unresolved: %s %s.%s", op.Op, op.Table, op.Column)
-		if op.Reasoning != "" {
-			ui.Info("  Reason: %s", op.Reasoning)
-		}
-
-		ui.Info("  Strategies: constant / empty / uuid / timestamp / derive / skip")
-		fmt.Fprintf(os.Stderr, "  Strategy [constant]: ")
-		scanner.Scan()
-		strategy := strings.TrimSpace(scanner.Text())
-		if strategy == "" {
-			strategy = "constant"
-		}
-		if strategy == "skip" {
-			plan.Operations[i].Source = "skip"
-			continue
-		}
-
-		plan.Operations[i].Strategy = refreshplan.Strategy(strategy)
-		plan.Operations[i].Source = refreshplan.SourceUser
-
-		if strategy == "constant" || strategy == "derive" {
-			prompt := "  Value"
-			if strategy == "derive" {
-				prompt = "  From column"
-			}
-			fmt.Fprintf(os.Stderr, "%s: ", prompt)
-			scanner.Scan()
-			val := strings.TrimSpace(scanner.Text())
-			if strategy == "derive" {
-				plan.Operations[i].FromColumn = val
-			} else {
-				plan.Operations[i].Value = refreshplan.StringValue(val)
-			}
-		}
-	}
-	return plan, nil
-}
-
-// callAIPlanner posts the drift context to the Seedmancer backend and
-// retrieves a complete refresh plan. Requires a valid API token (Pro).
-func callAIPlanner(ctx context.Context, report driftreport.Report, oldSchemaJSON, newSchemaJSON []byte, cfg utils.Config) (refreshplan.Plan, error) {
-	token, err := utils.ResolveAPIToken("")
-	if err != nil {
-		return refreshplan.Plan{}, fmt.Errorf("AI planner requires a Seedmancer Pro account — run `seedmancer login` first: %w", err)
+		tables = append(tables, tableData{name: tableName, headers: records[0], rows: records[1:]})
 	}
 
-	// Redact sensitive columns from schema hints before sending.
-	oldSchemaJSON = redactSchemaJSON(oldSchemaJSON, cfg.Refresh.RedactColumns)
-	newSchemaJSON = redactSchemaJSON(newSchemaJSON, cfg.Refresh.RedactColumns)
-
-	// Build the request body.
-	type aiRequest struct {
-		Report    driftreport.Report `json:"driftReport"`
-		OldSchema json.RawMessage    `json:"oldSchema"`
-		NewSchema json.RawMessage    `json:"newSchema"`
-	}
-	reqBody, err := json.Marshal(aiRequest{
-		Report:    report,
-		OldSchema: oldSchemaJSON,
-		NewSchema: newSchemaJSON,
-	})
-	if err != nil {
-		return refreshplan.Plan{}, err
+	if len(tableNames) > 0 {
+		sb.WriteString("TRUNCATE TABLE ")
+		sb.WriteString(strings.Join(quoteIdents(tableNames), ", "))
+		sb.WriteString(" RESTART IDENTITY CASCADE;\n\n")
 	}
 
-	baseURL := utils.GetBaseURL()
-	endpoint := fmt.Sprintf("%s/v1.0/refresh-plan", baseURL)
-
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(reqBody))
-	if err != nil {
-		return refreshplan.Plan{}, fmt.Errorf("building AI planner request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+token)
-
-	resp, err := http.DefaultClient.Do(httpReq)
-	if err != nil {
-		return refreshplan.Plan{}, fmt.Errorf("AI planner request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusForbidden {
-		return refreshplan.Plan{}, fmt.Errorf("AI refresh planning requires a Seedmancer Pro subscription")
-	}
-	if resp.StatusCode == http.StatusServiceUnavailable {
-		return refreshplan.Plan{}, fmt.Errorf("AI backend is temporarily unavailable — please try again later")
-	}
-	if resp.StatusCode != http.StatusOK {
-		type apiErr struct {
-			Errors []struct {
-				Message string `json:"message"`
-			} `json:"errors"`
-		}
-		var aerr apiErr
-		if decErr := json.NewDecoder(resp.Body).Decode(&aerr); decErr == nil && len(aerr.Errors) > 0 {
-			return refreshplan.Plan{}, fmt.Errorf("AI planner error: %s", aerr.Errors[0].Message)
-		}
-		return refreshplan.Plan{}, fmt.Errorf("AI planner returned HTTP %d", resp.StatusCode)
-	}
-
-	// The backend returns { operations: [...] }; we fill Plan metadata locally.
-	type aiResponse struct {
-		Operations []refreshplan.Operation `json:"operations"`
-	}
-	var aiResp aiResponse
-	if err := json.NewDecoder(resp.Body).Decode(&aiResp); err != nil {
-		return refreshplan.Plan{}, fmt.Errorf("decoding AI planner response: %w", err)
-	}
-
-	plan := refreshplan.Plan{
-		PlanSource: "ai",
-		Operations: aiResp.Operations,
-	}
-	return plan, nil
-}
-
-// redactSchemaJSON strips sensitive column names from schema JSON before it
-// leaves the machine. It only removes columns whose names match the builtin
-// blocklist or the user's extra patterns.
-func redactSchemaJSON(schemaJSON []byte, extras []string) []byte {
-	sensitive := []string{"password", "token", "secret", "apikey", "apitoken",
-		"accesstoken", "refreshtoken", "privatekey", "secretkey", "credential"}
-	for _, e := range extras {
-		sensitive = append(sensitive, strings.ToLower(e))
-	}
-
-	var raw map[string]interface{}
-	if err := json.Unmarshal(schemaJSON, &raw); err != nil {
-		return schemaJSON
-	}
-
-	tables, _ := raw["tables"].([]interface{})
+	// Sort INSERT order so parent tables (no FK dependencies from other tables
+	// in the set) come before child tables.
+	sortedNames := topoSort(tableNames, fkGraph)
+	tablesByName := make(map[string]tableData, len(tables))
 	for _, t := range tables {
-		tbl, ok := t.(map[string]interface{})
+		tablesByName[t.name] = t
+	}
+
+	for _, name := range sortedNames {
+		t := tablesByName[name]
+		if len(t.headers) == 0 || len(t.rows) == 0 {
+			continue
+		}
+		sb.WriteString(fmt.Sprintf("INSERT INTO %s (%s) VALUES\n",
+			quoteIdent(t.name),
+			strings.Join(quoteIdents(t.headers), ", "),
+		))
+		for i, row := range t.rows {
+			sb.WriteString("  (")
+			for j, val := range row {
+				if j > 0 {
+					sb.WriteString(", ")
+				}
+				sb.WriteString(sqlQuoteValue(val))
+			}
+			sb.WriteString(")")
+			if i < len(t.rows)-1 {
+				sb.WriteString(",\n")
+			} else {
+				sb.WriteString(";\n\n")
+			}
+		}
+	}
+	return sb.String(), nil
+}
+
+func quoteIdent(s string) string {
+	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
+}
+
+func quoteIdents(ss []string) []string {
+	out := make([]string, len(ss))
+	for i, s := range ss {
+		out[i] = quoteIdent(s)
+	}
+	return out
+}
+
+// buildFKGraph parses a schema JSON blob and returns a map from each table
+// name to the set of table names it directly references via foreign keys.
+func buildFKGraph(schemaJSON []byte) map[string]map[string]struct{} {
+	var raw struct {
+		Tables []struct {
+			Name    string `json:"name"`
+			Columns []struct {
+				Nullable   bool `json:"nullable"`
+				ForeignKey *struct {
+					Table string `json:"table"`
+				} `json:"foreignKey"`
+			} `json:"columns"`
+		} `json:"tables"`
+	}
+	if err := json.Unmarshal(schemaJSON, &raw); err != nil {
+		return nil
+	}
+	graph := make(map[string]map[string]struct{}, len(raw.Tables))
+	for _, t := range raw.Tables {
+		graph[t.Name] = make(map[string]struct{})
+		for _, c := range t.Columns {
+			// Only include non-nullable FK edges. Nullable FKs (e.g. the
+			// back-reference from scenarios.latest_revision_id to
+			// scenario_revisions.id) create circular dependencies that break
+			// topological sort; they can always be inserted as NULL first and
+			// updated after the child rows exist.
+			if c.ForeignKey != nil && c.ForeignKey.Table != "" && c.ForeignKey.Table != t.Name && !c.Nullable {
+				graph[t.Name][c.ForeignKey.Table] = struct{}{}
+			}
+		}
+	}
+	return graph
+}
+
+// topoSort returns tables sorted so that each table appears after all tables it
+// references via foreign keys (Kahn's algorithm). Tables not present in fkGraph
+// are treated as having no dependencies. Any remaining tables (cycles or unknown
+// refs) are appended at the end in their original order.
+func topoSort(tables []string, fkGraph map[string]map[string]struct{}) []string {
+	// Build in-degree map restricted to the tables present in this CSV set.
+	present := make(map[string]struct{}, len(tables))
+	for _, t := range tables {
+		present[t] = struct{}{}
+	}
+
+	inDegree := make(map[string]int, len(tables))
+	for _, t := range tables {
+		inDegree[t] = 0
+	}
+	for _, t := range tables {
+		refs, ok := fkGraph[t]
 		if !ok {
 			continue
 		}
-		cols, _ := tbl["columns"].([]interface{})
-		for j, c := range cols {
-			col, ok := c.(map[string]interface{})
-			if !ok {
-				continue
+		for dep := range refs {
+			if _, inSet := present[dep]; inSet {
+				inDegree[t]++
 			}
-			name, _ := col["name"].(string)
-			lower := strings.ToLower(name)
-			for _, s := range sensitive {
-				if strings.Contains(lower, s) {
-					col["name"] = "[redacted]"
-					cols[j] = col
-					break
+		}
+	}
+
+	// Seed queue with tables that have no in-set dependencies.
+	queue := make([]string, 0, len(tables))
+	for _, t := range tables {
+		if inDegree[t] == 0 {
+			queue = append(queue, t)
+		}
+	}
+
+	result := make([]string, 0, len(tables))
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		result = append(result, cur)
+		// Reduce in-degree of tables that depend on cur.
+		for _, t := range tables {
+			refs := fkGraph[t]
+			if _, refsCur := refs[cur]; refsCur {
+				if _, inSet := present[cur]; inSet {
+					inDegree[t]--
+					if inDegree[t] == 0 {
+						queue = append(queue, t)
+					}
 				}
 			}
 		}
 	}
 
-	out, err := json.Marshal(raw)
-	if err != nil {
-		return schemaJSON
+	// Append any remaining (cycle or missing from fkGraph) in original order.
+	inResult := make(map[string]struct{}, len(result))
+	for _, t := range result {
+		inResult[t] = struct{}{}
 	}
-	return out
+	for _, t := range tables {
+		if _, seen := inResult[t]; !seen {
+			result = append(result, t)
+		}
+	}
+	return result
+}
+
+// goTimestampRe matches Go's time.String() format:
+// "2006-01-02 15:04:05.999999999 -0700 MST"
+// PostgreSQL rejects the combination of a numeric offset and a timezone name.
+// We strip the trailing timezone abbreviation and keep only the numeric offset.
+var goTimestampRe = regexp.MustCompile(
+	`^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?) ([+-]\d{4}) \w+$`,
+)
+
+// sqlQuoteValue converts a CSV cell value to a SQL literal.
+func sqlQuoteValue(v string) string {
+	if v == "" || strings.ToUpper(v) == "NULL" {
+		return "NULL"
+	}
+	// Normalize Go's time.String() timestamp to a PostgreSQL-compatible form by
+	// removing the trailing timezone abbreviation (e.g. " UTC").
+	if m := goTimestampRe.FindStringSubmatch(v); m != nil {
+		return "'" + m[1] + m[2] + "'"
+	}
+	return "'" + strings.ReplaceAll(v, "'", "''") + "'"
+}
+
+// buildSchemaDiffText produces a compact human-readable list of changes.
+func buildSchemaDiffText(report driftreport.Report) string {
+	if !report.HasDrift {
+		return "(no changes)"
+	}
+	lines := make([]string, 0, len(report.Changes))
+	for _, ch := range report.Changes {
+		lines = append(lines, ch.String())
+	}
+	return strings.Join(lines, "\n")
+}
+
+// ─── SQL preview helpers ──────────────────────────────────────────────────────
+
+// tableSQLStats holds the columns and row count extracted from an INSERT block.
+// syncRevisionFingerprint patches an existing revision manifest's SchemaFingerprint
+// to newFP and writes the corresponding schema.json into the schema store.
+// It is called when refresh detects no structural drift but the stored fingerprint
+// differs from the current one (non-deterministic export ordering, algorithm change, etc.).
+func syncRevisionFingerprint(projectRoot, storagePath string, report driftreport.Report, newSchemaJSON []byte) error {
+	revDir := scenario.RevisionDir(projectRoot, storagePath, report.Scenario, report.BaseRevision)
+	m, err := scenario.ReadRevisionManifest(revDir)
+	if err != nil {
+		return fmt.Errorf("reading revision manifest: %w", err)
+	}
+	m.SchemaFingerprint = report.NewSchemaFP
+	if err := scenario.WriteRevisionManifest(revDir, m); err != nil {
+		return fmt.Errorf("writing revision manifest: %w", err)
+	}
+
+	newFPShort := utils.FingerprintShort(report.NewSchemaFP)
+	schemaPath := scenario.SchemaJSONPath(projectRoot, storagePath, newFPShort)
+	if _, statErr := os.Stat(schemaPath); os.IsNotExist(statErr) {
+		if err := os.MkdirAll(filepath.Dir(schemaPath), 0755); err != nil {
+			return fmt.Errorf("creating schema store dir: %w", err)
+		}
+		if err := os.WriteFile(schemaPath, newSchemaJSON, 0644); err != nil {
+			return fmt.Errorf("writing schema.json: %w", err)
+		}
+	}
+	return nil
+}
+
+type tableSQLStats struct {
+	Columns  []string
+	RowCount int
+}
+
+// insertTableRe matches: INSERT INTO "tableName" (col, ...)
+var insertTableRe = regexp.MustCompile(`(?i)INSERT\s+INTO\s+"([^"]+)"\s*\(([^)]+)\)`)
+
+// parseSQLStats scans INSERT INTO blocks in sql and returns per-table stats.
+func parseSQLStats(sql string) map[string]tableSQLStats {
+	result := make(map[string]tableSQLStats)
+	matches := insertTableRe.FindAllStringSubmatchIndex(sql, -1)
+	for i, m := range matches {
+		tableName := sql[m[2]:m[3]]
+		colStr := sql[m[4]:m[5]]
+
+		// Parse column names: strip quotes and trim spaces.
+		var cols []string
+		for _, c := range strings.Split(colStr, ",") {
+			c = strings.TrimSpace(c)
+			c = strings.Trim(c, `"`)
+			if c != "" {
+				cols = append(cols, c)
+			}
+		}
+
+		// Count rows: find the VALUES block — everything until the next INSERT or end.
+		bodyStart := m[1]
+		bodyEnd := len(sql)
+		if i+1 < len(matches) {
+			bodyEnd = matches[i+1][0]
+		}
+		body := sql[bodyStart:bodyEnd]
+		rowCount := countValueRows(body)
+
+		result[tableName] = tableSQLStats{Columns: cols, RowCount: rowCount}
+	}
+	return result
+}
+
+// countValueRows counts the number of top-level value tuples in an INSERT body.
+// It increments the counter each time it encounters '(' at depth 0 after VALUES.
+func countValueRows(body string) int {
+	valIdx := strings.Index(strings.ToUpper(body), "VALUES")
+	if valIdx < 0 {
+		return 0
+	}
+	s := body[valIdx+6:]
+	count := 0
+	depth := 0
+	for _, ch := range s {
+		switch ch {
+		case '(':
+			if depth == 0 {
+				count++
+			}
+			depth++
+		case ')':
+			depth--
+		}
+	}
+	return count
+}
+
+// printSQLSummary compares old and new INSERT stats and prints a compact table.
+func printSQLSummary(oldSQL, newSQL string) {
+	old := parseSQLStats(oldSQL)
+	nw := parseSQLStats(newSQL)
+
+	// Collect all table names in new-SQL order (insertion order matters for display).
+	seen := make(map[string]struct{})
+	var tables []string
+	for _, m := range insertTableRe.FindAllStringSubmatch(newSQL, -1) {
+		name := m[1]
+		if _, ok := seen[name]; !ok {
+			seen[name] = struct{}{}
+			tables = append(tables, name)
+		}
+	}
+	// Append tables only in old SQL (removed).
+	for name := range old {
+		if _, ok := seen[name]; !ok {
+			tables = append(tables, name)
+		}
+	}
+
+	if len(tables) == 0 {
+		return
+	}
+
+	// Calculate column width for table name column.
+	maxLen := 0
+	for _, t := range tables {
+		if len(t) > maxLen {
+			maxLen = len(t)
+		}
+	}
+
+	fmt.Fprintln(os.Stderr, "\nGenerated SQL summary:")
+	for _, name := range tables {
+		ns, inNew := nw[name]
+		os_, inOld := old[name]
+
+		pad := strings.Repeat(" ", maxLen-len(name)+2)
+
+		switch {
+		case inNew && !inOld:
+			rows := rowWord(ns.RowCount)
+			fmt.Fprintf(os.Stderr, "  + %s%s%s   (new table)\n", name, pad, rows)
+
+		case !inNew && inOld:
+			fmt.Fprintf(os.Stderr, "  - %s%s        (removed)\n", name, pad)
+
+		case inNew && inOld:
+			rows := rowWord(ns.RowCount)
+			colNote := columnNote(os_.Columns, ns.Columns)
+			if colNote == "" {
+				fmt.Fprintf(os.Stderr, "    %s%s%s\n", name, pad, rows)
+			} else {
+				fmt.Fprintf(os.Stderr, "  ~ %s%s%s   %s\n", name, pad, rows, colNote)
+			}
+		}
+	}
+	fmt.Fprintln(os.Stderr)
+}
+
+func rowWord(n int) string {
+	if n == 1 {
+		return "1 row "
+	}
+	return fmt.Sprintf("%d rows", n)
+}
+
+func columnNote(old, nw []string) string {
+	oldSet := make(map[string]struct{}, len(old))
+	for _, c := range old {
+		oldSet[c] = struct{}{}
+	}
+	newSet := make(map[string]struct{}, len(nw))
+	for _, c := range nw {
+		newSet[c] = struct{}{}
+	}
+	var added, removed []string
+	for _, c := range nw {
+		if _, ok := oldSet[c]; !ok {
+			added = append(added, c)
+		}
+	}
+	for _, c := range old {
+		if _, ok := newSet[c]; !ok {
+			removed = append(removed, c)
+		}
+	}
+	if len(added) == 0 && len(removed) == 0 {
+		return ""
+	}
+	var parts []string
+	for _, c := range added {
+		parts = append(parts, "+"+c)
+	}
+	for _, c := range removed {
+		parts = append(parts, "-"+c)
+	}
+	return "(cols: " + strings.Join(parts, ", ") + ")"
+}
+
+// refreshSQLRequest is the body sent to /generate-refresh-sql.
+type refreshSQLRequest struct {
+	Schema      generateSchema `json:"schema"`
+	SchemaDiff  string         `json:"schemaDiff"`
+	ExistingSQL string         `json:"existingSql"`
+	Prompt      string         `json:"prompt,omitempty"`
+}
+
+// refreshSQLResponse is the response from /generate-refresh-sql.
+type refreshSQLResponse struct {
+	SQL string `json:"sql"`
+}
+
+// callGenerateRefreshSQL posts to the backend and returns the AI SQL.
+func callGenerateRefreshSQL(ctx context.Context, token string, schema generateSchema, schemaDiff, existingSQL, prompt string) (string, error) {
+	reqBody, err := json.Marshal(refreshSQLRequest{
+		Schema:      schema,
+		SchemaDiff:  schemaDiff,
+		ExistingSQL: existingSQL,
+		Prompt:      prompt,
+	})
+	if err != nil {
+		return "", err
+	}
+
+	baseURL := utils.GetBaseURL()
+	req, err := http.NewRequestWithContext(ctx, "POST", baseURL+"/generate-refresh-sql", bytes.NewReader(reqBody))
+	if err != nil {
+		return "", fmt.Errorf("building request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", utils.BearerAPIToken(token))
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("calling /generate-refresh-sql: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == http.StatusUnauthorized {
+		return "", utils.ErrInvalidAPIToken
+	}
+	if resp.StatusCode == http.StatusPaymentRequired {
+		return "", fmt.Errorf("AI refresh requires a Seedmancer Pro subscription")
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("generate-refresh-sql failed (HTTP %d): %s", resp.StatusCode, string(respBody))
+	}
+
+	var result refreshSQLResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return "", fmt.Errorf("parsing response: %w", err)
+	}
+	if strings.TrimSpace(result.SQL) == "" {
+		return "", fmt.Errorf("backend returned empty SQL")
+	}
+	return result.SQL, nil
 }
 
 // exportSchemaToStore exports schema sidecars (functions/triggers) to the

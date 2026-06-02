@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -335,6 +336,71 @@ func (p *PostgresManager) ExtractSchema() (*Schema, error) {
 			Name:    currentTable,
 			Columns: currentColumns,
 		})
+	}
+
+	// ── CHECK constraints → AllowedValues ────────────────────────────────────
+	// Query IN / ANY(ARRAY[...]) check constraints and attach allowed values to
+	// the matching column so the AI can respect them during generation.
+	// Postgres stores simple enum-style CHECKs as:
+	//   CHECK ((col = ANY (ARRAY['a'::text, 'b'::text])))
+	// rather than the SQL-standard IN (...) syntax, so we match both forms.
+	checkRows, err := p.DB.Query(`
+		SELECT
+			cls.relname   AS table_name,
+			att.attname   AS column_name,
+			pg_get_constraintdef(con.oid) AS check_clause
+		FROM pg_constraint con
+		JOIN pg_class     cls ON cls.oid = con.conrelid
+		JOIN pg_namespace ns  ON ns.oid  = cls.relnamespace
+		JOIN pg_attribute att ON att.attrelid = con.conrelid
+		                     AND att.attnum   = ANY(con.conkey)
+		WHERE con.contype = 'c'
+		  AND ns.nspname  = 'public'
+		  AND (
+			pg_get_constraintdef(con.oid) LIKE '%IN (%'
+			OR pg_get_constraintdef(con.oid) LIKE '%ANY (ARRAY[%'
+		  )
+	`)
+	if err == nil {
+		defer checkRows.Close()
+		// Handles both:  IN ('a', 'b')  and  = ANY (ARRAY['a'::text, 'b'::text])
+		valRegion := regexp.MustCompile(`(?i)(?:\bIN\s*\(([^)]+)\)|ANY\s*\(\s*ARRAY\[([^\]]+)\]\s*\))`)
+		quotedVal := regexp.MustCompile(`'([^']*)'`)
+		for checkRows.Next() {
+			var tblName, colName, clause string
+			if err := checkRows.Scan(&tblName, &colName, &clause); err != nil {
+				continue
+			}
+			sub := valRegion.FindStringSubmatch(clause)
+			if sub == nil {
+				continue
+			}
+			// sub[1] is the IN(...) group, sub[2] is the ARRAY[...] group.
+			region := sub[1]
+			if region == "" {
+				region = sub[2]
+			}
+			var vals []string
+			for _, mv := range quotedVal.FindAllStringSubmatch(region, -1) {
+				if len(mv) > 1 {
+					vals = append(vals, mv[1])
+				}
+			}
+			if len(vals) == 0 {
+				continue
+			}
+			// Attach to the matching column in schema.Tables
+			for ti := range schema.Tables {
+				if schema.Tables[ti].Name != tblName {
+					continue
+				}
+				for ci := range schema.Tables[ti].Columns {
+					if schema.Tables[ti].Columns[ci].Name == colName {
+						schema.Tables[ti].Columns[ci].AllowedValues = vals
+					}
+				}
+			}
+		}
 	}
 
 	return schema, nil

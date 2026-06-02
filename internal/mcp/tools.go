@@ -218,6 +218,20 @@ func registerTools(s *mcp.Server) {
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
+		Name:  "generate_dataset",
+		Title: "Generate scenario revision via cloud AI",
+		Description: "Ask the Seedmancer cloud AI to synthesise a full, idempotent SQL script from the " +
+			"scenario's schema and a natural-language prompt, then run the SQL locally and snapshot " +
+			"the result as a new revision. Synchronous — no polling required. The schema is resolved " +
+			"from the inherit scenario if provided, then from the scenario's existing latest revision, " +
+			"then by auto-exporting the current database.",
+		Annotations: &mcp.ToolAnnotations{DestructiveHint: falsePtr(), IdempotentHint: false},
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in cmd.GenerateInput) (*mcp.CallToolResult, cmd.GenerateOutput, error) {
+		out, err := cmd.RunGenerate(ctx, in)
+		return nil, out, err
+	})
+
+	mcp.AddTool(s, &mcp.Tool{
 		Name:        "push_dataset",
 		Title:       "Push scenario to cloud",
 		Description: "Upload a scenario's latest revision (CSVs + schema sidecars) to the connected Seedmancer account. The scenario path is used as the cloud dataset name.",
@@ -275,7 +289,7 @@ func registerTools(s *mcp.Server) {
 		Title: "Check scenario schema drift (structured)",
 		Description: "Compare a scenario revision's stored schema with the live database schema. " +
 			"Returns a structured drift report with changes classified as auto/likely/decision/breaking. " +
-			"Use this instead of check_scenario when you need to drive a refresh workflow.",
+			"Use this to inspect schema drift before running apply_ai_refresh.",
 		Annotations: readOnly,
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in cmd.CheckStateSchemaInput) (*mcp.CallToolResult, cmd.CheckStateSchemaOutput, error) {
 		out, err := cmd.RunCheckStateSchema(ctx, in)
@@ -283,40 +297,15 @@ func registerTools(s *mcp.Server) {
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
-		Name:  "create_refresh_plan",
-		Title: "Create refresh plan",
-		Description: "Analyse schema drift for a scenario and build a refresh plan. " +
-			"Auto and likely changes are filled in automatically; decision/breaking changes " +
-			"are left as stubs for you to populate before calling apply_refresh_plan. " +
-			"You can also supply your own operations array to skip the classifier.",
-		Annotations: &mcp.ToolAnnotations{DestructiveHint: falsePtr()},
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, in cmd.CreateRefreshPlanInput) (*mcp.CallToolResult, cmd.CreateRefreshPlanOutput, error) {
-		out, err := cmd.RunCreateRefreshPlan(ctx, in)
-		return nil, out, err
-	})
-
-	mcp.AddTool(s, &mcp.Tool{
-		Name:  "validate_refresh_plan",
-		Title: "Validate refresh plan",
-		Description: "Validate a refresh plan against the old and new schema. " +
-			"Returns a list of validation errors (empty = valid). " +
-			"Always call this before apply_refresh_plan.",
-		Annotations: readOnly,
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, in cmd.ValidateRefreshPlanInput) (*mcp.CallToolResult, cmd.ValidateRefreshPlanOutput, error) {
-		out, err := cmd.RunValidateRefreshPlan(ctx, in)
-		return nil, out, err
-	})
-
-	mcp.AddTool(s, &mcp.Tool{
-		Name:  "apply_refresh_plan",
-		Title: "Apply refresh plan",
-		Description: "Apply a refresh plan to a scenario's base revision. Transforms CSVs in a " +
-			"temp directory, then commits the result as a new rNNN revision and advances " +
-			"pointers.latest. The base revision is never modified. " +
-			"ALWAYS run validate_refresh_plan first.",
+		Name:  "apply_ai_refresh",
+		Title: "Refresh scenario data with AI",
+		Description: "Detects schema drift for a scenario, sends the existing data and schema diff to the " +
+			"Seedmancer AI backend, and creates a new revision whose data conforms to the current schema. " +
+			"Existing rows are preserved; only what the schema change requires is modified. " +
+			"Requires a valid API token.",
 		Annotations: &mcp.ToolAnnotations{DestructiveHint: falsePtr(), IdempotentHint: false},
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, in cmd.ApplyRefreshPlanInput) (*mcp.CallToolResult, cmd.ApplyRefreshPlanOutput, error) {
-		out, err := cmd.RunApplyRefreshPlan(ctx, in)
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in cmd.ApplyAIRefreshInput) (*mcp.CallToolResult, cmd.ApplyAIRefreshOutput, error) {
+		out, err := cmd.RunApplyAIRefresh(ctx, in)
 		return nil, out, err
 	})
 
