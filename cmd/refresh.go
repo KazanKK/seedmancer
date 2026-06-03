@@ -90,6 +90,8 @@ func runRefreshOne(c *cli.Context, scenarioArg string) error {
 		return nil
 	}
 
+	printSchemaBeforeAfter(out.OldSchemaJSON, out.NewSchemaJSON, out.BaseRevision)
+
 	if !c.Bool("yes") {
 		if !confirmApply(out.Scenario) {
 			ui.Info("Aborted.")
@@ -218,6 +220,177 @@ func printDriftSummary(r driftreport.Report) {
 	fmt.Fprintf(os.Stderr, "  (%s)\n", strings.Join(parts, ", "))
 }
 
+// printSchemaBeforeAfter renders a per-row arrow-style schema diff with ANSI colors.
+// Each row shows:  <bold name>  <dim cols>  →  <bold name>  <dim cols>  <tag>
+// The → arrows are vertically aligned by padding the before-side to a fixed width.
+func printSchemaBeforeAfter(oldJSON, newJSON []byte, baseRev string) {
+	if len(oldJSON) == 0 || len(newJSON) == 0 {
+		return
+	}
+	var oldSchema, newSchema utils.SchemaJSON
+	if err := json.Unmarshal(oldJSON, &oldSchema); err != nil {
+		return
+	}
+	if err := json.Unmarshal(newJSON, &newSchema); err != nil {
+		return
+	}
+
+	// Build lookup maps.
+	oldByName := make(map[string]utils.SchemaTable, len(oldSchema.Tables))
+	for _, t := range oldSchema.Tables {
+		oldByName[t.Name] = t
+	}
+	newByName := make(map[string]utils.SchemaTable, len(newSchema.Tables))
+	for _, t := range newSchema.Tables {
+		newByName[t.Name] = t
+	}
+
+	// Union of all table names: old tables first, then new-only tables.
+	seen := make(map[string]struct{})
+	var allNames []string
+	for _, t := range oldSchema.Tables {
+		seen[t.Name] = struct{}{}
+		allNames = append(allNames, t.Name)
+	}
+	for _, t := range newSchema.Tables {
+		if _, ok := seen[t.Name]; !ok {
+			allNames = append(allNames, t.Name)
+		}
+	}
+	if len(allNames) == 0 {
+		return
+	}
+
+	// colList builds a space-separated list of column names, truncated to maxW
+	// visible characters (no ANSI) with … if too long.
+	const colMaxW = 38
+	colList := func(t utils.SchemaTable) string {
+		if len(t.Columns) == 0 {
+			return ""
+		}
+		var names []string
+		for _, c := range t.Columns {
+			names = append(names, c.Name)
+		}
+		s := strings.Join(names, "  ")
+		if len(s) > colMaxW {
+			s = s[:colMaxW-1] + "…"
+		}
+		return s
+	}
+
+	// Compute the max width of the "before" side (visible chars, no ANSI) so
+	// we can pad every row to align the → arrows in a single column.
+	// before-side = 2-space indent + name + 2 gap + cols
+	nameW := 0
+	for _, n := range allNames {
+		if len(n) > nameW {
+			nameW = len(n)
+		}
+	}
+	// Measure max before-side visible width across all rows.
+	beforeW := 0
+	for _, name := range allNames {
+		oldT, inOld := oldByName[name]
+		var visW int
+		if inOld {
+			cols := colList(oldT)
+			if cols != "" {
+				visW = nameW + 2 + len(cols)
+			} else {
+				visW = nameW
+			}
+		} else {
+			visW = 0 // new-only row: before side is blank
+		}
+		if visW > beforeW {
+			beforeW = visW
+		}
+	}
+	const minBeforeW = 20
+	if beforeW < minBeforeW {
+		beforeW = minBeforeW
+	}
+
+	// Title.
+	title := fmt.Sprintf("Schema changes (%s → live):", baseRev)
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintf(os.Stderr, "  %s\n", ui.Bold(title))
+	fmt.Fprintf(os.Stderr, "  %s\n", ui.Dim(strings.Repeat("─", len(title))))
+
+	for _, name := range allNames {
+		oldT, inOld := oldByName[name]
+		newT, inNew := newByName[name]
+
+		// Build the before-side string (plain, for padding) and after-side.
+		var beforePlain string // used only for length measurement
+		var beforeFormatted string
+		var afterFormatted string
+
+		switch {
+		case inOld && inNew:
+			cols := colList(oldT)
+			if cols != "" {
+				beforePlain = fmt.Sprintf("%-*s  %s", nameW, name, cols)
+				beforeFormatted = fmt.Sprintf("%s  %s", ui.Bold(fmt.Sprintf("%-*s", nameW, name)), ui.Dim(cols))
+			} else {
+				beforePlain = fmt.Sprintf("%-*s", nameW, name)
+				beforeFormatted = ui.Bold(fmt.Sprintf("%-*s", nameW, name))
+			}
+
+			newCols := colList(newT)
+			oldCount, newCount := len(oldT.Columns), len(newT.Columns)
+			var tag string
+			switch {
+			case newCount > oldCount:
+				tag = "  " + ui.Green(fmt.Sprintf("[+%d col]", newCount-oldCount))
+			case newCount < oldCount:
+				tag = "  " + ui.Red(fmt.Sprintf("[-%d col]", oldCount-newCount))
+			}
+			if newCols != "" {
+				afterFormatted = fmt.Sprintf("%s  %s%s", ui.Bold(fmt.Sprintf("%-*s", nameW, name)), ui.Dim(newCols), tag)
+			} else {
+				afterFormatted = ui.Bold(fmt.Sprintf("%-*s", nameW, name)) + tag
+			}
+
+		case inOld && !inNew:
+			cols := colList(oldT)
+			if cols != "" {
+				beforePlain = fmt.Sprintf("%-*s  %s", nameW, name, cols)
+				beforeFormatted = fmt.Sprintf("%s  %s", ui.Bold(fmt.Sprintf("%-*s", nameW, name)), ui.Dim(cols))
+			} else {
+				beforePlain = fmt.Sprintf("%-*s", nameW, name)
+				beforeFormatted = ui.Bold(fmt.Sprintf("%-*s", nameW, name))
+			}
+			afterFormatted = ui.Red("(removed)")
+
+		case !inOld && inNew:
+			beforePlain = strings.Repeat(" ", nameW)
+			beforeFormatted = strings.Repeat(" ", nameW)
+			newCols := colList(newT)
+			tag := "  " + ui.Green("[new]")
+			if newCols != "" {
+				afterFormatted = fmt.Sprintf("%s  %s%s", ui.Bold(fmt.Sprintf("%-*s", nameW, name)), ui.Dim(newCols), tag)
+			} else {
+				afterFormatted = ui.Bold(fmt.Sprintf("%-*s", nameW, name)) + tag
+			}
+		}
+
+		// Pad before side so arrows align.
+		pad := beforeW - len(beforePlain)
+		if pad < 0 {
+			pad = 0
+		}
+		fmt.Fprintf(os.Stderr, "  %s%s  %s  %s\n",
+			beforeFormatted,
+			strings.Repeat(" ", pad),
+			ui.Dim("→"),
+			afterFormatted,
+		)
+	}
+	fmt.Fprintln(os.Stderr)
+}
+
 func confirmApply(scenarioName string) bool {
 	fmt.Fprintf(os.Stderr, "\nRefresh %q with AI? [y/N]: ", scenarioName)
 	scanner := bufio.NewScanner(os.Stdin)
@@ -250,6 +423,9 @@ type CheckStateSchemaOutput struct {
 	// NewSchemaJSON is the current DB schema — included so callers can pass
 	// it straight to apply_ai_refresh without a second DB round-trip.
 	NewSchemaJSON []byte `json:"-"`
+	// OldSchemaJSON is the stored schema from the last snapshot — used for
+	// before/after display.
+	OldSchemaJSON []byte `json:"-"`
 }
 
 // RunCheckStateSchema returns a structured drift report for a scenario.
@@ -308,7 +484,7 @@ func RunCheckStateSchema(_ context.Context, in CheckStateSchemaInput) (CheckStat
 	}
 
 	report := driftreport.Build(scenarioPath, rev.RevID, oldFP, currentFP, changes, storedJSON, currentJSON)
-	return CheckStateSchemaOutput{Report: report, NewSchemaJSON: currentJSON}, nil
+	return CheckStateSchemaOutput{Report: report, NewSchemaJSON: currentJSON, OldSchemaJSON: storedJSON}, nil
 }
 
 // RefreshInput is the input for the drift-check phase of RunRefresh.
@@ -328,6 +504,7 @@ type RefreshOutput struct {
 	NewRevision   string             `json:"newRevision,omitempty"`
 	Schema        string             `json:"schema,omitempty"`
 	DriftReport   driftreport.Report `json:"driftReport"`
+	OldSchemaJSON []byte             `json:"-"`
 	NewSchemaJSON []byte             `json:"-"`
 	// ProjectRoot and StoragePath are populated so callers (e.g. runRefreshOne)
 	// can perform follow-up writes like syncing a stale fingerprint.
@@ -361,6 +538,7 @@ func RunRefresh(ctx context.Context, in RefreshInput) (RefreshOutput, error) {
 		Scenario:      csOut.Scenario,
 		BaseRevision:  csOut.BaseRevision,
 		DriftReport:   csOut.Report,
+		OldSchemaJSON: csOut.OldSchemaJSON,
 		NewSchemaJSON: csOut.NewSchemaJSON,
 		ProjectRoot:   projectRoot,
 		StoragePath:   cfg.StoragePath,
