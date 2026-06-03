@@ -21,7 +21,6 @@ func registerPrompts(s *mcp.Server) {
 		Arguments: []*mcp.PromptArgument{
 			{Name: "scenario", Description: "Scenario path to seed (e.g. 'api-test')", Required: true},
 			{Name: "env", Description: "Target env name (defaults to default_env)"},
-			{Name: "useStable", Description: "Set to 'true' to load the pinned stable revision"},
 			{Name: "testCommand", Description: "Command to run after the reset (e.g. 'pnpm playwright test')"},
 		},
 	}, func(ctx context.Context, req *mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
@@ -32,15 +31,10 @@ func registerPrompts(s *mcp.Server) {
 		}
 		env := args["env"]
 		testCmd := args["testCommand"]
-		useStable := args["useStable"] == "true"
 
 		envLine := ""
 		if env != "" {
 			envLine = fmt.Sprintf(" (env: %s)", env)
-		}
-		stableLine := ""
-		if useStable {
-			stableLine = " and useStable=true"
 		}
 		testLine := ""
 		if testCmd != "" {
@@ -50,12 +44,12 @@ func registerPrompts(s *mcp.Server) {
 		text := fmt.Sprintf(`Goal: reset the database to a known-good scenario revision before running tests.
 
 Steps:
-1. Call the MCP tool 'seed_database' with scenario=%q%s%s and yes=true (agents can't answer interactive prompts).
+1. Call the MCP tool 'seed_database' with scenario=%q%s and yes=true (agents can't answer interactive prompts).
 2. If it fails on a schema mismatch, call 'check_scenario' to see the diff. Re-export the scenario or pass force=true if the diff is intentional.%s
 
 Success criteria:
 - 'seed_database' result has anyError=false.
-- The listed scenario revision matches what the app under test expects.`, scenarioArg, envLine, stableLine, testLine)
+- The listed scenario revision matches what the app under test expects.`, scenarioArg, envLine, testLine)
 
 		return &mcp.GetPromptResult{
 			Description: "Reset-the-DB-before-tests playbook",
@@ -94,7 +88,7 @@ Steps:
 1. Call 'describe_schema' on the scenario's existing schema (use list_history first if you need the fingerprint).
 2. Call 'generate_dataset' with prompt=%q, scenario=%q%s.
 3. After it returns, call 'describe_dataset' on the resulting dataset id to preview the generated rows.
-4. Optionally call 'pin_scenario' to mark the revision as stable, or 'push_dataset' to publish.
+4. Optionally call 'push_dataset' to publish.
 
 Success criteria:
 - 'generate_dataset' returns with a non-empty Path and a new revision id.
@@ -114,7 +108,6 @@ Steps:
    Do NOT patch the old SQL with delta statements — REWRITE the whole script.
 4. Call 'generate_dataset_local' with scenario=%q, inherit=%q, and a FULL SQL script.
 5. Call 'seed_database' with the scenario path to load the revision into other envs.
-6. Optionally call 'pin_scenario' to mark the revision as stable, or 'push_dataset' to publish.
 
 Success criteria:
 - 'generate_dataset_local' returns with a non-empty Path and a new revision id.

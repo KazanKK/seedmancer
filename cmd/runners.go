@@ -49,7 +49,7 @@ var (
 type ListInput struct{}
 
 // ListOutput mirrors `seedmancer list --json`: scenarios known on disk,
-// each with its latest/stable pointers and schema fingerprint.
+// each with its latest revision pointer and schema fingerprint.
 type ListOutput struct {
 	Scenarios []listEntry `json:"scenarios"`
 }
@@ -163,12 +163,10 @@ func RunDescribeDataset(_ context.Context, in DescribeDatasetInput) (DescribeDat
 // ─── get_dataset_sql ──────────────────────────────────────────────────────────
 
 // GetDatasetSQLInput selects a revision by scenario path (and optional
-// revision id / useStable). Defaults follow the same precedence rules as
-// seed_database: explicit revision wins, then useStable, then latest.
+// revision id). Defaults to latest.
 type GetDatasetSQLInput struct {
-	Scenario  string `json:"scenario" jsonschema:"Scenario path (e.g. basic, billing/pro)"`
-	Revision  string `json:"revision,omitempty" jsonschema:"Specific revision id (e.g. r002); defaults to latest"`
-	UseStable bool   `json:"useStable,omitempty" jsonschema:"Use the scenario's stable revision (set via pin)"`
+	Scenario string `json:"scenario" jsonschema:"Scenario path (e.g. basic, billing/pro)"`
+	Revision string `json:"revision,omitempty" jsonschema:"Specific revision id (e.g. r002); defaults to latest"`
 }
 
 type GetDatasetSQLOutput struct {
@@ -197,7 +195,7 @@ func RunGetDatasetSQL(_ context.Context, in GetDatasetSQLInput) (GetDatasetSQLOu
 	if err != nil {
 		return GetDatasetSQLOutput{}, err
 	}
-	rev, err := resolveScenarioRevision(projectRoot, cfg.StoragePath, scenarioPath, in.Revision, in.UseStable)
+	rev, err := resolveScenarioRevision(projectRoot, cfg.StoragePath, scenarioPath, in.Revision)
 	if err != nil {
 		return GetDatasetSQLOutput{}, err
 	}
@@ -702,8 +700,7 @@ alwaysApply: true
 This project uses **Seedmancer** for test data management. Test data lives in
 **scenarios** (slash-separated paths like ` + "`basic`" + ` or ` + "`billing/pro`" + `). Every
 ` + "`export_database`" + ` creates a new immutable **revision** under the scenario
-(e.g. ` + "`r001`" + `, ` + "`r002`" + `). The ` + "`latest`" + ` revision is used by default; pin a
-revision as ` + "`stable`" + ` for CI.
+(e.g. ` + "`r001`" + `, ` + "`r002`" + `). The ` + "`latest`" + ` revision is used by default.
 
 Generation is driven by **SQL**. The agent writes DML
 (` + "`INSERT`" + ` / ` + "`UPDATE`" + ` / ` + "`DELETE`" + `) that runs on top of an inherit base; Seedmancer
@@ -732,7 +729,6 @@ exports the resulting state back to CSV and saves the SQL alongside as
    base first, runs your SQL in a transaction, then snapshots the result as
    a new revision.
 5. ` + "`seed_database`" + ` with the scenario path — loads the latest revision.
-   Pass ` + "`useStable: true`" + ` for the pinned revision.
 
 **` + "`inherit`" + ` is REQUIRED.** ` + "`generate_dataset_local`" + ` always seeds a base
 scenario before applying your SQL.
@@ -785,12 +781,6 @@ seedmancer refresh billing/pro --yes    # auto-apply safe changes only
 seedmancer refresh billing/pro --plan   # preview only
 ` + "```" + `
 
-## Pinning a known-good revision
-
-Use ` + "`pin_scenario`" + ` to mark the current latest (or a specific revision) as
-stable. CI then runs ` + "`seed_database`" + ` with ` + "`useStable: true`" + ` to lock onto
-that revision regardless of newer exports.
-
 ## If this is a brand-new project (no seedmancer.yaml):
 1. ` + "`init_project`" + ` — creates seedmancer.yaml and .seedmancer/.
 2. Then follow the standard workflow above from step 1.
@@ -833,8 +823,7 @@ const claudeMdBlock = `<!-- seedmancer:start -->
 
 This project uses Seedmancer (MCP) for test data, organised into **scenarios**
 (slash-separated paths like ` + "`basic`" + ` or ` + "`billing/pro`" + `). Every export creates
-a new immutable **revision** under the scenario; ` + "`latest`" + ` is used by default,
-` + "`stable`" + ` can be pinned for CI.
+a new immutable **revision** under the scenario; ` + "`latest`" + ` is used by default.
 
 Generation is driven by **SQL** (` + "`INSERT`" + `/` + "`UPDATE`" + `/` + "`DELETE`" + ` DML). Seedmancer
 seeds the inherit base into the configured local env, runs your SQL in a
@@ -867,8 +856,6 @@ When asked to create, generate, or seed test/fixture data:
   ` + "`generate_dataset_local`" + ` with the same scenario path and ` + "`inherit`" + `. A new
   ` + "`rNNN`" + ` revision is created automatically.
 - **Schema drift**: use the refresh workflow if the DB schema changed: ` + "`check_state_schema`" + ` → ` + "`create_refresh_plan`" + ` → ` + "`validate_refresh_plan`" + ` → ` + "`apply_refresh_plan`" + `. Read ` + "`seedmancer://docs/refresh`" + ` for details. ` + "`dataset.sql`" + ` is NEVER deleted — it stays as a permanent AI reference.
-- **Pin for CI**: use ` + "`pin_scenario`" + ` to mark a revision as stable; CI uses
-  ` + "`seed_database`" + ` with ` + "`useStable: true`" + ` to lock onto it.
 - **CLI fallback** (when MCP tools are unavailable): pipe the SQL via stdin heredoc.
   ` + "```" + `
   seedmancer generate-local <scenario> --inherit <base-scenario> <<'EOF'
@@ -944,14 +931,12 @@ func RunInstallAgentRules(_ context.Context, _ InstallAgentRulesInput) (InstallA
 // ─── seed ─────────────────────────────────────────────────────────────────────
 
 // SeedInput is the scenario-aware seed request. Revision selection is
-// the same as the CLI — the explicit revision wins, then `useStable`,
-// then pointers.latest.
+// the same as the CLI — the explicit revision wins, then manifest.latest.
 type SeedInput struct {
-	Scenario  string `json:"scenario" jsonschema:"Scenario path (e.g. basic, billing/pro)"`
-	Revision  string `json:"revision,omitempty" jsonschema:"Specific revision id (e.g. r002); defaults to latest"`
-	UseStable bool   `json:"useStable,omitempty" jsonschema:"Use the scenario's stable revision (set via pin)"`
-	Env       string `json:"env,omitempty" jsonschema:"Comma-separated env names (e.g. 'local,staging'); default_env when empty"`
-	DBURL     string `json:"dbUrl,omitempty" jsonschema:"Ad-hoc target URL (mutually exclusive with env)"`
+	Scenario string `json:"scenario" jsonschema:"Scenario path (e.g. basic, billing/pro)"`
+	Revision string `json:"revision,omitempty" jsonschema:"Specific revision id (e.g. r002); defaults to latest"`
+	Env      string `json:"env,omitempty" jsonschema:"Comma-separated env names (e.g. 'local,staging'); default_env when empty"`
+	DBURL    string `json:"dbUrl,omitempty" jsonschema:"Ad-hoc target URL (mutually exclusive with env)"`
 	// Force seeds even when the database schema fingerprint differs from
 	// the revision's stored fingerprint. Use sparingly — drift usually
 	// means the dataset will fail to load.
@@ -1007,7 +992,7 @@ func RunSeed(_ context.Context, in SeedInput) (SeedOutput, error) {
 		return SeedOutput{}, err
 	}
 
-	rev, err := resolveScenarioRevision(projectRoot, cfg.StoragePath, scenarioPath, in.Revision, in.UseStable)
+	rev, err := resolveScenarioRevision(projectRoot, cfg.StoragePath, scenarioPath, in.Revision)
 	if err != nil {
 		return SeedOutput{}, err
 	}
@@ -1263,14 +1248,8 @@ func RunExport(_ context.Context, in ExportInput) (ExportOutput, error) {
 		scenarioManifest = scenario.Manifest{Scenario: scenarioPath, CreatedAt: now}
 	}
 	scenarioManifest.UpdatedAt = now
-	scenarioManifest.LatestRevision = revID
+	scenarioManifest.Latest = revID
 	if err := scenario.WriteManifest(scenarioDir, scenarioManifest); err != nil {
-		return ExportOutput{}, err
-	}
-
-	pointers, _ := scenario.ReadPointers(scenarioDir)
-	pointers.Latest = revID
-	if err := scenario.WritePointers(scenarioDir, pointers); err != nil {
 		return ExportOutput{}, err
 	}
 
@@ -1382,7 +1361,7 @@ func RunGenerate(ctx context.Context, in GenerateInput) (GenerateOutput, error) 
 		if err != nil {
 			return GenerateOutput{}, fmt.Errorf("invalid inherit scenario: %w", err)
 		}
-		baseRev, err := resolveScenarioRevision(projectRoot, cfg.StoragePath, basePath, "", false)
+		baseRev, err := resolveScenarioRevision(projectRoot, cfg.StoragePath, basePath, "")
 		if err != nil {
 			return GenerateOutput{}, fmt.Errorf("resolving inherit base %q: %w", basePath, err)
 		}
@@ -1562,7 +1541,7 @@ func RunGenerateLocal(ctx context.Context, in GenerateLocalInput) (GenerateLocal
 		if nErr != nil {
 			return GenerateLocalOutput{}, fmt.Errorf("invalid inherit scenario: %w", nErr)
 		}
-		baseRev, rErr := resolveScenarioRevision(projectRoot, cfg.StoragePath, inheritPath, "", false)
+		baseRev, rErr := resolveScenarioRevision(projectRoot, cfg.StoragePath, inheritPath, "")
 		if rErr != nil {
 			return GenerateLocalOutput{}, fmt.Errorf("resolving inherit base %q: %w", inheritPath, rErr)
 		}
@@ -1727,13 +1706,8 @@ func RunGenerateLocal(ctx context.Context, in GenerateLocalInput) (GenerateLocal
 		scenarioManifest = scenario.Manifest{Scenario: scenarioPath, CreatedAt: now}
 	}
 	scenarioManifest.UpdatedAt = now
-	scenarioManifest.LatestRevision = revID
+	scenarioManifest.Latest = revID
 	if err := scenario.WriteManifest(scenarioDir, scenarioManifest); err != nil {
-		return GenerateLocalOutput{}, err
-	}
-	pointers, _ := scenario.ReadPointers(scenarioDir)
-	pointers.Latest = revID
-	if err := scenario.WritePointers(scenarioDir, pointers); err != nil {
 		return GenerateLocalOutput{}, err
 	}
 
@@ -1787,7 +1761,7 @@ func RunSync(ctx context.Context, in SyncInput) (SyncOutput, error) {
 	if err != nil {
 		return SyncOutput{}, err
 	}
-	rev, err := resolveScenarioRevision(projectRoot, cfg.StoragePath, scenarioPath, "", false)
+	rev, err := resolveScenarioRevision(projectRoot, cfg.StoragePath, scenarioPath, "")
 	if err != nil {
 		return SyncOutput{}, err
 	}
@@ -1934,11 +1908,8 @@ func RunFetch(ctx context.Context, in FetchInput) (FetchOutput, error) {
 		scenarioManifest = scenario.Manifest{Scenario: scenarioPath, CreatedAt: now}
 	}
 	scenarioManifest.UpdatedAt = now
-	scenarioManifest.LatestRevision = revID
+	scenarioManifest.Latest = revID
 	_ = scenario.WriteManifest(scenarioDir, scenarioManifest)
-	pointers, _ := scenario.ReadPointers(scenarioDir)
-	pointers.Latest = revID
-	_ = scenario.WritePointers(scenarioDir, pointers)
 
 	_ = ctx
 	return FetchOutput{

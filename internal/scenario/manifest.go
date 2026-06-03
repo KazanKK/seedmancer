@@ -9,14 +9,13 @@ import (
 )
 
 // Manifest is the top-level scenario metadata stored at
-// <scenarioDir>/manifest.json. Pointers live in pointers.json so writes
-// to either file don't have to coordinate.
+// <scenarioDir>/manifest.json. The Latest field is the runtime source of
+// truth for the current revision pointer.
 type Manifest struct {
-	Scenario       string    `json:"scenario"`
-	CreatedAt      time.Time `json:"createdAt"`
-	UpdatedAt      time.Time `json:"updatedAt"`
-	LatestRevision string    `json:"latestRevision,omitempty"`
-	StableRevision string    `json:"stableRevision,omitempty"`
+	Scenario  string    `json:"scenario"`
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
+	Latest    string    `json:"latest,omitempty"`
 }
 
 // RevisionManifest is the per-revision metadata stored at
@@ -55,6 +54,11 @@ func RevisionManifestPath(revisionDir string) string {
 // ReadManifest loads a scenario manifest. Missing file returns
 // (zero-value, os.IsNotExist-true error) so callers can distinguish
 // "scenario doesn't exist yet" from "manifest is corrupt".
+//
+// Silent migration: if a legacy pointers.json exists in the same directory and
+// manifest.Latest is empty, ReadManifest copies the "latest" field from
+// pointers.json into the manifest, rewrites it, and removes pointers.json.
+// This runs at most once per scenario and requires no user action.
 func ReadManifest(scenarioDir string) (Manifest, error) {
 	data, err := os.ReadFile(ScenarioManifestPath(scenarioDir))
 	if err != nil {
@@ -64,6 +68,25 @@ func ReadManifest(scenarioDir string) (Manifest, error) {
 	if err := json.Unmarshal(data, &m); err != nil {
 		return Manifest{}, fmt.Errorf("parsing %s: %w", ScenarioManifestPath(scenarioDir), err)
 	}
+
+	// Migrate legacy pointers.json → manifest.Latest (one-shot, silent).
+	if m.Latest == "" {
+		pointersPath := filepath.Join(scenarioDir, "pointers.json")
+		if pData, pErr := os.ReadFile(pointersPath); pErr == nil {
+			var p struct {
+				Latest string `json:"latest"`
+			}
+			if json.Unmarshal(pData, &p) == nil && p.Latest != "" {
+				m.Latest = p.Latest
+				m.UpdatedAt = time.Now().UTC()
+				// Best-effort: ignore write/remove errors so reads never fail.
+				if wErr := WriteManifest(scenarioDir, m); wErr == nil {
+					_ = os.Remove(pointersPath)
+				}
+			}
+		}
+	}
+
 	return m, nil
 }
 

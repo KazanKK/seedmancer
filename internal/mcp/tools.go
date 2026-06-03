@@ -33,7 +33,7 @@ func registerTools(s *mcp.Server) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name:  "list_datasets",
 		Title: "List scenarios",
-		Description: "List every scenario known on disk along with its latest/stable pointers, " +
+		Description: "List every scenario known on disk along with its latest revision pointer, " +
 			"schema fingerprint, and the services snapshotted with the latest revision.",
 		Annotations: readOnly,
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in cmd.ListInput) (*mcp.CallToolResult, cmd.ListOutput, error) {
@@ -60,8 +60,8 @@ func registerTools(s *mcp.Server) {
 			"self-contained script — do NOT append delta statements to the returned SQL. " +
 			"The next generate_dataset_local call will reject any SQL whose populated tables " +
 			"are missing a leading TRUNCATE or unconditional DELETE FROM. Defaults to the " +
-			"scenario's latest revision; pass `revision: \"rNNN\"` for a specific one or " +
-			"`useStable: true` for the pinned revision. Returns an error when the revision " +
+			"scenario's latest revision; pass `revision: \"rNNN\"` for a specific one. " +
+			"Returns an error when the revision " +
 			"has no dataset.sql sidecar (e.g. it was produced by export_database or pull_dataset).",
 		Annotations: readOnly,
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in cmd.GetDatasetSQLInput) (*mcp.CallToolResult, cmd.GetDatasetSQLOutput, error) {
@@ -168,8 +168,7 @@ func registerTools(s *mcp.Server) {
 		Name:  "seed_database",
 		Title: "Seed database",
 		Description: "Truncate the target env(s) and reload a scenario revision into them. " +
-			"Defaults to the scenario's latest revision; pass `useStable: true` for the pinned " +
-			"revision or `revision: \"rNNN\"` for a specific one. " +
+			"Defaults to the scenario's latest revision; pass `revision: \"rNNN\"` for a specific one. " +
 			"Refuses to seed when the database schema fingerprint differs from the revision's, " +
 			"unless `force: true` is set. This overwrites existing data — intended for test/dev resets.",
 		Annotations: &mcp.ToolAnnotations{DestructiveHint: truePtr(), IdempotentHint: true},
@@ -255,20 +254,10 @@ func registerTools(s *mcp.Server) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "list_history",
 		Title:       "List scenario revisions",
-		Description: "Show every revision of a scenario newest-first, marking which is latest/stable.",
+		Description: "Show every revision of a scenario newest-first, marking which is latest.",
 		Annotations: readOnly,
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in cmd.HistoryInput) (*mcp.CallToolResult, cmd.HistoryOutput, error) {
 		out, err := cmd.RunHistory(ctx, in)
-		return nil, out, err
-	})
-
-	mcp.AddTool(s, &mcp.Tool{
-		Name:        "pin_scenario",
-		Title:       "Pin a scenario revision as stable",
-		Description: "Update pointers.stable for a scenario. Default pins the current latest revision; pass `revision` to pin a specific one.",
-		Annotations: &mcp.ToolAnnotations{DestructiveHint: falsePtr(), IdempotentHint: true},
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, in cmd.PinInput) (*mcp.CallToolResult, cmd.PinOutput, error) {
-		out, err := cmd.RunPin(ctx, in)
 		return nil, out, err
 	})
 

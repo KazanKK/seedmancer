@@ -76,8 +76,6 @@ func main() {
 	listCmd.Category = "Local"
 	historyCmd := cmd.HistoryCommand()
 	historyCmd.Category = "Local"
-	pinCmd := cmd.PinCommand()
-	pinCmd.Category = "Local"
 	checkCmd := cmd.CheckCommand()
 	checkCmd.Category = "Local"
 	refreshCmd := cmd.RefreshCommand()
@@ -104,15 +102,14 @@ func main() {
 		HideHelpCommand: true, // every subcommand still has -h / --help
 		Description: "Seedmancer organizes test data into scenarios — slash-separated\n" +
 			"paths like `billing/pro` — with built-in revisioning. Every export\n" +
-			"creates a new immutable revision; pin one as `stable` for CI.\n\n" +
+			"creates a new immutable revision. The latest revision is always used\n" +
+			"unless you pass --revision explicitly.\n\n" +
 			"Typical flow:\n" +
 			"  seedmancer init                  # one-time project setup\n" +
 			"  seedmancer export billing/pro    # snapshot current DB into a new revision\n" +
-			"  seedmancer list                  # see every scenario + its pointers\n" +
+			"  seedmancer list                  # see every scenario + its latest revision\n" +
 			"  seedmancer history billing/pro   # see all revisions of a scenario\n" +
-			"  seedmancer pin billing/pro       # pin latest revision as stable\n" +
 			"  seedmancer seed billing/pro      # restore latest revision\n" +
-			"  seedmancer seed billing/pro --stable\n" +
 			"  seedmancer check billing/pro     # diff revision schema vs. live DB",
 		Flags: []cli.Flag{
 			&cli.BoolFlag{
@@ -134,10 +131,9 @@ func main() {
 			generateLocalCmd,
 			generateCmd,
 			seedCmd,
-			listCmd,
-			historyCmd,
-			pinCmd,
-			checkCmd,
+		listCmd,
+		historyCmd,
+		checkCmd,
 			refreshCmd,
 			pushCmd,
 			pullCmd,

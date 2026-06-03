@@ -118,15 +118,12 @@ func writeScenarioForPush(t *testing.T, projectRoot, storagePath, scenarioPath, 
 		t.Fatalf("mkdir scenario %s: %v", scenarioPath, err)
 	}
 	if err := scenario.WriteManifest(scDir, scenario.Manifest{
-		Scenario:       scenarioPath,
-		CreatedAt:      now,
-		UpdatedAt:      now,
-		LatestRevision: "r001",
+		Scenario:  scenarioPath,
+		CreatedAt: now,
+		UpdatedAt: now,
+		Latest:    "r001",
 	}); err != nil {
 		t.Fatalf("write manifest %s: %v", scenarioPath, err)
-	}
-	if err := scenario.WritePointers(scDir, scenario.Pointers{Latest: "r001"}); err != nil {
-		t.Fatalf("write pointers %s: %v", scenarioPath, err)
 	}
 	revDir := scenario.RevisionDir(projectRoot, storagePath, scenarioPath, "r001")
 	dataDir := filepath.Join(revDir, "data")

@@ -9,7 +9,7 @@ const docQuickstart = `# Seedmancer quickstart (for agents)
 Seedmancer is a Postgres seeding tool. Test data lives in **scenarios**
 (slash-separated paths like ` + "`basic`" + ` or ` + "`billing/pro`" + `). Every export creates
 a new immutable **revision** (` + "`r001`" + `, ` + "`r002`" + `, …) under the scenario.
-Pointers ` + "`latest`" + ` and ` + "`stable`" + ` decide which revision a seed loads.
+The ` + "`latest`" + ` revision is what gets seeded by default.
 
 ## First time in a new project
 
@@ -19,7 +19,7 @@ Run this sequence once to set everything up:
    rule files (.cursor/rules/seedmancer.mdc + CLAUDE.md) so future AI
    conversations in this project automatically use Seedmancer.
 2. ` + "`export_database scenario=\"basic\"`" + ` — captures the current schema + data as
-   ` + "`basic/r001`" + ` and advances pointers.latest.
+   ` + "`basic/r001`" + ` and advances manifest.latest.
 3. ` + "`install_agent_rules`" + ` — if adopting Seedmancer in an existing project that
    was not created with init_project, run this to write the rule files manually.
 
@@ -40,11 +40,8 @@ Run this sequence once to set everything up:
 
 ## Pinning for CI
 
-Once a revision is known-good, pin it as stable:
-
-1. ` + "`pin_scenario scenario=\"basic\"`" + ` — points pointers.stable at the current latest.
-2. CI runs ` + "`seed_database scenario=\"basic\" useStable=true`" + ` to lock onto
-   that revision regardless of newer exports.
+Seedmancer always uses the latest revision. Use ` + "`--revision rNNN`" + ` to lock onto
+a specific revision if needed.
 
 ## Schema drift
 
@@ -112,7 +109,7 @@ export default async function globalSetup() {
   if (process.env.SEEDMANCER_RESET_DATABASE === "false") return;
   const res = spawnSync(
     "seedmancer",
-    ["seed", "api-test", "--stable", "--yes"],
+    ["seed", "api-test", "--yes"],
     { stdio: "inherit" },
   );
   if (res.status !== 0) throw new Error("seedmancer seed failed");
@@ -124,8 +121,6 @@ export default async function globalSetup() {
 Prefer the ` + "`seed_database`" + ` tool over shelling out. Pass:
 
 - ` + "`scenario: \"api-test\"`" + ` (the scenario you keep for tests).
-- ` + "`useStable: true`" + ` to load the pinned revision (CI should never seed an
-  un-pinned scenario).
 - ` + "`yes: true`" + ` so the prod-guard is acknowledged but not bypassed.
 
 On success the tool returns ` + "`anyError: false`" + `; only then should the
@@ -324,7 +319,7 @@ Sends the existing data and schema diff to the Seedmancer AI backend, which:
 - Runs the SQL against the local database
 - Exports updated tables as a new rNNN revision
 - Saves the AI SQL as dataset.sql on the new revision
-- Advances pointers.latest
+- Advances manifest.latest
 
 **Required fields:** scenario (required), env or dbUrl (required — points at the
 local database with the new schema already applied).

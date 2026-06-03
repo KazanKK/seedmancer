@@ -22,14 +22,7 @@ import (
 //
 // Revision resolution rules (highest priority first):
 //  1. --revision rNNN
-//  2. --stable
-//  3. pointers.latest
-//
-// Before any data is written we fingerprint the target database's
-// schema and compare it with the revision's stored fingerprint. A
-// mismatch is fatal unless --force is passed: the schema has drifted
-// since the export and seeding will most likely fail with FK/column
-// errors that are easier to triage as "you need to re-export".
+//  2. manifest.latest
 func SeedCommand() *cli.Command {
 	return &cli.Command{
 		Name:      "seed",
@@ -38,8 +31,7 @@ func SeedCommand() *cli.Command {
 		Description: "Loads a scenario's CSVs + schema sidecars into each target Postgres\n" +
 			"database. The chosen revision is resolved as follows:\n\n" +
 			"  --revision rNNN  → exact revision\n" +
-			"  --stable         → pointers.stable (set via `seedmancer pin`)\n" +
-			"  (default)        → pointers.latest\n\n" +
+			"  (default)        → manifest.latest\n\n" +
 			"Targets:\n" +
 			"  --env local            single env\n" +
 			"  --env local,staging    many envs sequentially\n" +
@@ -62,10 +54,6 @@ func SeedCommand() *cli.Command {
 				Name:    "revision",
 				Aliases: []string{"r"},
 				Usage:   "Specific revision id (e.g. r002); defaults to latest",
-			},
-			&cli.BoolFlag{
-				Name:  "stable",
-				Usage: "Use the scenario's stable revision (set via `seedmancer pin`)",
 			},
 			&cli.BoolFlag{
 				Name:    "force",
@@ -108,7 +96,7 @@ func SeedCommand() *cli.Command {
 				return err
 			}
 
-			rev, err := resolveScenarioRevision(projectRoot, cfg.StoragePath, scenarioPath, c.String("revision"), c.Bool("stable"))
+			rev, err := resolveScenarioRevision(projectRoot, cfg.StoragePath, scenarioPath, c.String("revision"))
 			if err != nil {
 				return err
 			}

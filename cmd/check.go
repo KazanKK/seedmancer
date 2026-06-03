@@ -43,10 +43,6 @@ func CheckCommand() *cli.Command {
 				Usage:   "Specific revision id to compare (defaults to latest)",
 			},
 			&cli.BoolFlag{
-				Name:  "stable",
-				Usage: "Use the scenario's stable revision",
-			},
-			&cli.BoolFlag{
 				Name:  "json",
 				Usage: "Emit JSON for CI/CD pipelines",
 			},
@@ -57,11 +53,10 @@ func CheckCommand() *cli.Command {
 				return fmt.Errorf("usage: seedmancer check <scenario>")
 			}
 			out, err := RunCheck(c.Context, CheckInput{
-				Scenario:  scenarioArg,
-				Revision:  c.String("revision"),
-				UseStable: c.Bool("stable"),
-				Env:       c.String("env"),
-				DBURL:     c.String("db-url"),
+				Scenario: scenarioArg,
+				Revision: c.String("revision"),
+				Env:      c.String("env"),
+				DBURL:    c.String("db-url"),
 			})
 			if err != nil {
 				return err
@@ -92,11 +87,10 @@ func CheckCommand() *cli.Command {
 
 // CheckInput is the structured input for RunCheck.
 type CheckInput struct {
-	Scenario  string `json:"scenario" jsonschema:"Scenario path"`
-	Revision  string `json:"revision,omitempty" jsonschema:"Specific revision id (defaults to latest)"`
-	UseStable bool   `json:"useStable,omitempty" jsonschema:"Use the scenario's stable revision"`
-	Env       string `json:"env,omitempty" jsonschema:"Named environment to inspect (defaults to default_env)"`
-	DBURL     string `json:"dbUrl,omitempty" jsonschema:"Ad-hoc database URL (takes precedence over env)"`
+	Scenario string `json:"scenario" jsonschema:"Scenario path"`
+	Revision string `json:"revision,omitempty" jsonschema:"Specific revision id (defaults to latest)"`
+	Env      string `json:"env,omitempty" jsonschema:"Named environment to inspect (defaults to default_env)"`
+	DBURL    string `json:"dbUrl,omitempty" jsonschema:"Ad-hoc database URL (takes precedence over env)"`
 }
 
 // CheckOutput is the structured response for RunCheck. Status is "ok" when
@@ -127,7 +121,7 @@ func RunCheck(_ context.Context, in CheckInput) (CheckOutput, error) {
 	if err != nil {
 		return CheckOutput{}, err
 	}
-	rev, err := resolveScenarioRevision(projectRoot, cfg.StoragePath, scenarioPath, in.Revision, in.UseStable)
+	rev, err := resolveScenarioRevision(projectRoot, cfg.StoragePath, scenarioPath, in.Revision)
 	if err != nil {
 		return CheckOutput{}, err
 	}

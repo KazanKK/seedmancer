@@ -43,7 +43,6 @@ func RefreshCommand() *cli.Command {
 			&cli.StringFlag{Name: "env", Aliases: []string{"e"}, Usage: "Named environment to connect to"},
 			&cli.StringFlag{Name: "db-url", Usage: "Ad-hoc database URL (overrides --env)"},
 			&cli.StringFlag{Name: "revision", Aliases: []string{"r"}, Usage: "Base revision to refresh from (defaults to latest)"},
-			&cli.BoolFlag{Name: "stable", Usage: "Use the stable revision as base"},
 			&cli.BoolFlag{Name: "yes", Usage: "Non-interactive: skip confirmation prompt"},
 			&cli.StringFlag{Name: "prompt", Usage: "Extra context passed to the AI (e.g. 'keep user names realistic')"},
 		},
@@ -60,13 +59,12 @@ func RefreshCommand() *cli.Command {
 func runRefreshOne(c *cli.Context, scenarioArg string) error {
 	spinner := ui.StartSpinner(fmt.Sprintf("Checking schema drift for %s…", scenarioArg))
 	out, err := RunRefresh(c.Context, RefreshInput{
-		Scenario:  scenarioArg,
-		Revision:  c.String("revision"),
-		UseStable: c.Bool("stable"),
-		Env:       c.String("env"),
-		DBURL:     c.String("db-url"),
-		Prompt:    c.String("prompt"),
-		Yes:       c.Bool("yes"),
+		Scenario: scenarioArg,
+		Revision: c.String("revision"),
+		Env:      c.String("env"),
+		DBURL:    c.String("db-url"),
+		Prompt:   c.String("prompt"),
+		Yes:      c.Bool("yes"),
 	})
 	if err != nil {
 		spinner.Stop(false, err.Error())
@@ -98,7 +96,6 @@ func runRefreshOne(c *cli.Context, scenarioArg string) error {
 	genResult, err := runGenerateRefreshSQL(c.Context, applyAIRefreshInput{
 		Scenario:      scenarioArg,
 		Revision:      c.String("revision"),
-		UseStable:     c.Bool("stable"),
 		Env:           c.String("env"),
 		DBURL:         c.String("db-url"),
 		Prompt:        c.String("prompt"),
@@ -236,11 +233,10 @@ func confirmApplySQL() bool {
 
 // CheckStateSchemaInput is the input for the MCP tool check_state_schema.
 type CheckStateSchemaInput struct {
-	Scenario  string `json:"scenario"`
-	Revision  string `json:"revision,omitempty"`
-	UseStable bool   `json:"useStable,omitempty"`
-	Env       string `json:"env,omitempty"`
-	DBURL     string `json:"dbUrl,omitempty"`
+	Scenario string `json:"scenario"`
+	Revision string `json:"revision,omitempty"`
+	Env      string `json:"env,omitempty"`
+	DBURL    string `json:"dbUrl,omitempty"`
 }
 
 // CheckStateSchemaOutput is the output for check_state_schema.
@@ -267,7 +263,7 @@ func RunCheckStateSchema(_ context.Context, in CheckStateSchemaInput) (CheckStat
 	if err != nil {
 		return CheckStateSchemaOutput{}, err
 	}
-	rev, err := resolveScenarioRevision(projectRoot, cfg.StoragePath, scenarioPath, in.Revision, in.UseStable)
+	rev, err := resolveScenarioRevision(projectRoot, cfg.StoragePath, scenarioPath, in.Revision)
 	if err != nil {
 		return CheckStateSchemaOutput{}, err
 	}
@@ -312,13 +308,12 @@ func RunCheckStateSchema(_ context.Context, in CheckStateSchemaInput) (CheckStat
 
 // RefreshInput is the input for the drift-check phase of RunRefresh.
 type RefreshInput struct {
-	Scenario  string `json:"scenario"`
-	Revision  string `json:"revision,omitempty"`
-	UseStable bool   `json:"useStable,omitempty"`
-	Env       string `json:"env,omitempty"`
-	DBURL     string `json:"dbUrl,omitempty"`
-	Prompt    string `json:"prompt,omitempty"`
-	Yes       bool   `json:"yes,omitempty"`
+	Scenario string `json:"scenario"`
+	Revision string `json:"revision,omitempty"`
+	Env      string `json:"env,omitempty"`
+	DBURL    string `json:"dbUrl,omitempty"`
+	Prompt   string `json:"prompt,omitempty"`
+	Yes      bool   `json:"yes,omitempty"`
 }
 
 // RefreshOutput is returned after the drift-check phase.
@@ -349,11 +344,10 @@ func RunRefresh(ctx context.Context, in RefreshInput) (RefreshOutput, error) {
 	projectRoot := filepath.Dir(configPath)
 
 	csOut, err := RunCheckStateSchema(ctx, CheckStateSchemaInput{
-		Scenario:  in.Scenario,
-		Revision:  in.Revision,
-		UseStable: in.UseStable,
-		Env:       in.Env,
-		DBURL:     in.DBURL,
+		Scenario: in.Scenario,
+		Revision: in.Revision,
+		Env:      in.Env,
+		DBURL:    in.DBURL,
 	})
 	if err != nil {
 		return RefreshOutput{}, err
@@ -370,13 +364,12 @@ func RunRefresh(ctx context.Context, in RefreshInput) (RefreshOutput, error) {
 
 // ApplyAIRefreshInput is the input for the apply phase of an AI refresh.
 type ApplyAIRefreshInput struct {
-	Scenario  string             `json:"scenario"`
-	Revision  string             `json:"revision,omitempty"`
-	UseStable bool               `json:"useStable,omitempty"`
-	Env       string             `json:"env,omitempty"`
-	DBURL     string             `json:"dbUrl,omitempty"`
-	Prompt    string             `json:"prompt,omitempty"`
-	Token     string             `json:"token,omitempty"`
+	Scenario string `json:"scenario"`
+	Revision string `json:"revision,omitempty"`
+	Env      string `json:"env,omitempty"`
+	DBURL    string `json:"dbUrl,omitempty"`
+	Prompt   string `json:"prompt,omitempty"`
+	Token    string `json:"token,omitempty"`
 }
 
 // ApplyAIRefreshOutput is the result of the apply phase.
@@ -392,7 +385,6 @@ type ApplyAIRefreshOutput struct {
 type applyAIRefreshInput struct {
 	Scenario      string
 	Revision      string
-	UseStable     bool
 	Env           string
 	DBURL         string
 	Prompt        string
@@ -416,11 +408,10 @@ func RunApplyAIRefresh(ctx context.Context, in ApplyAIRefreshInput) (ApplyAIRefr
 	projectRoot := filepath.Dir(configPath)
 
 	csOut, err := RunCheckStateSchema(ctx, CheckStateSchemaInput{
-		Scenario:  in.Scenario,
-		Revision:  in.Revision,
-		UseStable: in.UseStable,
-		Env:       in.Env,
-		DBURL:     in.DBURL,
+		Scenario: in.Scenario,
+		Revision: in.Revision,
+		Env:      in.Env,
+		DBURL:    in.DBURL,
 	})
 	if err != nil {
 		return ApplyAIRefreshOutput{}, err
@@ -436,7 +427,6 @@ func RunApplyAIRefresh(ctx context.Context, in ApplyAIRefreshInput) (ApplyAIRefr
 	return runApplyAIRefresh(ctx, applyAIRefreshInput{
 		Scenario:      in.Scenario,
 		Revision:      in.Revision,
-		UseStable:     in.UseStable,
 		Env:           in.Env,
 		DBURL:         in.DBURL,
 		Prompt:        in.Prompt,
@@ -479,7 +469,7 @@ func runGenerateRefreshSQL(ctx context.Context, in applyAIRefreshInput) (generat
 		return generateRefreshResult{}, err
 	}
 
-	rev, err := resolveScenarioRevision(projectRoot, cfg.StoragePath, scenarioPath, in.Revision, in.UseStable)
+	rev, err := resolveScenarioRevision(projectRoot, cfg.StoragePath, scenarioPath, in.Revision)
 	if err != nil {
 		return generateRefreshResult{}, err
 	}
@@ -613,12 +603,8 @@ func runApplyGeneratedSQL(ctx context.Context, r generateRefreshResult) (ApplyAI
 		scenarioManifest = scenario.Manifest{Scenario: r.scenarioPath, CreatedAt: time.Now().UTC()}
 	}
 	scenarioManifest.UpdatedAt = time.Now().UTC()
-	scenarioManifest.LatestRevision = newRevID
+	scenarioManifest.Latest = newRevID
 	_ = scenario.WriteManifest(r.scenarioDir, scenarioManifest)
-
-	pointers, _ := scenario.ReadPointers(r.scenarioDir)
-	pointers.Latest = newRevID
-	_ = scenario.WritePointers(r.scenarioDir, pointers)
 
 	return ApplyAIRefreshOutput{
 		Scenario:     r.scenarioPath,

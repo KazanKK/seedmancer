@@ -83,7 +83,7 @@ func PushCommand() *cli.Command {
 					return fmt.Errorf("no scenarios to push — run `seedmancer export <scenario>` first")
 				}
 				for _, scenarioPath := range paths {
-					rev, revErr := resolveScenarioRevision(projectRoot, cfg.StoragePath, scenarioPath, "", false)
+					rev, revErr := resolveScenarioRevision(projectRoot, cfg.StoragePath, scenarioPath, "")
 					if revErr != nil {
 						return fmt.Errorf("push %s: %w", scenarioPath, revErr)
 					}
@@ -100,7 +100,7 @@ func PushCommand() *cli.Command {
 			if err != nil {
 				return err
 			}
-			rev, err := resolveScenarioRevision(projectRoot, cfg.StoragePath, scenarioPath, "", false)
+			rev, err := resolveScenarioRevision(projectRoot, cfg.StoragePath, scenarioPath, "")
 			if err != nil {
 				return err
 			}

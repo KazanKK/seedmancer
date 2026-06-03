@@ -22,7 +22,6 @@ import (
 type listEntry struct {
 	Scenario string `json:"scenario"`
 	Latest   string `json:"latest,omitempty"`
-	Stable   string `json:"stable,omitempty"`
 	Schema   string `json:"schema,omitempty"`
 	Updated  string `json:"updated,omitempty"`
 	Services string `json:"services,omitempty"`
@@ -35,7 +34,7 @@ func ListCommand() *cli.Command {
 		Name:  "list",
 		Usage: "List scenarios and their pointers",
 		Description: "Walks <storagePath>/scenarios/** and prints a table with one row\n" +
-			"per scenario: latest revision, stable revision, schema fingerprint,\n" +
+			"per scenario: latest revision, schema fingerprint,\n" +
 			"updated time, and the services snapshotted with the\n" +
 			"latest revision.",
 		ArgsUsage: " ",
@@ -104,17 +103,15 @@ func buildListEntry(projectRoot, storagePath, scenarioPath string) (listEntry, e
 	if err != nil {
 		return listEntry{}, err
 	}
-	pointers, _ := scenario.ReadPointers(scenarioDir)
 	entry := listEntry{
 		Scenario: scenarioPath,
-		Latest:   pointers.Latest,
-		Stable:   pointers.Stable,
+		Latest:   manifest.Latest,
 	}
 	if !manifest.UpdatedAt.IsZero() {
 		entry.Updated = utils.HumanizeAgo(manifest.UpdatedAt)
 	}
-	if pointers.Latest != "" {
-		revDir := scenario.RevisionDir(projectRoot, storagePath, scenarioPath, pointers.Latest)
+	if manifest.Latest != "" {
+		revDir := scenario.RevisionDir(projectRoot, storagePath, scenarioPath, manifest.Latest)
 		if rev, err := scenario.ReadRevisionManifest(revDir); err == nil {
 			entry.Schema = utils.FingerprintShort(rev.SchemaFingerprint)
 			entry.Services = strings.Join(rev.Services, ",")
@@ -126,7 +123,7 @@ func buildListEntry(projectRoot, storagePath, scenarioPath string) (listEntry, e
 func renderScenarioTable(entries []listEntry) {
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Scenario < entries[j].Scenario })
 	table := tablewriter.NewWriter(os.Stdout)
-	table.SetHeader([]string{"Scenario", "Latest", "Stable", "Schema", "Updated", "Services"})
+	table.SetHeader([]string{"Scenario", "Latest", "Schema", "Updated", "Services"})
 	table.SetBorder(false)
 	table.SetColumnSeparator("  ")
 	table.SetHeaderAlignment(tablewriter.ALIGN_LEFT)
@@ -135,7 +132,6 @@ func renderScenarioTable(entries []listEntry) {
 		table.Append([]string{
 			e.Scenario,
 			defaultDash(e.Latest),
-			defaultDash(e.Stable),
 			defaultDash(e.Schema),
 			defaultDash(e.Updated),
 			defaultDash(e.Services),

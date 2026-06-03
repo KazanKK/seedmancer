@@ -11,11 +11,10 @@ func TestManifestRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	now := time.Date(2026, 4, 28, 0, 0, 0, 0, time.UTC)
 	in := Manifest{
-		Scenario:       "billing/pro",
-		CreatedAt:      now,
-		UpdatedAt:      now,
-		LatestRevision: "r003",
-		StableRevision: "r002",
+		Scenario:  "billing/pro",
+		CreatedAt: now,
+		UpdatedAt: now,
+		Latest:    "r003",
 	}
 	if err := WriteManifest(dir, in); err != nil {
 		t.Fatal(err)
@@ -24,7 +23,7 @@ func TestManifestRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out.Scenario != "billing/pro" || out.LatestRevision != "r003" || out.StableRevision != "r002" {
+	if out.Scenario != "billing/pro" || out.Latest != "r003" {
 		t.Fatalf("unexpected manifest: %+v", out)
 	}
 	if !out.CreatedAt.Equal(now) || !out.UpdatedAt.Equal(now) {

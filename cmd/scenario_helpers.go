@@ -17,7 +17,7 @@ import (
 )
 
 // resolvedRevision describes the revision a command picked, after the
-// --revision / --stable / latest precedence rules. It carries the
+// --revision / latest precedence rules. It carries the
 // loaded manifest so callers don't need a second read.
 type resolvedRevision struct {
 	Scenario string
@@ -29,38 +29,26 @@ type resolvedRevision struct {
 
 // resolveScenarioRevision picks one revision for a scenario. Precedence:
 //  1. explicit revID (--revision)
-//  2. useStable=true (pointers.stable)
-//  3. pointers.latest
+//  2. manifest.latest
 //
 // Errors are user-friendly so they can be surfaced verbatim by the CLI.
-func resolveScenarioRevision(projectRoot, storagePath, scenarioPath, revID string, useStable bool) (resolvedRevision, error) {
+func resolveScenarioRevision(projectRoot, storagePath, scenarioPath, revID string) (resolvedRevision, error) {
 	scenarioDir := scenario.ScenarioDir(projectRoot, storagePath, scenarioPath)
 	if _, err := os.Stat(scenarioDir); os.IsNotExist(err) {
 		return resolvedRevision{}, fmt.Errorf("scenario %q does not exist — run `seedmancer export %s` first", scenarioPath, scenarioPath)
 	}
 
-	pointers, _ := scenario.ReadPointers(scenarioDir)
+	manifest, _ := scenario.ReadManifest(scenarioDir)
 
 	target := strings.TrimSpace(revID)
-	switch {
-	case target != "":
-		// explicit — caller already chose
-	case useStable:
-		if pointers.Stable == "" {
-			return resolvedRevision{}, fmt.Errorf(
-				"scenario %q has no stable revision yet — run `seedmancer pin %s` first",
-				scenarioPath, scenarioPath,
-			)
-		}
-		target = pointers.Stable
-	default:
-		if pointers.Latest == "" {
+	if target == "" {
+		if manifest.Latest == "" {
 			return resolvedRevision{}, fmt.Errorf(
 				"scenario %q has no revisions yet — run `seedmancer export %s` first",
 				scenarioPath, scenarioPath,
 			)
 		}
-		target = pointers.Latest
+		target = manifest.Latest
 	}
 
 	revDir := scenario.RevisionDir(projectRoot, storagePath, scenarioPath, target)
@@ -71,7 +59,7 @@ func resolveScenarioRevision(projectRoot, storagePath, scenarioPath, revID strin
 		)
 	}
 
-	manifest, err := scenario.ReadRevisionManifest(revDir)
+	revManifest, err := scenario.ReadRevisionManifest(revDir)
 	if err != nil {
 		return resolvedRevision{}, fmt.Errorf("reading revision manifest: %w", err)
 	}
@@ -81,7 +69,7 @@ func resolveScenarioRevision(projectRoot, storagePath, scenarioPath, revID strin
 		RevID:    target,
 		RevDir:   revDir,
 		DataDir:  filepath.Join(revDir, "data"),
-		Manifest: manifest,
+		Manifest: revManifest,
 	}, nil
 }
 
@@ -190,17 +178,12 @@ func formatExportTime(t time.Time) string {
 	return t.UTC().Format("2006-01-02 15:04")
 }
 
-// pointerLabel returns the comma-joined pointer summary for a revision
-// (e.g. "latest,stable", "latest", "stable", or "").
-func pointerLabel(revID string, p scenario.Pointers) string {
-	var parts []string
-	if revID == p.Latest {
-		parts = append(parts, "latest")
+// pointerLabel returns "latest" when revID matches the latest pointer, or "".
+func pointerLabel(revID, latest string) string {
+	if revID == latest {
+		return "latest"
 	}
-	if revID == p.Stable {
-		parts = append(parts, "stable")
-	}
-	return strings.Join(parts, ",")
+	return ""
 }
 
 // fileExists reports whether path resolves to an existing, regular file.

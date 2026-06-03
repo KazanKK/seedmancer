@@ -126,7 +126,7 @@ func RunHistory(_ context.Context, in HistoryInput) (HistoryOutput, error) {
 	if _, err := os.Stat(scenarioDir); os.IsNotExist(err) {
 		return HistoryOutput{}, fmt.Errorf("scenario %q does not exist", scenarioPath)
 	}
-	pointers, _ := scenario.ReadPointers(scenarioDir)
+	scManifest, _ := scenario.ReadManifest(scenarioDir)
 	revs, err := scenario.ListRevisions(scenarioDir)
 	if err != nil {
 		return HistoryOutput{}, err
@@ -143,7 +143,7 @@ func RunHistory(_ context.Context, in HistoryInput) (HistoryOutput, error) {
 		}
 		row := HistoryRevision{
 			Revision:    r.ID,
-			Pointer:     pointerLabel(r.ID, pointers),
+			Pointer:     pointerLabel(r.ID, scManifest.Latest),
 			Schema:      utils.FingerprintShort(manifest.SchemaFingerprint),
 			Created:     formatExportTime(manifest.CreatedAt),
 			Source:      manifest.Source,

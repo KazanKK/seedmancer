@@ -68,15 +68,12 @@ func TestListLocalEntries_scenarioLayout(t *testing.T) {
 	}
 	now := time.Now().UTC()
 	if err := scenario.WriteManifest(scDir, scenario.Manifest{
-		Scenario:       scenarioPath,
-		CreatedAt:      now,
-		UpdatedAt:      now,
-		LatestRevision: "r001",
+		Scenario:  scenarioPath,
+		CreatedAt: now,
+		UpdatedAt: now,
+		Latest:    "r001",
 	}); err != nil {
 		t.Fatalf("write manifest: %v", err)
-	}
-	if err := scenario.WritePointers(scDir, scenario.Pointers{Latest: "r001"}); err != nil {
-		t.Fatalf("write pointers: %v", err)
 	}
 	revDir := scenario.RevisionDir(dir, ".seedmancer", scenarioPath, "r001")
 	dataDir := filepath.Join(revDir, "data")
