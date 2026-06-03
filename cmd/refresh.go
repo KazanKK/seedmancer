@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -67,7 +68,11 @@ func runRefreshOne(c *cli.Context, scenarioArg string) error {
 		Yes:      c.Bool("yes"),
 	})
 	if err != nil {
-		spinner.Stop(false, err.Error())
+		spinner.Stop(false, "")
+		if errors.Is(err, utils.ErrNoTables) {
+			ui.Warn("Database appears to have no tables — skipping refresh for %q.\nMake sure your migrations have been applied before running refresh.", scenarioArg)
+			return nil
+		}
 		return err
 	}
 	spinner.Stop(true, fmt.Sprintf("refresh %s @ %s", out.Scenario, out.BaseRevision))
@@ -103,7 +108,7 @@ func runRefreshOne(c *cli.Context, scenarioArg string) error {
 		NewSchemaJSON: out.NewSchemaJSON,
 	})
 	if err != nil {
-		spinner.Stop(false, err.Error())
+		spinner.Stop(false, "")
 		return err
 	}
 	spinner.Stop(true, "SQL generated")
@@ -120,7 +125,7 @@ func runRefreshOne(c *cli.Context, scenarioArg string) error {
 	spinner = ui.StartSpinner("Applying refreshed data…")
 	applyOut, err := runApplyGeneratedSQL(c.Context, genResult)
 	if err != nil {
-		spinner.Stop(false, err.Error())
+		spinner.Stop(false, "")
 		return err
 	}
 	spinner.Stop(true, fmt.Sprintf("Created %s %s", out.Scenario, applyOut.NewRevision))

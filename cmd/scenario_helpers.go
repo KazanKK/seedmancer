@@ -96,7 +96,7 @@ func fingerprintCurrentDB(target utils.NamedEnv) (fingerprint string, schemaJSON
 	schemaPath := filepath.Join(tmp, "schema.json")
 	fp, err := utils.FingerprintSchemaFile(schemaPath)
 	if err != nil {
-		return "", nil, fmt.Errorf("fingerprinting schema: %v", err)
+		return "", nil, fmt.Errorf("fingerprinting schema: %w", err)
 	}
 	raw, err := os.ReadFile(schemaPath)
 	if err != nil {
