@@ -38,10 +38,11 @@ func color(code, text string) string {
 }
 
 // Bold, Dim, Green, Red are exported color helpers for use outside the ui package.
-func Bold(s string) string  { return color(bold, s) }
-func Dim(s string) string   { return color(dim, s) }
-func Green(s string) string { return color(green, s) }
-func Red(s string) string   { return color(red, s) }
+func Bold(s string) string   { return color(bold, s) }
+func Dim(s string) string    { return color(dim, s) }
+func Green(s string) string  { return color(green, s) }
+func Red(s string) string    { return color(red, s) }
+func Yellow(s string) string { return color(yellow, s) }
 
 func SetDebug(enabled bool) { debugMode = enabled }
 

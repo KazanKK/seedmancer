@@ -345,7 +345,7 @@ func (m *MySQLManager) ExportSchema(outputDir string) error {
 		ui.Debug("Exported function: %s", fn.Name)
 	}
 	if len(schema.Functions) > 0 {
-		ui.Success("Exported %d function(s)", len(schema.Functions))
+		ui.Debug("Exported %d function(s)", len(schema.Functions))
 	}
 
 	// Write trigger sidecars (<table>_<name>_trigger.sql) with metadata header
@@ -361,7 +361,7 @@ func (m *MySQLManager) ExportSchema(outputDir string) error {
 		ui.Debug("Exported trigger: %s on %s", trigger.Name, trigger.TableName)
 	}
 	if len(schema.Triggers) > 0 {
-		ui.Success("Exported %d trigger(s)", len(schema.Triggers))
+		ui.Debug("Exported %d trigger(s)", len(schema.Triggers))
 	}
 
 	// Write schema.json (tables + enums only)

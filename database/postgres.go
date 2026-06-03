@@ -1334,7 +1334,7 @@ func (p *PostgresManager) ExportSchema(outputDir string) error {
 		ui.Debug("Exported function: %s", fn.Name)
 	}
 	if len(schema.Functions) > 0 {
-		ui.Success("Exported %d function(s)", len(schema.Functions))
+		ui.Debug("Exported %d function(s)", len(schema.Functions))
 	}
 
 	// --- Export triggers as flat `<table>_<name>_trigger.sql` sidecars ---
@@ -1352,7 +1352,7 @@ func (p *PostgresManager) ExportSchema(outputDir string) error {
 		ui.Debug("Exported trigger: %s on %s.%s", trigger.Name, trigger.TableSchema, trigger.TableName)
 	}
 	if len(schema.Triggers) > 0 {
-		ui.Success("Exported %d trigger(s)", len(schema.Triggers))
+		ui.Debug("Exported %d trigger(s)", len(schema.Triggers))
 	}
 
 	// --- Write schema.json (tables + enums only, no functions/triggers) ---

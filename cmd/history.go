@@ -30,6 +30,15 @@ func HistoryCommand() *cli.Command {
 				Name:  "json",
 				Usage: "Emit JSON for CI/CD pipelines",
 			},
+			&cli.StringFlag{
+				Name:    "env",
+				Aliases: []string{"e"},
+				Usage:   "Named environment to connect to (see seedmancer env)",
+			},
+			&cli.StringFlag{
+				Name:  "db-url",
+				Usage: "Ad-hoc database URL (overrides --env)",
+			},
 		},
 		Action: func(c *cli.Context) error {
 			scenarioArg := strings.TrimSpace(c.Args().First())
@@ -40,6 +49,11 @@ func HistoryCommand() *cli.Command {
 			if err != nil {
 				return err
 			}
+
+			// Always attempt to fingerprint the live DB. Silently skip the DB
+			// column if the database is not configured or unreachable.
+			out.Revisions, _ = annotateHistoryWithDBStatus(out.Revisions, c.String("env"), c.String("db-url"))
+
 			if c.Bool("json") {
 				return outputJSON(out)
 			}
@@ -58,23 +72,87 @@ func HistoryCommand() *cli.Command {
 }
 
 func renderHistoryTable(out HistoryOutput) {
+	// Determine whether the DB column is populated.
+	showDB := false
+	for _, r := range out.Revisions {
+		if r.DB != "" {
+			showDB = true
+			break
+		}
+	}
+
 	table := tablewriter.NewWriter(os.Stdout)
-	table.SetHeader([]string{"Revision", "Pointer", "Schema", "Created", "Services", "Description"})
+	headers := []string{"Revision", "Pointer", "Schema", "Created", "Services", "Description"}
+	if showDB {
+		headers = []string{"Revision", "Pointer", "Schema", "DB", "Created", "Services", "Description"}
+	}
+	table.SetHeader(headers)
 	table.SetBorder(false)
 	table.SetColumnSeparator("  ")
 	table.SetHeaderAlignment(tablewriter.ALIGN_LEFT)
 	table.SetAlignment(tablewriter.ALIGN_LEFT)
 	for _, r := range out.Revisions {
-		table.Append([]string{
-			r.Revision,
-			defaultDash(r.Pointer),
-			defaultDash(r.Schema),
-			defaultDash(r.Created),
-			defaultDash(r.Services),
-			defaultDash(r.Description),
-		})
+		if showDB {
+			dbCell := "—"
+			switch r.DB {
+			case "matched":
+				dbCell = ui.Green("matched")
+			case "outdated":
+				dbCell = ui.Yellow("outdated")
+			}
+			table.Append([]string{
+				r.Revision,
+				defaultDash(r.Pointer),
+				defaultDash(r.Schema),
+				dbCell,
+				defaultDash(r.Created),
+				defaultDash(r.Services),
+				defaultDash(r.Description),
+			})
+		} else {
+			table.Append([]string{
+				r.Revision,
+				defaultDash(r.Pointer),
+				defaultDash(r.Schema),
+				defaultDash(r.Created),
+				defaultDash(r.Services),
+				defaultDash(r.Description),
+			})
+		}
 	}
 	table.Render()
+}
+
+// annotateHistoryWithDBStatus fingerprints the live DB and marks revisions
+// whose schema fingerprint matches with DB = "matched".
+func annotateHistoryWithDBStatus(revisions []HistoryRevision, env, dbURL string) ([]HistoryRevision, error) {
+	configPath, err := utils.FindConfigFile()
+	if err != nil {
+		return revisions, err
+	}
+	cfg, err := utils.LoadConfig(configPath)
+	if err != nil {
+		return revisions, err
+	}
+	target, err := pickExportTarget(cfg, env, dbURL)
+	if err != nil {
+		return revisions, err
+	}
+	// Use the raw fingerprint (before any stripping) because stored revision
+	// fingerprints were also computed over the full schema at export time.
+	liveFP, _, err := fingerprintCurrentDB(target)
+	if err != nil {
+		return revisions, err
+	}
+	liveShort := utils.FingerprintShort(liveFP)
+	for i := range revisions {
+		if revisions[i].Schema == liveShort {
+			revisions[i].DB = "matched"
+		} else {
+			revisions[i].DB = "outdated"
+		}
+	}
+	return revisions, nil
 }
 
 // HistoryInput is the structured input for RunHistory.
@@ -87,6 +165,8 @@ type HistoryRevision struct {
 	Revision    string `json:"revision"`
 	Pointer     string `json:"pointer,omitempty"`
 	Schema      string `json:"schema,omitempty"`
+	// DB is set when --check is passed: "matched" or empty.
+	DB          string `json:"db,omitempty"`
 	Created     string `json:"created,omitempty"`
 	Source      string `json:"source,omitempty"`
 	Services    string `json:"services,omitempty"`

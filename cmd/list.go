@@ -23,6 +23,8 @@ type listEntry struct {
 	Scenario string `json:"scenario"`
 	Latest   string `json:"latest,omitempty"`
 	Schema   string `json:"schema,omitempty"`
+	// DB is set when --check is passed: "matched" or "outdated".
+	DB      string `json:"db,omitempty"`
 	Updated  string `json:"updated,omitempty"`
 	Services string `json:"services,omitempty"`
 }
@@ -43,12 +45,26 @@ func ListCommand() *cli.Command {
 				Name:  "json",
 				Usage: "Emit JSON for CI/CD pipelines",
 			},
+			&cli.StringFlag{
+				Name:    "env",
+				Aliases: []string{"e"},
+				Usage:   "Named environment to connect to (see seedmancer env)",
+			},
+			&cli.StringFlag{
+				Name:  "db-url",
+				Usage: "Ad-hoc database URL (overrides --env)",
+			},
 		},
 		Action: func(c *cli.Context) error {
 			entries, badManifests, err := collectListEntries()
 			if err != nil {
 				return err
 			}
+
+			// Always attempt to fingerprint the live DB. Silently skip the DB
+			// column if the database is not configured or unreachable.
+			entries, _ = annotateEntriesWithDBStatus(entries, c.String("env"), c.String("db-url"))
+
 			if c.Bool("json") {
 				return outputJSON(struct {
 					Scenarios []listEntry            `json:"scenarios"`
@@ -122,22 +138,93 @@ func buildListEntry(projectRoot, storagePath, scenarioPath string) (listEntry, e
 
 func renderScenarioTable(entries []listEntry) {
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Scenario < entries[j].Scenario })
+
+	// Determine whether the DB column is populated.
+	showDB := false
+	for _, e := range entries {
+		if e.DB != "" {
+			showDB = true
+			break
+		}
+	}
+
 	table := tablewriter.NewWriter(os.Stdout)
-	table.SetHeader([]string{"Scenario", "Latest", "Schema", "Updated", "Services"})
+	headers := []string{"Scenario", "Latest", "Schema", "Updated", "Services"}
+	if showDB {
+		headers = []string{"Scenario", "Latest", "Schema", "DB", "Updated", "Services"}
+	}
+	table.SetHeader(headers)
 	table.SetBorder(false)
 	table.SetColumnSeparator("  ")
 	table.SetHeaderAlignment(tablewriter.ALIGN_LEFT)
 	table.SetAlignment(tablewriter.ALIGN_LEFT)
 	for _, e := range entries {
-		table.Append([]string{
-			e.Scenario,
-			defaultDash(e.Latest),
-			defaultDash(e.Schema),
-			defaultDash(e.Updated),
-			defaultDash(e.Services),
-		})
+		dbCell := ""
+		if showDB {
+			switch e.DB {
+			case "matched":
+				dbCell = ui.Green("matched")
+			case "outdated":
+				dbCell = ui.Yellow("outdated")
+			default:
+				dbCell = "—"
+			}
+		}
+		if showDB {
+			table.Append([]string{
+				e.Scenario,
+				defaultDash(e.Latest),
+				defaultDash(e.Schema),
+				dbCell,
+				defaultDash(e.Updated),
+				defaultDash(e.Services),
+			})
+		} else {
+			table.Append([]string{
+				e.Scenario,
+				defaultDash(e.Latest),
+				defaultDash(e.Schema),
+				defaultDash(e.Updated),
+				defaultDash(e.Services),
+			})
+		}
 	}
 	table.Render()
+}
+
+// annotateEntriesWithDBStatus fingerprints the live DB and fills the DB field
+// of each entry with "matched" or "outdated".
+func annotateEntriesWithDBStatus(entries []listEntry, env, dbURL string) ([]listEntry, error) {
+	configPath, err := utils.FindConfigFile()
+	if err != nil {
+		return entries, err
+	}
+	cfg, err := utils.LoadConfig(configPath)
+	if err != nil {
+		return entries, err
+	}
+	target, err := pickExportTarget(cfg, env, dbURL)
+	if err != nil {
+		return entries, err
+	}
+	// Use the raw fingerprint (before any stripping) because stored revision
+	// fingerprints were also computed over the full schema at export time.
+	liveFP, _, err := fingerprintCurrentDB(target)
+	if err != nil {
+		return entries, err
+	}
+	liveShort := utils.FingerprintShort(liveFP)
+	for i := range entries {
+		if entries[i].Schema == "" {
+			continue
+		}
+		if entries[i].Schema == liveShort {
+			entries[i].DB = "matched"
+		} else {
+			entries[i].DB = "outdated"
+		}
+	}
+	return entries, nil
 }
 
 func defaultDash(s string) string {
