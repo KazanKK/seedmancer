@@ -178,23 +178,30 @@ func (p *PostgresManager) ExtractSchema() (*Schema, error) {
 			FROM information_schema.table_constraints tc
 			JOIN information_schema.key_column_usage kcu
 				ON tc.constraint_name = kcu.constraint_name
+				AND tc.table_schema = kcu.table_schema
 			JOIN information_schema.constraint_column_usage ccu
 				ON ccu.constraint_name = tc.constraint_name
+				AND ccu.table_schema = tc.table_schema
 			WHERE tc.constraint_type = 'FOREIGN KEY'
+				AND tc.table_schema = 'public'
 		),
 		pk_info AS (
 			SELECT t.table_name, c.column_name
 			FROM information_schema.table_constraints t
 			JOIN information_schema.constraint_column_usage c
 				ON c.constraint_name = t.constraint_name
+				AND c.table_schema = t.table_schema
 			WHERE t.constraint_type = 'PRIMARY KEY'
+				AND t.table_schema = 'public'
 		),
 		unique_info AS (
 			SELECT t.table_name, c.column_name
 			FROM information_schema.table_constraints t
 			JOIN information_schema.constraint_column_usage c
 				ON c.constraint_name = t.constraint_name
+				AND c.table_schema = t.table_schema
 			WHERE t.constraint_type = 'UNIQUE'
+				AND t.table_schema = 'public'
 		)
 		SELECT 
 			t.table_name,
@@ -212,7 +219,9 @@ func (p *PostgresManager) ExtractSchema() (*Schema, error) {
 			c.identity_generation
 		FROM 
 			information_schema.tables t
-			JOIN information_schema.columns c ON t.table_name = c.table_name
+			JOIN information_schema.columns c
+				ON  t.table_name   = c.table_name
+				AND c.table_schema = 'public'
 			LEFT JOIN fk_info fk ON t.table_name = fk.table_name 
 				AND c.column_name = fk.column_name
 			LEFT JOIN pk_info ON t.table_name = pk_info.table_name 

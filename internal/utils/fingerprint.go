@@ -200,7 +200,7 @@ func FingerprintSchemaFile(path string) (string, error) {
 		return "", fmt.Errorf("parsing %q: %w", path, err)
 	}
 	if len(parsed.Tables) == 0 {
-		return "", fmt.Errorf("%q has no tables — cannot fingerprint", path)
+		return "", fmt.Errorf("%q has no tables — cannot fingerprint.\nCheck that your database URL is correct and that your tables exist in the 'public' schema (PostgreSQL) or the correct database (MySQL)", path)
 	}
 	return FingerprintSchema(parsed)
 }
