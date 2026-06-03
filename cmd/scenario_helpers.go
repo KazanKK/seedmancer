@@ -3,6 +3,7 @@ package cmd
 import (
 	"bufio"
 	"encoding/csv"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -15,6 +16,39 @@ import (
 	"github.com/KazanKK/seedmancer/internal/scenario"
 	"github.com/KazanKK/seedmancer/internal/utils"
 )
+
+// stripExcludedTables removes tables listed in the exclude set from a
+// schema JSON blob and returns the re-marshalled bytes. Used to prevent
+// framework-managed tables (e.g. _prisma_migrations) from appearing in
+// drift comparisons, fingerprints, and the before/after display.
+func stripExcludedTables(schemaJSON []byte, exclude []string) ([]byte, error) {
+	if len(exclude) == 0 || len(schemaJSON) == 0 {
+		return schemaJSON, nil
+	}
+	excludeSet := make(map[string]struct{}, len(exclude))
+	for _, t := range exclude {
+		excludeSet[strings.ToLower(t)] = struct{}{}
+	}
+
+	var schema utils.SchemaJSON
+	if err := json.Unmarshal(schemaJSON, &schema); err != nil {
+		return schemaJSON, nil // best-effort: return original on parse failure
+	}
+
+	filtered := schema.Tables[:0]
+	for _, t := range schema.Tables {
+		if _, skip := excludeSet[strings.ToLower(t.Name)]; !skip {
+			filtered = append(filtered, t)
+		}
+	}
+	schema.Tables = filtered
+
+	out, err := json.Marshal(schema)
+	if err != nil {
+		return schemaJSON, nil
+	}
+	return out, nil
+}
 
 // resolvedRevision describes the revision a command picked, after the
 // --revision / latest precedence rules. It carries the

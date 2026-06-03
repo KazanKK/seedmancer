@@ -458,6 +458,24 @@ func RunCheckStateSchema(_ context.Context, in CheckStateSchemaInput) (CheckStat
 		return CheckStateSchemaOutput{}, err
 	}
 
+	// Strip tables the user has opted out of (e.g. _prisma_migrations) so they
+	// never appear in drift comparisons, fingerprints, or the before/after display.
+	currentJSON, err = stripExcludedTables(currentJSON, cfg.ExcludeTables)
+	if err != nil {
+		return CheckStateSchemaOutput{}, fmt.Errorf("filtering excluded tables: %w", err)
+	}
+	if len(cfg.ExcludeTables) > 0 {
+		// Re-fingerprint after stripping so the comparison is based on the
+		// filtered schema, not the raw one.
+		var filteredSchema utils.SchemaJSON
+		if jsonErr := json.Unmarshal(currentJSON, &filteredSchema); jsonErr == nil {
+			currentFP, err = utils.FingerprintSchema(filteredSchema)
+			if err != nil {
+				return CheckStateSchemaOutput{}, fmt.Errorf("re-fingerprinting filtered schema: %w", err)
+			}
+		}
+	}
+
 	oldFP := rev.Manifest.SchemaFingerprint
 	if currentFP == oldFP {
 		return CheckStateSchemaOutput{
