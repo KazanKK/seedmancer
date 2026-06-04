@@ -140,84 +140,27 @@ func printDriftSummary(r driftreport.Report) {
 		ui.Success("No schema drift — revision is up to date.")
 		return
 	}
-	ui.Info("Schema drift detected:")
 
-	// Group changes by table, preserving order.
-	type tableGroup struct {
-		name    string
-		changes []driftreport.AnnotatedChange
+	// One compact headline: "Schema drift  ✗ 1 breaking  · ! 4 decision  · ✓ 7 auto"
+	type badge struct {
+		cat driftreport.Category
+		sym string
 	}
-	var groups []tableGroup
-	idx := map[string]int{}
-	for _, ch := range r.Changes {
-		if _, ok := idx[ch.Table]; !ok {
-			idx[ch.Table] = len(groups)
-			groups = append(groups, tableGroup{name: ch.Table})
-		}
-		i := idx[ch.Table]
-		groups[i].changes = append(groups[i].changes, ch)
+	order := []badge{
+		{driftreport.Breaking, "✗"},
+		{driftreport.Decision, "!"},
+		{driftreport.Likely, "?"},
+		{driftreport.Auto, "✓"},
 	}
-
-	catSymbol := func(cat driftreport.Category) string {
-		switch cat {
-		case driftreport.Auto:
-			return "✓"
-		case driftreport.Likely:
-			return "?"
-		case driftreport.Decision:
-			return "!"
-		case driftreport.Breaking:
-			return "✗"
-		default:
-			return "~"
-		}
-	}
-
-	fmt.Fprintln(os.Stderr)
-	for _, g := range groups {
-		fmt.Fprintf(os.Stderr, "  %s\n", g.name)
-		for _, ch := range g.changes {
-			sym := catSymbol(ch.Category)
-			switch ch.Kind {
-			case schemadiff.TableAdded:
-				fmt.Fprintf(os.Stderr, "    %s  table added\n", sym)
-			case schemadiff.TableRemoved:
-				fmt.Fprintf(os.Stderr, "    %s  table removed\n", sym)
-			case schemadiff.ColumnAdded:
-				if ch.Detail != "" {
-					fmt.Fprintf(os.Stderr, "    %s  %s  added (%s)\n", sym, ch.Column, ch.Detail)
-				} else {
-					fmt.Fprintf(os.Stderr, "    %s  %s  added\n", sym, ch.Column)
-				}
-			case schemadiff.ColumnRemoved:
-				fmt.Fprintf(os.Stderr, "    %s  %s  removed\n", sym, ch.Column)
-			case schemadiff.ColumnChanged:
-				fmt.Fprintf(os.Stderr, "    %s  %s  %s\n", sym, ch.Column, ch.Detail)
-			case schemadiff.ForeignKeyAdded:
-				fmt.Fprintf(os.Stderr, "    %s  %s  FK added -> %s\n", sym, ch.Column, ch.Detail)
-			case schemadiff.ForeignKeyRemoved:
-				fmt.Fprintf(os.Stderr, "    %s  %s  FK removed\n", sym, ch.Column)
-			case schemadiff.ForeignKeyChanged:
-				fmt.Fprintf(os.Stderr, "    %s  %s  FK changed -> %s\n", sym, ch.Column, ch.Detail)
-			default:
-				fmt.Fprintf(os.Stderr, "    %s  %s  %s\n", sym, ch.Column, ch.Detail)
-			}
-		}
-		fmt.Fprintln(os.Stderr)
-	}
-
-	// Summary counts line.
 	var parts []string
-	order := []driftreport.Category{driftreport.Breaking, driftreport.Decision, driftreport.Likely, driftreport.Auto}
-	for _, cat := range order {
-		n := r.Counts[cat]
+	for _, b := range order {
+		n := r.Counts[b.cat]
 		if n == 0 {
 			continue
 		}
-		sym := catSymbol(cat)
-		parts = append(parts, fmt.Sprintf("%s %s: %d", sym, cat, n))
+		parts = append(parts, fmt.Sprintf("%s %d %s", b.sym, n, b.cat))
 	}
-	fmt.Fprintf(os.Stderr, "  (%s)\n", strings.Join(parts, ", "))
+	fmt.Fprintf(os.Stderr, "\n  Schema drift  %s\n", strings.Join(parts, "  · "))
 }
 
 // printSchemaBeforeAfter renders a per-row arrow-style schema diff with ANSI colors.
@@ -453,37 +396,21 @@ func RunCheckStateSchema(_ context.Context, in CheckStateSchemaInput) (CheckStat
 		return CheckStateSchemaOutput{}, err
 	}
 
-	currentFP, currentJSON, err := fingerprintCurrentDB(target)
+	// rawFP is always the full-schema fingerprint — this is what gets stored in
+	// revision manifests and what seed/check use for comparison.
+	rawFP, currentJSON, err := fingerprintCurrentDB(target)
 	if err != nil {
 		return CheckStateSchemaOutput{}, err
 	}
 
-	// Strip tables the user has opted out of (e.g. _prisma_migrations) so they
-	// never appear in drift comparisons, fingerprints, or the before/after display.
-	currentJSON, err = stripExcludedTables(currentJSON, cfg.ExcludeTables)
-	if err != nil {
-		return CheckStateSchemaOutput{}, fmt.Errorf("filtering excluded tables: %w", err)
-	}
-	if len(cfg.ExcludeTables) > 0 {
-		// Re-fingerprint after stripping so the comparison is based on the
-		// filtered schema, not the raw one.
-		var filteredSchema utils.SchemaJSON
-		if jsonErr := json.Unmarshal(currentJSON, &filteredSchema); jsonErr == nil {
-			currentFP, err = utils.FingerprintSchema(filteredSchema)
-			if err != nil {
-				return CheckStateSchemaOutput{}, fmt.Errorf("re-fingerprinting filtered schema: %w", err)
-			}
-		}
-	}
-
 	oldFP := rev.Manifest.SchemaFingerprint
-	if currentFP == oldFP {
+	if rawFP == oldFP {
 		return CheckStateSchemaOutput{
 			Report: driftreport.Report{
 				Scenario:     scenarioPath,
 				BaseRevision: rev.RevID,
 				OldSchemaFP:  oldFP,
-				NewSchemaFP:  currentFP,
+				NewSchemaFP:  rawFP,
 				HasDrift:     false,
 			},
 			NewSchemaJSON: currentJSON,
@@ -496,13 +423,27 @@ func RunCheckStateSchema(_ context.Context, in CheckStateSchemaInput) (CheckStat
 		return CheckStateSchemaOutput{}, fmt.Errorf("stored schema.json not found for fingerprint %s (pruned?): %w", utils.FingerprintShort(oldFP), err)
 	}
 
-	changes, err := schemadiff.Diff(storedJSON, currentJSON)
+	// Strip excluded tables from both sides for display/diff only.
+	// The raw FP is preserved above; stripping is purely cosmetic so that
+	// framework-managed tables (e.g. _prisma_migrations) never appear in the
+	// drift output or the before/after visual.
+	diffCurrentJSON, err := stripExcludedTables(currentJSON, cfg.ExcludeTables)
+	if err != nil {
+		return CheckStateSchemaOutput{}, fmt.Errorf("filtering excluded tables from current schema: %w", err)
+	}
+	diffStoredJSON, err := stripExcludedTables(storedJSON, cfg.ExcludeTables)
+	if err != nil {
+		return CheckStateSchemaOutput{}, fmt.Errorf("filtering excluded tables from stored schema: %w", err)
+	}
+
+	changes, err := schemadiff.Diff(diffStoredJSON, diffCurrentJSON)
 	if err != nil {
 		return CheckStateSchemaOutput{}, fmt.Errorf("computing diff: %w", err)
 	}
 
-	report := driftreport.Build(scenarioPath, rev.RevID, oldFP, currentFP, changes, storedJSON, currentJSON)
-	return CheckStateSchemaOutput{Report: report, NewSchemaJSON: currentJSON, OldSchemaJSON: storedJSON}, nil
+	// Pass rawFP as NewSchemaFP so it flows through to the revision manifest.
+	report := driftreport.Build(scenarioPath, rev.RevID, oldFP, rawFP, changes, diffStoredJSON, diffCurrentJSON)
+	return CheckStateSchemaOutput{Report: report, NewSchemaJSON: diffCurrentJSON, OldSchemaJSON: diffStoredJSON}, nil
 }
 
 // RefreshInput is the input for the drift-check phase of RunRefresh.
