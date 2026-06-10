@@ -173,15 +173,3 @@ func TestWalkScenarios_missingRoot(t *testing.T) {
 		t.Fatalf("expected no scenarios from missing root, got paths=%v bad=%v", paths, bad)
 	}
 }
-
-func TestScenarioFromDir(t *testing.T) {
-	root := "/proj"
-	storage := ".seedmancer"
-	got := ScenarioFromDir(root, storage, ScenarioDir(root, storage, "billing/pro"))
-	if got != "billing/pro" {
-		t.Fatalf("got %q, want billing/pro", got)
-	}
-	if got := ScenarioFromDir(root, storage, "/elsewhere"); got != "" {
-		t.Fatalf("expected empty for outside dir, got %q", got)
-	}
-}

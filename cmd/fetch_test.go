@@ -16,22 +16,6 @@ import (
 	utils "github.com/KazanKK/seedmancer/internal/utils"
 )
 
-func strPtr(s string) *string { return &s }
-
-func TestDisplayLabelForSchema(t *testing.T) {
-	if got := displayLabelForSchema(nil); got != "(orphan)" {
-		t.Errorf("got %q", got)
-	}
-	s := &schemaRefShort{FingerprintShort: "abcd12345678"}
-	if got := displayLabelForSchema(s); got != "abcd12345678" {
-		t.Errorf("got %q", got)
-	}
-	s.DisplayName = strPtr("main")
-	if got := displayLabelForSchema(s); got != "main [abcd12345678]" {
-		t.Errorf("got %q", got)
-	}
-}
-
 func TestFindRemoteDataset_singleMatch(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1.0/datasets" {

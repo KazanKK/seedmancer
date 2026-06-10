@@ -198,11 +198,6 @@ func countCSVDataRows(path string) (int, error) {
 	return count, nil
 }
 
-// servicesForRevision returns the sorted list of services recorded on a revision manifest.
-func servicesForRevision(_ utils.Config, _ string) []string {
-	return []string{"postgres"}
-}
-
 // formatExportTime renders a manifest timestamp as the human-readable
 // "YYYY-MM-DD HH:MM" form used by `list` and `history`.
 func formatExportTime(t time.Time) string {

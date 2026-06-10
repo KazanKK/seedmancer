@@ -38,7 +38,8 @@ func RefreshCommand() *cli.Command {
 			"Examples:\n" +
 			"  seedmancer refresh billing/pro\n" +
 			"  seedmancer refresh billing/pro --yes           # skip confirmation\n" +
-			"  seedmancer refresh billing/pro --prompt 'keep user emails realistic'",
+			"  seedmancer refresh billing/pro --prompt 'keep user emails realistic'\n\n" +
+			"Requires a Pro plan (https://seedmancer.dev/#pricing).",
 		Flags: []cli.Flag{
 			&cli.StringFlag{Name: "env", Aliases: []string{"e"}, Usage: "Named environment to connect to"},
 			&cli.StringFlag{Name: "db-url", Usage: "Ad-hoc database URL (overrides --env)"},
@@ -63,8 +64,6 @@ func runRefreshOne(c *cli.Context, scenarioArg string) error {
 		Revision: c.String("revision"),
 		Env:      c.String("env"),
 		DBURL:    c.String("db-url"),
-		Prompt:   c.String("prompt"),
-		Yes:      c.Bool("yes"),
 	})
 	if err != nil {
 		spinner.Stop(false, "")
@@ -362,8 +361,8 @@ type CheckStateSchemaInput struct {
 // CheckStateSchemaOutput is the output for check_state_schema.
 type CheckStateSchemaOutput struct {
 	driftreport.Report
-	// NewSchemaJSON is the current DB schema — included so callers can pass
-	// it straight to apply_ai_refresh without a second DB round-trip.
+	// NewSchemaJSON is the current DB schema — included so callers can reuse
+	// it without a second DB round-trip.
 	NewSchemaJSON []byte `json:"-"`
 	// OldSchemaJSON is the stored schema from the last snapshot — used for
 	// before/after display.
@@ -451,8 +450,6 @@ type RefreshInput struct {
 	Revision string `json:"revision,omitempty"`
 	Env      string `json:"env,omitempty"`
 	DBURL    string `json:"dbUrl,omitempty"`
-	Prompt   string `json:"prompt,omitempty"`
-	Yes      bool   `json:"yes,omitempty"`
 }
 
 // RefreshOutput is returned after the drift-check phase.
@@ -471,7 +468,8 @@ type RefreshOutput struct {
 }
 
 // RunRefresh performs the drift-check phase and returns a RefreshOutput.
-// When called via MCP, follow up with RunApplyAIRefresh to complete the refresh.
+// runRefreshOne follows up with runGenerateRefreshSQL + runApplyGeneratedSQL
+// to complete the refresh.
 func RunRefresh(ctx context.Context, in RefreshInput) (RefreshOutput, error) {
 	configPath, err := utils.FindConfigFile()
 	if err != nil {
@@ -503,16 +501,6 @@ func RunRefresh(ctx context.Context, in RefreshInput) (RefreshOutput, error) {
 	}, nil
 }
 
-// ApplyAIRefreshInput is the input for the apply phase of an AI refresh.
-type ApplyAIRefreshInput struct {
-	Scenario string `json:"scenario"`
-	Revision string `json:"revision,omitempty"`
-	Env      string `json:"env,omitempty"`
-	DBURL    string `json:"dbUrl,omitempty"`
-	Prompt   string `json:"prompt,omitempty"`
-	Token    string `json:"token,omitempty"`
-}
-
 // ApplyAIRefreshOutput is the result of the apply phase.
 type ApplyAIRefreshOutput struct {
 	Scenario     string `json:"scenario"`
@@ -532,49 +520,6 @@ type applyAIRefreshInput struct {
 	Token         string
 	DriftReport   driftreport.Report
 	NewSchemaJSON []byte
-}
-
-// RunApplyAIRefresh is the MCP-callable variant that re-runs drift detection
-// internally. Use runApplyAIRefresh directly from CLI to avoid a second
-// DB round-trip.
-func RunApplyAIRefresh(ctx context.Context, in ApplyAIRefreshInput) (ApplyAIRefreshOutput, error) {
-	configPath, err := utils.FindConfigFile()
-	if err != nil {
-		return ApplyAIRefreshOutput{}, err
-	}
-	cfg, err := utils.LoadConfig(configPath)
-	if err != nil {
-		return ApplyAIRefreshOutput{}, err
-	}
-	projectRoot := filepath.Dir(configPath)
-
-	csOut, err := RunCheckStateSchema(ctx, CheckStateSchemaInput{
-		Scenario: in.Scenario,
-		Revision: in.Revision,
-		Env:      in.Env,
-		DBURL:    in.DBURL,
-	})
-	if err != nil {
-		return ApplyAIRefreshOutput{}, err
-	}
-	if !csOut.HasDrift {
-		if csOut.OldSchemaFP != csOut.NewSchemaFP {
-			if syncErr := syncRevisionFingerprint(projectRoot, cfg.StoragePath, csOut.Report, csOut.NewSchemaJSON); syncErr != nil {
-				return ApplyAIRefreshOutput{}, fmt.Errorf("syncing fingerprint: %w", syncErr)
-			}
-		}
-		return ApplyAIRefreshOutput{}, fmt.Errorf("no schema drift detected for %s — nothing to refresh", in.Scenario)
-	}
-	return runApplyAIRefresh(ctx, applyAIRefreshInput{
-		Scenario:      in.Scenario,
-		Revision:      in.Revision,
-		Env:           in.Env,
-		DBURL:         in.DBURL,
-		Prompt:        in.Prompt,
-		Token:         in.Token,
-		DriftReport:   csOut.Report,
-		NewSchemaJSON: csOut.NewSchemaJSON,
-	})
 }
 
 // generateRefreshResult carries all state produced by runGenerateRefreshSQL
@@ -760,16 +705,6 @@ func runApplyGeneratedSQL(ctx context.Context, r generateRefreshResult) (ApplyAI
 		Schema:       fpShort,
 		DataDir:      newDataDir,
 	}, nil
-}
-
-// runApplyAIRefresh is the internal implementation — a thin wrapper used by
-// RunApplyAIRefresh (MCP) that calls both phases without interactive prompts.
-func runApplyAIRefresh(ctx context.Context, in applyAIRefreshInput) (ApplyAIRefreshOutput, error) {
-	genResult, err := runGenerateRefreshSQL(ctx, in)
-	if err != nil {
-		return ApplyAIRefreshOutput{}, err
-	}
-	return runApplyGeneratedSQL(ctx, genResult)
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -1149,8 +1084,8 @@ func callGenerateRefreshSQL(ctx context.Context, token string, schema generateSc
 	if resp.StatusCode == http.StatusUnauthorized {
 		return "", utils.ErrInvalidAPIToken
 	}
-	if resp.StatusCode == http.StatusPaymentRequired {
-		return "", fmt.Errorf("AI refresh requires a Seedmancer Pro subscription")
+	if resp.StatusCode == http.StatusPaymentRequired || resp.StatusCode == http.StatusForbidden {
+		return "", formatLimitError(respBody)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("generate-refresh-sql failed (HTTP %d): %s", resp.StatusCode, string(respBody))
@@ -1177,36 +1112,4 @@ func exportSchemaToStore(target utils.NamedEnv, schemaDir string) error {
 		return err
 	}
 	return manager.ExportSchema(schemaDir)
-}
-
-// copyFilePath copies src to dst, creating the parent directory if needed.
-func copyFilePath(src, dst string) error {
-	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
-		return err
-	}
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-	out, err := os.Create(dst)
-	if err != nil {
-		return err
-	}
-	defer out.Close()
-	buf := make([]byte, 32*1024)
-	for {
-		nr, er := in.Read(buf)
-		if nr > 0 {
-			if _, ew := out.Write(buf[:nr]); ew != nil {
-				return ew
-			}
-		}
-		if er != nil {
-			if er.Error() == "EOF" {
-				return nil
-			}
-			return er
-		}
-	}
 }

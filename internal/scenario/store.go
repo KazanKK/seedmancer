@@ -7,7 +7,6 @@ import (
 	"regexp"
 	"sort"
 	"strconv"
-	"strings"
 	"time"
 )
 
@@ -166,15 +165,4 @@ func SchemaStoreDir(projectRoot, storagePath, fpShort string) string {
 // SchemaJSONPath is the canonical location of a schema's schema.json.
 func SchemaJSONPath(projectRoot, storagePath, fpShort string) string {
 	return filepath.Join(SchemaStoreDir(projectRoot, storagePath, fpShort), "schema.json")
-}
-
-// ScenarioFromDir reverses ScenarioDir for a given absolute path. It
-// returns "" when the path doesn't sit under the scenarios root.
-func ScenarioFromDir(projectRoot, storagePath, dir string) string {
-	root := ScenariosRoot(projectRoot, storagePath)
-	rel, err := filepath.Rel(root, dir)
-	if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
-		return ""
-	}
-	return filepath.ToSlash(rel)
 }

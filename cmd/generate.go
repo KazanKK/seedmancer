@@ -3,15 +3,12 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 
 	db "github.com/KazanKK/seedmancer/database"
 	"github.com/KazanKK/seedmancer/internal/ui"
 
-	"github.com/KazanKK/seedmancer/internal/scenario"
 	"github.com/urfave/cli/v2"
 )
 
@@ -67,6 +64,8 @@ func GenerateCommand() *cli.Command {
 			"  seedmancer generate baseline --prompt 'three realistic users'\n" +
 			"  seedmancer generate baseline                   # reuse the saved purpose\n" +
 			"  seedmancer generate qa/smoke --inherit baseline --prompt 'add two orders'\n\n" +
+			"Requires a Pro plan (https://seedmancer.dev/#pricing). Local generation\n" +
+			"through the MCP server stays free.\n\n" +
 			"NOTE: this overwrites data in the configured local env.",
 		Flags: []cli.Flag{
 			&cli.StringFlag{
@@ -292,12 +291,3 @@ func splitStatements(sql string) []string {
 	}
 	return stmts
 }
-
-// keep sentinel references so the compiler does not complain about the
-// scenario and filepath packages being imported for side-effects only.
-var (
-	_ = scenario.Normalize
-	_ = filepath.Join
-	_ = os.Stat
-	_ = db.Table{}
-)

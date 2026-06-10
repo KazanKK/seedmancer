@@ -8,8 +8,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
-	"path/filepath"
 	"strings"
 
 	utils "github.com/KazanKK/seedmancer/internal/utils"
@@ -170,91 +168,4 @@ func syncUploadPresigned(ctx context.Context, token, baseURL, datasetName, revis
 		return syncUploadResult{}, fmt.Errorf("parsing confirm response: %v", err)
 	}
 	return result, nil
-}
-
-// syncDatasetUpload zips the schema sidecars + dataset CSVs and uploads
-// them via the presigned URL flow. It is the quiet counterpart to syncOne.
-func syncDatasetUpload(ctx context.Context, token string, schema utils.LocalSchema, datasetDir, datasetName, revisionLabel, baseURL string) (syncUploadResult, error) {
-	schemaFiles, err := utils.SchemaFiles(schema.Path)
-	if err != nil {
-		return syncUploadResult{}, err
-	}
-	dataFiles, err := utils.DatasetFiles(datasetDir)
-	if err != nil {
-		return syncUploadResult{}, err
-	}
-	if len(dataFiles) == 0 {
-		return syncUploadResult{}, fmt.Errorf("no CSV or JSON files in %s", datasetDir)
-	}
-
-	entries := make([]string, 0, len(schemaFiles)+len(dataFiles))
-	entries = append(entries, schemaFiles...)
-	entries = append(entries, dataFiles...)
-
-	zipData, err := compressFiles(entries)
-	if err != nil {
-		return syncUploadResult{}, fmt.Errorf("compressing files: %v", err)
-	}
-
-	return syncUploadPresigned(ctx, token, baseURL, datasetName, revisionLabel, zipData)
-}
-
-type fetchDownloadResult struct {
-	Match       datasetAPI
-	OutputDir   string
-	Files       []string
-	LiftedCount int
-}
-
-// fetchDatasetDownload resolves a remote dataset by name, downloads the
-// zipped bundle into the default schema-first layout rooted at
-// projectRoot/storagePath, and lifts the schema sidecars up one level so
-// the on-disk layout matches what `list --local` expects.
-func fetchDatasetDownload(ctx context.Context, baseURL, token, projectRoot, storagePath, datasetName string) (fetchDownloadResult, error) {
-	match, err := findRemoteDataset(baseURL, token, datasetName, "")
-	if err != nil {
-		return fetchDownloadResult{}, err
-	}
-
-	if match.Schema == nil || match.Schema.FingerprintShort == "" {
-		return fetchDownloadResult{}, fmt.Errorf("remote dataset %q is missing schema metadata", datasetName)
-	}
-
-	schemaDir := filepath.Join(projectRoot, storagePath, match.Schema.FingerprintShort)
-	outputDir := filepath.Join(schemaDir, "datasets", datasetName)
-
-	if _, err := os.Stat(outputDir); err == nil {
-		if err := os.RemoveAll(outputDir); err != nil {
-			return fetchDownloadResult{}, fmt.Errorf("removing existing directory: %v", err)
-		}
-	}
-	if err := os.MkdirAll(outputDir, 0755); err != nil {
-		return fetchDownloadResult{}, fmt.Errorf("creating output directory: %v", err)
-	}
-
-	downloadURL, err := getDownloadURL(baseURL, token, match.ID)
-	if err != nil {
-		return fetchDownloadResult{}, err
-	}
-
-	extracted, err := downloadAndExtractZip(downloadURL, outputDir)
-	if err != nil {
-		return fetchDownloadResult{}, err
-	}
-
-	lifted, err := liftSchemaSidecars(outputDir, schemaDir)
-	if err != nil {
-		return fetchDownloadResult{}, fmt.Errorf("placing schema files: %v", err)
-	}
-
-	// Silence the ctx arg warning while reserving it for future use (e.g.
-	// the download helper eventually honoring ctx.Done()).
-	_ = ctx
-
-	return fetchDownloadResult{
-		Match:       match,
-		OutputDir:   outputDir,
-		Files:       extracted,
-		LiftedCount: lifted,
-	}, nil
 }

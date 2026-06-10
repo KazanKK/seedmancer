@@ -59,7 +59,7 @@ revisions unless ` + "`force: true`" + ` is set.
 4. ` + "`generate_dataset_local`" + ` with the rewritten SQL and the same inherit base.
 5. ` + "`seed_database`" + ` — loads the fresh revision.
 
-**Fix drift via CLI (no agent):** ` + "`seedmancer refresh <scenario>`" + ` — cloud AI adapts the data.
+**Fix drift via CLI (no agent):** ` + "`seedmancer refresh <scenario>`" + ` — cloud AI adapts the data (Pro plan).
 
 Read ` + "`seedmancer://docs/refresh`" + ` for the full local workflow.
 
@@ -367,10 +367,10 @@ Loads the fresh revision into the target environment.
 ## CLI alternative (no agent)
 
 ` + "`seedmancer refresh <scenario>`" + ` uses the Seedmancer cloud AI to adapt the data
-automatically. Use this when no local AI agent is available. It requires a
-revision with a saved ` + "`dataset.sql`" + ` (` + "`hasSql: true`" + ` in ` + "`list_history`" + `) — plain
-exported snapshots cannot be refreshed and should be re-exported after the
-migration instead.
+automatically (requires a Pro plan). Use this when no local AI agent is
+available. It requires a revision with a saved ` + "`dataset.sql`" + ` (` + "`hasSql: true`" + ` in
+` + "`list_history`" + `) — plain exported snapshots cannot be refreshed and should be
+re-exported after the migration instead.
 
 ## dataset.sql
 

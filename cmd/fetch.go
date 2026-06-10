@@ -153,16 +153,6 @@ func findRemoteDataset(baseURL, token, datasetName, schemaPrefix string) (datase
 	}
 }
 
-func displayLabelForSchema(s *schemaRefShort) string {
-	if s == nil {
-		return "(orphan)"
-	}
-	if s.DisplayName != nil && *s.DisplayName != "" {
-		return fmt.Sprintf("%s [%s]", *s.DisplayName, s.FingerprintShort)
-	}
-	return s.FingerprintShort
-}
-
 func getDownloadURL(baseURL, token, datasetID string) (string, error) {
 	reqURL := fmt.Sprintf("%s/v1.0/datasets/%s/download", baseURL, datasetID)
 	ui.Debug("GET %s", reqURL)

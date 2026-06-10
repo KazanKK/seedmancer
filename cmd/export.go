@@ -1,10 +1,8 @@
 package cmd
 
 import (
-	"context"
 	"fmt"
 	"io"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -136,29 +134,3 @@ func copyFile(src, dst string) error {
 	}
 	return nil
 }
-
-// normalizePostgresDSN is kept for tests (helpers_test.go exercises the
-// same fixups) so Postgres URLs from --db-url and seedmancer.yaml
-// always reach pgx in the form it expects.
-func normalizePostgresDSN(dbURL string) (string, string, error) {
-	u, err := url.Parse(dbURL)
-	if err != nil {
-		return "", "", fmt.Errorf("parsing database URL: %v", err)
-	}
-	scheme := u.Scheme
-	if scheme == "postgresql" {
-		dbURL = "postgres" + dbURL[len("postgresql"):]
-		scheme = "postgres"
-	}
-	if scheme == "postgres" && !strings.Contains(dbURL, "sslmode=") {
-		if strings.Contains(dbURL, "?") {
-			dbURL += "&sslmode=disable"
-		} else {
-			dbURL += "?sslmode=disable"
-		}
-	}
-	return dbURL, scheme, nil
-}
-
-// silence unused-import warning when no command body uses ctx directly
-var _ = context.Background

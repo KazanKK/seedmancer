@@ -156,7 +156,7 @@ func makeSchema(t *testing.T, projectRoot, fpShort string) {
 func makeDataset(t *testing.T, projectRoot, fpShort, name string) {
 	t.Helper()
 	writeFile(t,
-		filepath.Join(DatasetPath(projectRoot, ".seedmancer", fpShort, name), "t.csv"),
+		filepath.Join(SchemaDir(projectRoot, ".seedmancer", fpShort), "datasets", name, "t.csv"),
 		"id\n1\n",
 	)
 }
@@ -180,7 +180,7 @@ func TestListLocalSchemas_sortsByRecency(t *testing.T) {
 
 	// Bump bbbb's dataset mtime into the future so recency ordering is stable
 	// regardless of filesystem timing.
-	_ = os.Chtimes(DatasetPath(dir, ".seedmancer", "bbbb", "b1"),
+	_ = os.Chtimes(filepath.Join(SchemaDir(dir, ".seedmancer", "bbbb"), "datasets", "b1"),
 		time.Now().Add(time.Hour), time.Now().Add(time.Hour))
 
 	got, err := ListLocalSchemas(dir, ".seedmancer")

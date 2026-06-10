@@ -15,17 +15,8 @@ import (
 
 	db "github.com/KazanKK/seedmancer/database"
 	"github.com/KazanKK/seedmancer/internal/scenario"
-	"github.com/KazanKK/seedmancer/internal/schemadiff"
 	"github.com/KazanKK/seedmancer/internal/sqlcontract"
 	utils "github.com/KazanKK/seedmancer/internal/utils"
-)
-
-// silence unused-import warning in environments that haven't wired the
-// new packages everywhere yet — they are real dependencies of RunCheck
-// and the scenario-aware paths below.
-var (
-	_ = scenario.Normalize
-	_ = schemadiff.Diff
 )
 
 // This file exposes the same logic the CLI `Action` bodies run, but as
@@ -1391,21 +1382,17 @@ func RunGenerate(ctx context.Context, in GenerateInput) (GenerateOutput, error) 
 		return GenerateOutput{}, err
 	}
 
-	// If --inherit is given, record the inherit fingerprint so RunGenerateLocal
-	// can seed the base before applying the generated SQL.
-	var inheritFingerprint string
+	// If --inherit is given, validate that the base scenario resolves before
+	// spending an AI call. RunGenerateLocal seeds the base itself later.
 	if strings.TrimSpace(in.Inherit) != "" {
 		basePath, err := scenario.Normalize(in.Inherit)
 		if err != nil {
 			return GenerateOutput{}, fmt.Errorf("invalid inherit scenario: %w", err)
 		}
-		baseRev, err := resolveScenarioRevision(projectRoot, cfg.StoragePath, basePath, "")
-		if err != nil {
+		if _, err := resolveScenarioRevision(projectRoot, cfg.StoragePath, basePath, ""); err != nil {
 			return GenerateOutput{}, fmt.Errorf("resolving inherit base %q: %w", basePath, err)
 		}
-		inheritFingerprint = baseRev.Manifest.SchemaFingerprint
 	}
-	_ = inheritFingerprint
 
 	apiSchema, err := buildAPISchema(raw, cfg.ExcludeTables)
 	if err != nil {
@@ -1477,7 +1464,7 @@ func callGenerateSQL(ctx context.Context, baseURL, token string, schema generate
 	if resp.StatusCode == http.StatusUnauthorized {
 		return "", utils.ErrInvalidAPIToken
 	}
-	if resp.StatusCode == http.StatusPaymentRequired {
+	if resp.StatusCode == http.StatusPaymentRequired || resp.StatusCode == http.StatusForbidden {
 		return "", formatLimitError(respBody)
 	}
 	if resp.StatusCode >= 400 {
@@ -2033,36 +2020,6 @@ func RawConfigBytes() (string, []byte, error) {
 		return path, nil, err
 	}
 	return path, data, nil
-}
-
-// ProjectInfo is a lightweight view of the seedmancer project scope the
-// MCP status resource returns (same shape as `seedmancer status --json`'s
-// project block, re-exported so the mcp package doesn't need access to
-// private types).
-type ProjectInfo struct {
-	ConfigPath   string `json:"configPath"`
-	StoragePath  string `json:"storagePath"`
-	ProjectRoot  string `json:"projectRoot"`
-	DefaultEnv   string `json:"defaultEnv"`
-	Environments int    `json:"environments"`
-}
-
-func ResolveProjectInfo() (ProjectInfo, error) {
-	path, err := utils.FindConfigFile()
-	if err != nil {
-		return ProjectInfo{}, err
-	}
-	cfg, err := utils.LoadConfig(path)
-	if err != nil {
-		return ProjectInfo{}, err
-	}
-	return ProjectInfo{
-		ConfigPath:   path,
-		StoragePath:  cfg.StoragePath,
-		ProjectRoot:  filepath.Dir(path),
-		DefaultEnv:   cfg.ActiveEnvName(),
-		Environments: len(cfg.EffectiveEnvs()),
-	}, nil
 }
 
 // LocalSchemaBrief is a compact schema row used by resources/list so

@@ -46,30 +46,6 @@ type Config struct {
 	// generate and refresh operations. Use this for framework-managed system
 	// tables (e.g. _prisma_migrations) that should never be seeded with fake data.
 	ExcludeTables []string `yaml:"exclude_tables,omitempty"`
-
-	// Refresh contains user-defined rules for automating schema-drift resolution.
-	Refresh RefreshConfig `yaml:"refresh,omitempty"`
-}
-
-// RefreshConfig holds the optional `refresh:` block in seedmancer.yaml.
-type RefreshConfig struct {
-	// Rules maps "<table>.<column>" keys to a saved resolution rule that
-	// seedmancer refresh replays automatically instead of prompting the user.
-	Rules map[string]RefreshRule `yaml:"rules,omitempty"`
-
-	// RedactColumns is an extra list of column name patterns (case-insensitive
-	// substring match) that should be scrubbed from sample rows before they
-	// are sent to the AI backend. The built-in blocklist always applies.
-	RedactColumns []string `yaml:"redactColumns,omitempty"`
-}
-
-// RefreshRule is one saved decision for a specific table.column drift.
-type RefreshRule struct {
-	Strategy    string            `yaml:"strategy"`               // maps to refreshplan.Strategy
-	Value       string            `yaml:"value,omitempty"`        // for strategy=constant
-	FromColumn  string            `yaml:"fromColumn,omitempty"`   // for strategy=derive / rename
-	ParentTable string            `yaml:"parentTable,omitempty"`  // for create_parent strategy
-	ParentValues map[string]string `yaml:"parentValues,omitempty"` // column->value for parent row
 }
 
 // EnvConfig is one named target inside `environments:`.
