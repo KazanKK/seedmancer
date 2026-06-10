@@ -46,6 +46,10 @@ func Yellow(s string) string { return color(yellow, s) }
 
 func SetDebug(enabled bool) { debugMode = enabled }
 
+// DebugEnabled reports whether debug output is on, so callers can skip
+// work (e.g. diagnostic queries) that only feeds Debug logs.
+func DebugEnabled() bool { return debugMode }
+
 func Step(format string, args ...interface{}) {
 	msg := fmt.Sprintf(format, args...)
 	fmt.Fprintf(os.Stderr, "%s %s\n", color(cyan, "→"), msg)

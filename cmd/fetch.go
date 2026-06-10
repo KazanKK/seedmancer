@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/KazanKK/seedmancer/internal/ui"
 	utils "github.com/KazanKK/seedmancer/internal/utils"
@@ -58,7 +59,7 @@ func PullCommand() *cli.Command {
 		Flags: []cli.Flag{
 			&cli.StringFlag{
 				Name:  "token",
-				Usage: "API token (falls back to ~/.seedmancer/credentials, then SEEDMANCER_API_TOKEN)",
+				Usage: "API token (falls back to SEEDMANCER_API_TOKEN, then ~/.seedmancer/credentials)",
 			},
 		},
 		Action: func(c *cli.Context) error {
@@ -66,6 +67,7 @@ func PullCommand() *cli.Command {
 			if scenarioArg == "" {
 				return usageError(c, "missing required argument: <scenario>")
 			}
+			start := time.Now()
 			out, err := RunFetch(c.Context, FetchInput{
 				Scenario: scenarioArg,
 				Token:    c.String("token"),
@@ -73,7 +75,15 @@ func PullCommand() *cli.Command {
 			if err != nil {
 				return err
 			}
-			ui.Success("Pulled %s @ %s", out.Scenario, out.Revision)
+			elapsed := time.Since(start)
+			if out.UpToDate {
+				ui.Success("Already up to date — %s @ %s matches the cloud (%s)",
+					out.Scenario, out.Revision, formatDuration(elapsed))
+				ui.KeyValue("Path: ", out.Path)
+				return nil
+			}
+			ui.Success("Pulled %s @ %s (%s in %s)",
+				out.Scenario, out.Revision, formatBytes(out.BytesDownloaded), formatDuration(elapsed))
 			ui.KeyValue("Schema: ", out.SchemaShort)
 			ui.KeyValue("Files: ", fmt.Sprintf("%d", len(out.Files)))
 			ui.KeyValue("Path: ", out.Path)
@@ -224,33 +234,34 @@ func liftSchemaSidecars(dataDir, schemaDir string) (int, error) {
 	return moved, nil
 }
 
-func downloadAndExtractZip(downloadURL, outputDir string) ([]string, error) {
+func downloadAndExtractZip(downloadURL, outputDir string) ([]string, int64, error) {
 	ui.Debug("Downloading zip...")
 
 	resp, err := http.Get(downloadURL)
 	if err != nil {
-		return nil, fmt.Errorf("downloading zip: %v", err)
+		return nil, 0, fmt.Errorf("downloading zip: %v", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("download failed with status: %d", resp.StatusCode)
+		return nil, 0, fmt.Errorf("download failed with status: %d", resp.StatusCode)
 	}
 
 	tmpFile, err := os.CreateTemp("", "seedmancer-*.zip")
 	if err != nil {
-		return nil, fmt.Errorf("creating temporary file: %v", err)
+		return nil, 0, fmt.Errorf("creating temporary file: %v", err)
 	}
 	defer os.Remove(tmpFile.Name())
 	defer tmpFile.Close()
 
-	if _, err := io.Copy(tmpFile, resp.Body); err != nil {
-		return nil, fmt.Errorf("saving zip file: %v", err)
+	downloadedBytes, err := io.Copy(tmpFile, resp.Body)
+	if err != nil {
+		return nil, 0, fmt.Errorf("saving zip file: %v", err)
 	}
 
 	zipReader, err := zip.OpenReader(tmpFile.Name())
 	if err != nil {
-		return nil, fmt.Errorf("opening zip file: %v", err)
+		return nil, 0, fmt.Errorf("opening zip file: %v", err)
 	}
 	defer zipReader.Close()
 
@@ -262,25 +273,25 @@ func downloadAndExtractZip(downloadURL, outputDir string) ([]string, error) {
 
 		rc, err := file.Open()
 		if err != nil {
-			return nil, fmt.Errorf("opening file in zip: %v", err)
+			return nil, 0, fmt.Errorf("opening file in zip: %v", err)
 		}
 
 		destPath := filepath.Join(outputDir, filepath.Base(file.Name))
 		if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
 			rc.Close()
-			return nil, fmt.Errorf("creating directories: %v", err)
+			return nil, 0, fmt.Errorf("creating directories: %v", err)
 		}
 
 		outFile, err := os.Create(destPath)
 		if err != nil {
 			rc.Close()
-			return nil, fmt.Errorf("creating output file: %v", err)
+			return nil, 0, fmt.Errorf("creating output file: %v", err)
 		}
 
 		if _, err := io.Copy(outFile, rc); err != nil {
 			outFile.Close()
 			rc.Close()
-			return nil, fmt.Errorf("extracting file: %v", err)
+			return nil, 0, fmt.Errorf("extracting file: %v", err)
 		}
 
 		outFile.Close()
@@ -290,5 +301,5 @@ func downloadAndExtractZip(downloadURL, outputDir string) ([]string, error) {
 		ui.Debug("Extracted: %s", filepath.Base(file.Name))
 	}
 
-	return extracted, nil
+	return extracted, downloadedBytes, nil
 }

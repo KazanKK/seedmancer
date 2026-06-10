@@ -63,6 +63,10 @@ func TestPushCommand_allPushesEachScenarioLatest(t *testing.T) {
 				FingerprintShort: schemaShort,
 				FileCount:        2,
 			})
+		case r.Method == http.MethodGet && r.URL.Path == "/v1.0/datasets":
+			// post-push remote stamp lookup (best-effort, empty is fine)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"datasets":[]}`))
 		default:
 			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
 		}

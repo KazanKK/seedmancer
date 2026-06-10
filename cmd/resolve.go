@@ -70,7 +70,7 @@ func resolveSingleDB(c *cli.Context, cfg utils.Config) (utils.NamedEnv, error) {
 //   - $SEEDMANCER_DATABASE_URL is only used when no environments are configured
 //     (bare CI scenario), so a project with named envs always resolves cleanly.
 //   - An empty --env falls back to the active default env, so `seedmancer
-//     seed -d snap1` keeps working for users who never adopt named envs.
+//     seed snap1` keeps working for users who never adopt named envs.
 func resolveSeedTargets(c *cli.Context, cfg utils.Config) ([]utils.NamedEnv, error) {
 	if adhoc := strings.TrimSpace(c.String("db-url")); adhoc != "" {
 		if c.IsSet("env") {

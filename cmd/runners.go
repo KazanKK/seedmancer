@@ -1831,6 +1831,9 @@ func RunSync(ctx context.Context, in SyncInput) (SyncOutput, error) {
 	if m, mErr := scenario.ReadManifest(scenarioDir); mErr == nil && strings.TrimSpace(m.Prompt) != "" && result.ID != "" {
 		_ = pushScenarioPrompt(ctx, token, baseURL, result.ID, strings.TrimSpace(m.Prompt))
 	}
+	// Stamp the local revision with the cloud revision it now mirrors so a
+	// subsequent pull can skip the download. Best-effort.
+	stampRemoteRevision(rev.RevDir, baseURL, token, scenarioPath, fpShort)
 	return SyncOutput{
 		Scenario: scenarioPath,
 		Revision: rev.RevID,
@@ -1855,6 +1858,11 @@ type FetchOutput struct {
 	SchemaFingerprint string   `json:"schemaFingerprint"`
 	Path              string   `json:"path"`
 	Files             []string `json:"files"`
+	// UpToDate is true when the local latest revision already mirrors the
+	// cloud's latest revision, so no download happened.
+	UpToDate bool `json:"upToDate,omitempty"`
+	// BytesDownloaded is the size of the downloaded archive (0 when UpToDate).
+	BytesDownloaded int64 `json:"bytesDownloaded,omitempty"`
 }
 
 func RunFetch(ctx context.Context, in FetchInput) (FetchOutput, error) {
@@ -1891,6 +1899,27 @@ func RunFetch(ctx context.Context, in FetchInput) (FetchOutput, error) {
 	}
 
 	scenarioDir := scenario.ScenarioDir(projectRoot, cfg.StoragePath, scenarioPath)
+
+	// Skip the download when the local latest revision already mirrors the
+	// cloud's latest revision (stamped by a previous pull or push). This
+	// keeps warm CI runs and repeated pulls fast and avoids piling up
+	// duplicate revisions.
+	if m, mErr := scenario.ReadManifest(scenarioDir); mErr == nil && m.Latest != "" {
+		latestDir := scenario.RevisionDir(projectRoot, cfg.StoragePath, scenarioPath, m.Latest)
+		if rm, rErr := scenario.ReadRevisionManifest(latestDir); rErr == nil &&
+			rm.RemoteID != "" && rm.RemoteID == match.ID &&
+			rm.RemoteUpdatedAt != "" && rm.RemoteUpdatedAt == match.UpdatedAt {
+			return FetchOutput{
+				Scenario:          scenarioPath,
+				Revision:          m.Latest,
+				SchemaShort:       fpShort,
+				SchemaFingerprint: match.Schema.Fingerprint,
+				Path:              filepath.Join(latestDir, "data"),
+				UpToDate:          true,
+			}, nil
+		}
+	}
+
 	if err := os.MkdirAll(scenarioDir, 0755); err != nil {
 		return FetchOutput{}, fmt.Errorf("creating scenario dir: %v", err)
 	}
@@ -1908,7 +1937,7 @@ func RunFetch(ctx context.Context, in FetchInput) (FetchOutput, error) {
 	if err != nil {
 		return FetchOutput{}, err
 	}
-	extracted, err := downloadAndExtractZip(downloadURL, dataDir)
+	extracted, downloadedBytes, err := downloadAndExtractZip(downloadURL, dataDir)
 	if err != nil {
 		return FetchOutput{}, err
 	}
@@ -1933,6 +1962,8 @@ func RunFetch(ctx context.Context, in FetchInput) (FetchOutput, error) {
 		Tables:            tables,
 		Services:          []string{"postgres"},
 		RowCounts:         rowCounts,
+		RemoteID:          match.ID,
+		RemoteUpdatedAt:   match.UpdatedAt,
 	}
 	if err := scenario.WriteRevisionManifest(revDir, revManifest); err != nil {
 		return FetchOutput{}, err
@@ -1959,6 +1990,7 @@ func RunFetch(ctx context.Context, in FetchInput) (FetchOutput, error) {
 		SchemaFingerprint: match.Schema.Fingerprint,
 		Path:              dataDir,
 		Files:             extracted,
+		BytesDownloaded:   downloadedBytes,
 	}, nil
 }
 

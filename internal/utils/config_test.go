@@ -111,11 +111,12 @@ func TestResolveAPIToken_prefersCredentialsFile(t *testing.T) {
 	}
 }
 
-// TestResolveAPIToken_credentialsFileBeatsEnvVar regression-tests the
-// support report where a stale `export SEEDMANCER_API_TOKEN=...` in the
-// user's shell silently shadowed every `seedmancer login`. The
-// credentials file must now win, so login "just sticks."
-func TestResolveAPIToken_credentialsFileBeatsEnvVar(t *testing.T) {
+// TestResolveAPIToken_envVarBeatsCredentialsFile pins the CI-friendly
+// ordering: SEEDMANCER_API_TOKEN must win over ~/.seedmancer/credentials,
+// matching how every other CLI treats env vars vs. on-disk config. The
+// "stale env var shadows login" confusion is mitigated by naming the
+// token source in 401 errors instead of inverting the order.
+func TestResolveAPIToken_envVarBeatsCredentialsFile(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
 	prev, _ := os.Getwd()
@@ -124,8 +125,8 @@ func TestResolveAPIToken_credentialsFileBeatsEnvVar(t *testing.T) {
 		t.Fatalf("chdir: %v", err)
 	}
 
-	t.Setenv("SEEDMANCER_API_TOKEN", "stale-env")
-	if err := SaveAPICredentials("fresh-login"); err != nil {
+	t.Setenv("SEEDMANCER_API_TOKEN", "env-token")
+	if err := SaveAPICredentials("login-token"); err != nil {
 		t.Fatalf("save: %v", err)
 	}
 
@@ -133,8 +134,8 @@ func TestResolveAPIToken_credentialsFileBeatsEnvVar(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
-	if got != "fresh-login" {
-		t.Fatalf("credentials file did not win over env var: got %q", got)
+	if got != "env-token" {
+		t.Fatalf("env var did not win over credentials file: got %q", got)
 	}
 }
 

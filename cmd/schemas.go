@@ -82,7 +82,7 @@ func SchemasCommand() *cli.Command {
 				Flags: []cli.Flag{
 					&cli.StringFlag{
 						Name:  "token",
-						Usage: "API token (falls back to ~/.seedmancer/credentials, then SEEDMANCER_API_TOKEN)",
+						Usage: "API token (falls back to SEEDMANCER_API_TOKEN, then ~/.seedmancer/credentials)",
 					},
 					&cli.BoolFlag{
 						Name:  "local",
@@ -114,7 +114,7 @@ func SchemasCommand() *cli.Command {
 				Flags: []cli.Flag{
 					&cli.StringFlag{
 						Name:  "token",
-						Usage: "API token (falls back to ~/.seedmancer/credentials, then SEEDMANCER_API_TOKEN)",
+						Usage: "API token (falls back to SEEDMANCER_API_TOKEN, then ~/.seedmancer/credentials)",
 					},
 					&cli.BoolFlag{
 						Name:  "local",
@@ -146,7 +146,7 @@ func SchemasCommand() *cli.Command {
 				Flags: []cli.Flag{
 					&cli.StringFlag{
 						Name:  "token",
-						Usage: "API token (falls back to ~/.seedmancer/credentials, then SEEDMANCER_API_TOKEN)",
+						Usage: "API token (falls back to SEEDMANCER_API_TOKEN, then ~/.seedmancer/credentials)",
 					},
 					&cli.BoolFlag{
 						Name:  "local",
@@ -762,4 +762,14 @@ func formatBytes(n int64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), "KMGTPE"[exp])
+}
+
+// formatDuration renders an elapsed time compactly for CLI summaries:
+// sub-second values as milliseconds, everything else as seconds with one
+// decimal (e.g. "850ms", "4.2s", "71.3s").
+func formatDuration(d time.Duration) string {
+	if d < time.Second {
+		return fmt.Sprintf("%dms", d.Milliseconds())
+	}
+	return fmt.Sprintf("%.1fs", d.Seconds())
 }

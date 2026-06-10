@@ -46,13 +46,13 @@ seedmancer init
 seedmancer login
 
 # 3. Save a snapshot
-seedmancer export --id baseline
+seedmancer export baseline
 
 # 4. Restore it at any time
-seedmancer seed --id baseline
+seedmancer seed baseline
 
 # 5. Push to the cloud so teammates can pull it
-seedmancer push --id baseline
+seedmancer push baseline
 ```
 
 For the full command reference, configuration guide, Playwright integration, and MCP server setup, see the **[docs](https://seedmancer.dev/docs)**.

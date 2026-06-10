@@ -16,7 +16,7 @@ The binary ships an MCP server (`seedmancer mcp`) that exposes the full
 CLI surface as typed tools + structured resources. When your host
 supports MCP, **use the tools instead of shelling out**:
 
-- `seed_database` instead of `seedmancer seed --id X --yes`
+- `seed_database` instead of `seedmancer seed X --yes`
 - `list_datasets` / `describe_dataset` / `describe_schema` instead of
   parsing the CLI's human-readable output
 - `export_database`, `generate_dataset_local`, `push_dataset`, `pull_dataset`

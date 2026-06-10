@@ -504,43 +504,74 @@ func BearerAPIToken(token string) string {
 	return "Bearer " + token
 }
 
+// Token source labels reported by ResolveAPITokenSource and surfaced in
+// auth errors so users can tell exactly which token the API rejected.
+const (
+	TokenSourceFlag        = "--token flag"
+	TokenSourceEnv         = "SEEDMANCER_API_TOKEN env var"
+	TokenSourceCredentials = "~/.seedmancer/credentials (seedmancer login)"
+	TokenSourceConfig      = "api_token in seedmancer.yaml"
+)
+
+// lastTokenSource records where the most recently resolved token came from.
+// The CLI runs one command per process, so a package-level var is safe and
+// lets the top-level 401 handler name the offending source without threading
+// it through every call site.
+var lastTokenSource string
+
+// LastTokenSource returns the source of the most recently resolved API
+// token, or "" when no token has been resolved in this process.
+func LastTokenSource() string { return lastTokenSource }
+
 // ResolveAPIToken returns a token from the first available source.
+func ResolveAPIToken(flagValue string) (string, error) {
+	tok, _, err := ResolveAPITokenSource(flagValue)
+	return tok, err
+}
+
+// ResolveAPITokenSource returns a token and a human-readable label of where
+// it came from.
 //
 // Resolution order (highest priority first):
 //  1. explicit --token CLI flag          (always wins)
-//  2. ~/.seedmancer/credentials          (written by `seedmancer login`)
-//  3. SEEDMANCER_API_TOKEN env var       (for CI and ad-hoc use)
+//  2. SEEDMANCER_API_TOKEN env var       (CI convention: env beats files)
+//  3. ~/.seedmancer/credentials          (written by `seedmancer login`)
 //  4. legacy api_token: in seedmancer.yaml / ~/.seedmancer/config.yaml
 //     (read-only fallback so pre-credentials-file installs keep working)
 //
-// The credentials file intentionally ranks above the env var: otherwise a
-// stale `export SEEDMANCER_API_TOKEN=...` silently shadows every
-// `seedmancer login`, which is confusing and was the source of a real
-// support report. CI pipelines are unaffected because they don't have
-// a credentials file to begin with.
+// The env var ranks above the credentials file so CI pipelines and ad-hoc
+// `SEEDMANCER_API_TOKEN=… seedmancer push` runs behave the way every other
+// CLI does. The historical confusion of a stale exported env var shadowing
+// `seedmancer login` is handled by naming the token source in 401 errors
+// (see main.go) instead of by inverting the ordering.
 //
 // Note: callers must NOT wire SEEDMANCER_API_TOKEN through urfave/cli's
-// flag EnvVars — that would let the env var sneak in as a "flag value"
-// ahead of the credentials file and defeat the whole ordering.
-func ResolveAPIToken(flagValue string) (string, error) {
+// flag EnvVars — that would make the env var indistinguishable from an
+// explicit --token flag.
+func ResolveAPITokenSource(flagValue string) (string, string, error) {
 	if flagValue != "" {
-		return flagValue, nil
-	}
-
-	if tok, err := LoadAPICredentials(); err == nil && tok != "" {
-		return tok, nil
+		lastTokenSource = TokenSourceFlag
+		return flagValue, lastTokenSource, nil
 	}
 
 	if tok := strings.TrimSpace(os.Getenv("SEEDMANCER_API_TOKEN")); tok != "" {
-		return tok, nil
+		lastTokenSource = TokenSourceEnv
+		return tok, lastTokenSource, nil
+	}
+
+	if tok, err := LoadAPICredentials(); err == nil && tok != "" {
+		lastTokenSource = TokenSourceCredentials
+		return tok, lastTokenSource, nil
 	}
 
 	if configPath, err := FindConfigFile(); err == nil {
 		if cfg, err := LoadConfig(configPath); err == nil && cfg.APIToken != "" {
-			return cfg.APIToken, nil
+			lastTokenSource = TokenSourceConfig
+			return cfg.APIToken, lastTokenSource, nil
 		}
 	}
 
-	return "", ErrMissingAPIToken
+	lastTokenSource = ""
+	return "", "", ErrMissingAPIToken
 }
 

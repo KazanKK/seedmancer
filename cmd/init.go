@@ -130,7 +130,7 @@ func InitCommand() *cli.Command {
 			}
 			fmt.Println()
 			ui.Info("Add more environments with: seedmancer env add <name> --db-url <url>")
-			ui.Info("Then push the same dataset to many: seedmancer seed -d <id> --env %s,<other>", envName)
+			ui.Info("Then seed the same scenario into many: seedmancer seed <scenario> --env %s,<other>", envName)
 			return nil
 		},
 	}

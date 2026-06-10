@@ -153,7 +153,16 @@ func main() {
 		case errors.Is(err, utils.ErrMissingAPIToken):
 			ui.PrintLoginHint()
 		case errors.Is(err, utils.ErrInvalidAPIToken):
-			ui.Error("%v — sign in again.", err)
+			if src := utils.LastTokenSource(); src != "" {
+				ui.Error("%v (token came from %s).", err, src)
+				if src == utils.TokenSourceEnv {
+					if stored, credErr := utils.LoadAPICredentials(); credErr == nil && stored != "" {
+						ui.Info("A ~/.seedmancer/credentials file also exists — unset SEEDMANCER_API_TOKEN to use it instead.")
+					}
+				}
+			} else {
+				ui.Error("%v — sign in again.", err)
+			}
 			ui.PrintLoginHint()
 		default:
 			ui.Error("%v", err)

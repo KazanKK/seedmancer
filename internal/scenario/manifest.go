@@ -35,6 +35,12 @@ type RevisionManifest struct {
 	Services          []string       `json:"services"`
 	RowCounts         map[string]int `json:"rowCounts"`
 	Description       string         `json:"description,omitempty"`
+	// RemoteID / RemoteUpdatedAt record the cloud revision this local
+	// revision corresponds to (stamped on pull, and after a successful
+	// push). `seedmancer pull` compares them against the cloud's latest
+	// revision and skips the download when nothing changed.
+	RemoteID        string `json:"remoteId,omitempty"`
+	RemoteUpdatedAt string `json:"remoteUpdatedAt,omitempty"`
 }
 
 // manifestName / revisionManifestName / pointersName are kept private so

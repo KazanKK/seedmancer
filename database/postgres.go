@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"encoding/csv"
 	"encoding/json"
@@ -68,8 +69,10 @@ func (p *PostgresManager) ExtractSchema() (*Schema, error) {
 		return nil, errors.New("no database connection")
 	}
 
-	// Debug varchar lengths
-	p.debugVarcharLengths()
+	// Diagnostic-only query — skip the round trip unless --debug is on.
+	if ui.DebugEnabled() {
+		p.debugVarcharLengths()
+	}
 
 	// First, get all enum types and their values
 	enumQuery := `
@@ -419,80 +422,116 @@ func (p *PostgresManager) RestoreFromCSV(directory string) error {
 	if p.DB == nil {
 		return errors.New("no database connection")
 	}
-
-	// Disable all triggers/constraints temporarily
-	if _, err := p.DB.Exec("SET session_replication_role = 'replica';"); err != nil {
-		return fmt.Errorf("disabling constraints: %v", err)
-	}
-	defer p.DB.Exec("SET session_replication_role = 'origin';")
+	ctx := context.Background()
 
 	schema, err := p.ReadSchemaFromFile(filepath.Join(directory, "schema.json"))
 	if err != nil {
 		return fmt.Errorf("reading schema: %v", err)
 	}
 
-	if len(schema.Enums) > 0 {
-		ui.Step("Creating enum types...")
+	// Pin one session for the whole restore. session_replication_role is a
+	// session-level setting, so it must run on the same connection as every
+	// statement that relies on it — p.DB is a pool and gives no such
+	// guarantee. A single session also keeps the number of network round
+	// trips minimal, which dominates restore time against remote databases.
+	conn, err := p.DB.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("acquiring connection: %v", err)
 	}
-	for _, enum := range schema.Enums {
-		checkSQL := fmt.Sprintf("SELECT EXISTS (SELECT 1 FROM pg_type WHERE typname = '%s')", enum.Name)
-		var exists bool
-		if err := p.DB.QueryRow(checkSQL).Scan(&exists); err != nil {
-			return fmt.Errorf("checking if enum %s exists: %v", enum.Name, err)
+	defer conn.Close()
+
+	// Disable all triggers/constraints temporarily
+	if _, err := conn.ExecContext(ctx, "SET session_replication_role = 'replica';"); err != nil {
+		return fmt.Errorf("disabling constraints: %v", err)
+	}
+	defer conn.ExecContext(context.Background(), "SET session_replication_role = 'origin';")
+
+	// One round trip: fetch existing enums, tables, and FK constraint names
+	// up front instead of issuing per-object EXISTS probes.
+	existing := map[string]map[string]bool{"enum": {}, "table": {}, "fk": {}}
+	metaRows, err := conn.QueryContext(ctx, `
+		SELECT 'enum' AS kind, t.typname AS name
+		FROM pg_type t
+		JOIN pg_namespace n ON n.oid = t.typnamespace
+		WHERE n.nspname = 'public' AND t.typtype = 'e'
+		UNION ALL
+		SELECT 'table', table_name
+		FROM information_schema.tables
+		WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
+		UNION ALL
+		SELECT 'fk', con.conname
+		FROM pg_constraint con
+		JOIN pg_namespace ns ON ns.oid = con.connamespace
+		WHERE con.contype = 'f' AND ns.nspname = 'public'
+	`)
+	if err != nil {
+		return fmt.Errorf("querying existing objects: %v", err)
+	}
+	for metaRows.Next() {
+		var kind, name string
+		if err := metaRows.Scan(&kind, &name); err != nil {
+			metaRows.Close()
+			return fmt.Errorf("scanning existing objects: %v", err)
 		}
+		existing[kind][name] = true
+	}
+	if err := metaRows.Err(); err != nil {
+		metaRows.Close()
+		return fmt.Errorf("reading existing objects: %v", err)
+	}
+	metaRows.Close()
 
-		if !exists {
-			values := make([]string, len(enum.Values))
-			for i, v := range enum.Values {
-				values[i] = fmt.Sprintf("'%s'", v)
-			}
-
-			createEnumSQL := fmt.Sprintf("CREATE TYPE %s AS ENUM (%s);",
-				pq.QuoteIdentifier(enum.Name),
-				strings.Join(values, ", "))
-
-			p.logSQL("Create Enum", createEnumSQL)
-
-			if _, err := p.DB.Exec(createEnumSQL); err != nil {
-				return fmt.Errorf("creating enum %s: %v", enum.Name, err)
-			}
-
-			p.log("Created enum: %s", enum.Name)
+	// Create missing enum types — all in one statement.
+	var enumStmts []string
+	for _, enum := range schema.Enums {
+		if existing["enum"][enum.Name] {
+			continue
+		}
+		enumStmts = append(enumStmts, fmt.Sprintf("CREATE TYPE %s AS ENUM (%s);",
+			pq.QuoteIdentifier(enum.Name), joinQuotedStrings(enum.Values)))
+	}
+	if len(enumStmts) > 0 {
+		ui.Step("Creating %d enum type(s)...", len(enumStmts))
+		batch := strings.Join(enumStmts, "\n")
+		p.logSQL("Create Enums", batch)
+		if _, err := conn.ExecContext(ctx, batch); err != nil {
+			return fmt.Errorf("creating enum types: %v", err)
 		}
 	}
 
 	ui.Step("Preparing %d table(s)...", len(schema.Tables))
+
+	// Create missing tables (one statement) and truncate the rest (one
+	// combined TRUNCATE — CASCADE makes the order irrelevant).
+	var createStmts []string
+	var truncateTargets []string
 	for _, table := range schema.Tables {
-		// Check if table exists
-		checkSQL := fmt.Sprintf("SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = 'public' AND table_name = '%s')", table.Name)
-		var exists bool
-		if err := p.DB.QueryRow(checkSQL).Scan(&exists); err != nil {
-			return fmt.Errorf("checking if table %s exists: %v", table.Name, err)
-		}
-
-		if !exists {
-			p.log("Creating table: %s", table.Name)
-			if err := p.createTable(table, false); err != nil {
-				return fmt.Errorf("creating table %s: %v", table.Name, err)
-			}
-			p.log("Created table: %s", table.Name)
+		if existing["table"][table.Name] {
+			truncateTargets = append(truncateTargets, pq.QuoteIdentifier(table.Name))
 		} else {
-			// Truncate existing tables
-			truncateSQL := fmt.Sprintf("TRUNCATE TABLE %s CASCADE", pq.QuoteIdentifier(table.Name))
-			p.logSQL(fmt.Sprintf("Truncate Table %s", table.Name), truncateSQL)
-
-			if _, err := p.DB.Exec(truncateSQL); err != nil {
-				return fmt.Errorf("truncating table %s: %v", table.Name, err)
-			}
-			p.log("Truncated table: %s", table.Name)
+			createStmts = append(createStmts, p.buildCreateTableSQL(table)+";")
+		}
+	}
+	if len(createStmts) > 0 {
+		batch := strings.Join(createStmts, "\n")
+		p.logSQL("Create Tables", batch)
+		if _, err := conn.ExecContext(ctx, batch); err != nil {
+			return fmt.Errorf("creating tables: %v", err)
+		}
+	}
+	if len(truncateTargets) > 0 {
+		truncateSQL := fmt.Sprintf("TRUNCATE TABLE %s CASCADE", strings.Join(truncateTargets, ", "))
+		p.logSQL("Truncate Tables", truncateSQL)
+		if _, err := conn.ExecContext(ctx, truncateSQL); err != nil {
+			return fmt.Errorf("truncating tables: %v", err)
 		}
 	}
 
-	// Now add foreign key constraints
-	for _, table := range schema.Tables {
-		if err := p.addForeignKeys(table); err != nil {
-			return fmt.Errorf("adding foreign keys for table %s: %v", table.Name, err)
-		}
+	// Add missing foreign key constraints — all in one statement. The
+	// constraint-name convention matches what addForeignKeySQL generates, so
+	// the pg_constraint snapshot above tells us which ones already exist.
+	if err := p.addMissingForeignKeys(ctx, conn, schema, existing["table"], existing["fk"]); err != nil {
+		return err
 	}
 
 	// Walk the top-level once and split into function/trigger sidecars. The
@@ -525,7 +564,7 @@ func (p *PostgresManager) RestoreFromCSV(directory string) error {
 			}
 			fnName := strings.TrimSuffix(filepath.Base(sqlPath), "_func.sql")
 			p.logSQL(fmt.Sprintf("Restore Function %s", fnName), string(content))
-			if _, err := p.DB.Exec(string(content)); err != nil {
+			if _, err := conn.ExecContext(ctx, string(content)); err != nil {
 				return fmt.Errorf("restoring function %s: %v", fnName, err)
 			}
 			p.log("Restored function: %s", fnName)
@@ -534,7 +573,7 @@ func (p *PostgresManager) RestoreFromCSV(directory string) error {
 	} else {
 		for _, fn := range schema.Functions {
 			p.logSQL(fmt.Sprintf("Restore Function %s", fn.Name), fn.Definition)
-			if _, err := p.DB.Exec(fn.Definition); err != nil {
+			if _, err := conn.ExecContext(ctx, fn.Definition); err != nil {
 				return fmt.Errorf("restoring function %s: %v", fn.Name, err)
 			}
 			p.log("Restored function: %s", fn.Name)
@@ -546,7 +585,8 @@ func (p *PostgresManager) RestoreFromCSV(directory string) error {
 	}
 
 	// Restore triggers — prefer SQL sidecars, fall back to schema.json entries.
-	// DROP before CREATE because CREATE OR REPLACE TRIGGER requires PG14+.
+	// DROP before CREATE because CREATE OR REPLACE TRIGGER requires PG14+;
+	// both statements ship in one round trip.
 	var trigCount int
 	if len(triggerFiles) > 0 {
 		for _, sqlPath := range triggerFiles {
@@ -562,14 +602,10 @@ func (p *PostgresManager) RestoreFromCSV(directory string) error {
 			if tableSchema != "" && tableSchema != "public" {
 				tableRef = pq.QuoteIdentifier(tableSchema) + "." + tableRef
 			}
-			dropSQL := fmt.Sprintf("DROP TRIGGER IF EXISTS %s ON %s",
-				pq.QuoteIdentifier(name), tableRef)
-			p.logSQL(fmt.Sprintf("Drop Trigger %s", name), dropSQL)
-			if _, err := p.DB.Exec(dropSQL); err != nil {
-				return fmt.Errorf("dropping trigger %s: %v", name, err)
-			}
-			p.logSQL(fmt.Sprintf("Restore Trigger %s", name), definition)
-			if _, err := p.DB.Exec(definition); err != nil {
+			dropAndCreate := fmt.Sprintf("DROP TRIGGER IF EXISTS %s ON %s;\n%s",
+				pq.QuoteIdentifier(name), tableRef, definition)
+			p.logSQL(fmt.Sprintf("Restore Trigger %s", name), dropAndCreate)
+			if _, err := conn.ExecContext(ctx, dropAndCreate); err != nil {
 				return fmt.Errorf("restoring trigger %s on %s: %v", name, tableRef, err)
 			}
 			p.log("Restored trigger: %s on %s", name, tableRef)
@@ -581,14 +617,10 @@ func (p *PostgresManager) RestoreFromCSV(directory string) error {
 			if trigger.TableSchema != "" && trigger.TableSchema != "public" {
 				tableRef = pq.QuoteIdentifier(trigger.TableSchema) + "." + tableRef
 			}
-			dropSQL := fmt.Sprintf("DROP TRIGGER IF EXISTS %s ON %s",
-				pq.QuoteIdentifier(trigger.Name), tableRef)
-			p.logSQL(fmt.Sprintf("Drop Trigger %s", trigger.Name), dropSQL)
-			if _, err := p.DB.Exec(dropSQL); err != nil {
-				return fmt.Errorf("dropping trigger %s: %v", trigger.Name, err)
-			}
-			p.logSQL(fmt.Sprintf("Restore Trigger %s", trigger.Name), trigger.Definition)
-			if _, err := p.DB.Exec(trigger.Definition); err != nil {
+			dropAndCreate := fmt.Sprintf("DROP TRIGGER IF EXISTS %s ON %s;\n%s",
+				pq.QuoteIdentifier(trigger.Name), tableRef, trigger.Definition)
+			p.logSQL(fmt.Sprintf("Restore Trigger %s", trigger.Name), dropAndCreate)
+			if _, err := conn.ExecContext(ctx, dropAndCreate); err != nil {
 				return fmt.Errorf("restoring trigger %s on %s: %v", trigger.Name, tableRef, err)
 			}
 			p.log("Restored trigger: %s on %s", trigger.Name, tableRef)
@@ -600,25 +632,69 @@ func (p *PostgresManager) RestoreFromCSV(directory string) error {
 	}
 
 	ui.Step("Importing data...")
+
+	// All tables import inside one transaction: one BEGIN/COMMIT for the
+	// whole restore instead of one per table, and the seed becomes atomic —
+	// either every table lands or none do.
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("beginning import transaction: %v", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	var sequenceResets []string
 	for _, table := range schema.Tables {
 		csvPath := filepath.Join(directory, table.Name+".csv")
-		if _, err := os.Stat(csvPath); err == nil {
-			p.log("Importing data for table: %s", table.Name)
-			if err := p.importCSV(table.Name, csvPath, schema); err != nil {
-				return fmt.Errorf("importing data for table %s: %v", table.Name, err)
-			}
-			p.log("Imported data for table: %s", table.Name)
-		} else {
+		if _, err := os.Stat(csvPath); err != nil {
 			p.log("No CSV file found for table: %s", table.Name)
+			continue
+		}
+		p.log("Importing data for table: %s", table.Name)
+		if err := p.copyCSVIntoTable(tx, table, csvPath); err != nil {
+			return fmt.Errorf("importing data for table %s: %v", table.Name, err)
+		}
+		p.log("Imported data for table: %s", table.Name)
+
+		// Queue sequence resets for serial/identity columns; they all run
+		// in a single statement just before commit.
+		for _, col := range table.Columns {
+			if strings.Contains(fmt.Sprintf("%v", col.Default), "nextval") ||
+				strings.Contains(col.Type, "serial") {
+				sequenceResets = append(sequenceResets, fmt.Sprintf(
+					"SELECT setval(seq, COALESCE((SELECT MAX(%s) FROM %s), 0) + 1, false) FROM (SELECT pg_get_serial_sequence('%s', '%s') AS seq) q WHERE seq IS NOT NULL;",
+					pq.QuoteIdentifier(col.Name), pq.QuoteIdentifier(table.Name),
+					table.Name, col.Name))
+			}
 		}
 	}
+
+	if len(sequenceResets) > 0 {
+		batch := strings.Join(sequenceResets, "\n")
+		p.logSQL("Reset Sequences", batch)
+		if _, err := tx.Exec(batch); err != nil {
+			// Don't fail the restore over sequence bookkeeping; matches the
+			// historical warn-and-continue behaviour.
+			p.log("Warning: failed to reset sequences: %v", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("committing import transaction: %v", err)
+	}
+	committed = true
 
 	return nil
 }
 
-// createTable creates a new table based on schema definition
-// If includeForeignKeys is false, foreign key constraints are skipped
-func (p *PostgresManager) createTable(table Table, includeForeignKeys bool) error {
+// buildCreateTableSQL renders the CREATE TABLE statement for a table.
+// Foreign key constraints are always skipped — they are added afterwards
+// once every referenced table exists.
+func (p *PostgresManager) buildCreateTableSQL(table Table) string {
 	var columnDefs []string
 	var primaryKeys []string
 	var uniqueConstraints []string
@@ -687,133 +763,95 @@ func (p *PostgresManager) createTable(table Table, includeForeignKeys bool) erro
 		columnDefs = append(columnDefs, fmt.Sprintf("UNIQUE (%s)", pq.QuoteIdentifier(uniqueCol)))
 	}
 
-	// Build and execute CREATE TABLE statement
-	createSQL := fmt.Sprintf("CREATE TABLE %s (\n  %s\n)",
+	return fmt.Sprintf("CREATE TABLE %s (\n  %s\n)",
 		pq.QuoteIdentifier(table.Name),
 		strings.Join(columnDefs, ",\n  "))
-
-	p.logSQL("Create Table", createSQL)
-	_, err := p.DB.Exec(createSQL)
-	return err
 }
 
-// addForeignKeys adds foreign key constraints to an existing table
-func (p *PostgresManager) addForeignKeys(table Table) error {
-	for _, col := range table.Columns {
-		if col.ForeignKey != nil {
-			// Check if the referenced table exists
-			checkTableSQL := fmt.Sprintf("SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = 'public' AND table_name = '%s')", col.ForeignKey.Table)
-			var tableExists bool
-			if err := p.DB.QueryRow(checkTableSQL).Scan(&tableExists); err != nil {
-				return fmt.Errorf("checking if referenced table %s exists: %v", col.ForeignKey.Table, err)
-			}
+// addMissingForeignKeys adds every FK constraint from the schema that is
+// not already present, in a single round trip. existingTables is the
+// pre-restore table snapshot; tables in schema.Tables that were missing
+// have just been created, so a referenced table exists when it is in
+// either set. Failures are logged, not fatal — matching the historical
+// warn-and-continue behaviour for constraint setup.
+func (p *PostgresManager) addMissingForeignKeys(ctx context.Context, conn *sql.Conn, schema *Schema, existingTables, existingFKs map[string]bool) error {
+	schemaTables := map[string]bool{}
+	for _, t := range schema.Tables {
+		schemaTables[t.Name] = true
+	}
 
-			if !tableExists {
+	var alterStmts []string
+	for _, table := range schema.Tables {
+		for _, col := range table.Columns {
+			if col.ForeignKey == nil {
+				continue
+			}
+			constraintName := fmt.Sprintf("%s_%s_fkey", table.Name, col.Name)
+			if existingFKs[constraintName] {
+				continue
+			}
+			if !existingTables[col.ForeignKey.Table] && !schemaTables[col.ForeignKey.Table] {
 				p.log("Warning: Cannot add foreign key from %s.%s to non-existent table %s",
 					table.Name, col.Name, col.ForeignKey.Table)
 				continue
 			}
-
-			// Check if the referenced column exists
-			checkColumnSQL := fmt.Sprintf("SELECT EXISTS (SELECT FROM information_schema.columns WHERE table_schema = 'public' AND table_name = '%s' AND column_name = '%s')",
-				col.ForeignKey.Table, col.ForeignKey.Column)
-			var columnExists bool
-			if err := p.DB.QueryRow(checkColumnSQL).Scan(&columnExists); err != nil {
-				return fmt.Errorf("checking if referenced column %s.%s exists: %v",
-					col.ForeignKey.Table, col.ForeignKey.Column, err)
-			}
-
-			if !columnExists {
-				p.log("Warning: Cannot add foreign key from %s.%s to non-existent column %s.%s",
-					table.Name, col.Name, col.ForeignKey.Table, col.ForeignKey.Column)
-				continue
-			}
-
-			// Add the foreign key constraint
-			alterSQL := fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT %s FOREIGN KEY (%s) REFERENCES %s(%s)",
+			alterStmts = append(alterStmts, fmt.Sprintf(
+				"ALTER TABLE %s ADD CONSTRAINT %s FOREIGN KEY (%s) REFERENCES %s(%s);",
 				pq.QuoteIdentifier(table.Name),
-				pq.QuoteIdentifier(fmt.Sprintf("%s_%s_fkey", table.Name, col.Name)),
+				pq.QuoteIdentifier(constraintName),
 				pq.QuoteIdentifier(col.Name),
 				pq.QuoteIdentifier(col.ForeignKey.Table),
-				pq.QuoteIdentifier(col.ForeignKey.Column))
-
-			p.logSQL("Add Foreign Key", alterSQL)
-
-			if _, err := p.DB.Exec(alterSQL); err != nil {
-				// If the constraint already exists, just log and continue
-				if strings.Contains(err.Error(), "already exists") {
-					p.log("Foreign key constraint already exists: %s.%s -> %s.%s",
-						table.Name, col.Name, col.ForeignKey.Table, col.ForeignKey.Column)
-					continue
-				}
-
-				// Log warning and continue instead of failing
-				p.log("Warning: Failed to add foreign key from %s.%s to %s.%s: %v",
-					table.Name, col.Name, col.ForeignKey.Table, col.ForeignKey.Column, err)
-				continue
-			}
-
-			p.log("Added foreign key: %s.%s -> %s.%s",
-				table.Name, col.Name, col.ForeignKey.Table, col.ForeignKey.Column)
+				pq.QuoteIdentifier(col.ForeignKey.Column)))
 		}
 	}
+	if len(alterStmts) == 0 {
+		return nil
+	}
 
+	batch := strings.Join(alterStmts, "\n")
+	p.logSQL("Add Foreign Keys", batch)
+	if _, err := conn.ExecContext(ctx, batch); err == nil {
+		return nil
+	}
+
+	// The combined statement failed (e.g. one referenced column is gone).
+	// Retry one by one so a single bad constraint doesn't block the rest.
+	for _, stmt := range alterStmts {
+		if _, err := conn.ExecContext(ctx, stmt); err != nil &&
+			!strings.Contains(err.Error(), "already exists") {
+			p.log("Warning: Failed to add foreign key (%s): %v", stmt, err)
+		}
+	}
 	return nil
 }
 
-func (p *PostgresManager) importCSV(tableName, csvPath string, schema *Schema) error {
+// copyCSVIntoTable streams one CSV file into a table via COPY, inside the
+// caller's transaction. COPY data is pipelined by lib/pq, so the per-table
+// network cost is just the prepare + close round trips.
+func (p *PostgresManager) copyCSVIntoTable(tx *sql.Tx, table Table, csvPath string) error {
 	file, err := os.Open(csvPath)
 	if err != nil {
 		return fmt.Errorf("opening CSV file: %v", err)
 	}
 	defer file.Close()
 
-	// Find table in schema
-	var table *Table
-	for _, t := range schema.Tables {
-		if t.Name == tableName {
-			table = &t
-			break
-		}
-	}
-
-	if table == nil {
-		return fmt.Errorf("table %s not found in schema", tableName)
-	}
-
-	// Create a map of column names to their types for quick lookup
 	columnTypeMap := make(map[string]string)
 	for _, col := range table.Columns {
 		columnTypeMap[col.Name] = col.Type
 	}
 
-	// Set a higher isolation level for the transaction
-	tx, err := p.DB.Begin()
-	if err != nil {
-		return fmt.Errorf("beginning transaction: %v", err)
-	}
-	defer func() {
-		if err != nil {
-			tx.Rollback()
-		}
-	}()
-
-	// Read CSV header to determine column order
 	reader := csv.NewReader(file)
 	header, err := reader.Read()
 	if err != nil {
 		return fmt.Errorf("reading CSV header: %v", err)
 	}
-
-	// Validate header columns exist in the schema
 	for _, colName := range header {
 		if _, exists := columnTypeMap[colName]; !exists {
-			p.log("Warning: Column %s in CSV not found in schema for table %s", colName, tableName)
+			p.log("Warning: Column %s in CSV not found in schema for table %s", colName, table.Name)
 		}
 	}
 
-	// Prepare COPY statement with the columns from the CSV header
-	stmt, err := tx.Prepare(pq.CopyIn(tableName, header...))
+	stmt, err := tx.Prepare(pq.CopyIn(table.Name, header...))
 	if err != nil {
 		return fmt.Errorf("preparing COPY statement: %v", err)
 	}
@@ -836,14 +874,12 @@ func (p *PostgresManager) importCSV(tableName, csvPath string, schema *Schema) e
 
 		values := make([]interface{}, len(record))
 		for i, v := range record {
-			// Get column type from map using the header name
-			columnType := columnTypeMap[header[i]]
-			values[i] = p.processCSVValue(v, columnType)
+			values[i] = p.processCSVValue(v, columnTypeMap[header[i]])
 		}
 
 		if _, err := stmt.Exec(values...); err != nil {
 			stmt.Close()
-			return fmt.Errorf("executing COPY for table %s row %d: %v\nValues: %v", tableName, rowCount+1, err, values)
+			return fmt.Errorf("executing COPY for table %s row %d: %v\nValues: %v", table.Name, rowCount+1, err, values)
 		}
 		rowCount++
 	}
@@ -853,42 +889,7 @@ func (p *PostgresManager) importCSV(tableName, csvPath string, schema *Schema) e
 		return fmt.Errorf("closing COPY statement: %v", err)
 	}
 
-	// Reset sequences for tables with serial/identity columns
-	if table != nil {
-		for _, col := range table.Columns {
-			// Check for serial/identity columns by looking at default value
-			if strings.Contains(fmt.Sprintf("%v", col.Default), "nextval") ||
-				strings.Contains(col.Type, "serial") {
-				seqName := fmt.Sprintf("%s_%s_seq", tableName, col.Name)
-
-				// Try standard sequence name first
-				resetSQL := fmt.Sprintf("SELECT setval(pg_get_serial_sequence('%s', '%s'), COALESCE((SELECT MAX(%s) FROM %s), 0) + 1, false)",
-					tableName, col.Name, pq.QuoteIdentifier(col.Name), pq.QuoteIdentifier(tableName))
-
-				p.logSQL("Reset Sequence", resetSQL)
-
-				if _, err := tx.Exec(resetSQL); err != nil {
-					// If that fails, try with the simple sequence name format
-					altResetSQL := fmt.Sprintf("SELECT setval('%s', COALESCE((SELECT MAX(%s) FROM %s), 0) + 1, false)",
-						seqName, pq.QuoteIdentifier(col.Name), pq.QuoteIdentifier(tableName))
-
-					p.logSQL("Alternative Reset Sequence", altResetSQL)
-
-					if _, err := tx.Exec(altResetSQL); err != nil {
-						// Log but don't fail if we can't reset the sequence
-						p.log("Warning: Failed to reset sequence for %s.%s: %v", tableName, col.Name, err)
-					}
-				}
-			}
-		}
-	}
-
-	// Commit the transaction
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("committing transaction: %v", err)
-	}
-
-	ui.Debug("Imported %d rows into %s", rowCount, tableName)
+	ui.Debug("Imported %d rows into %s", rowCount, table.Name)
 	return nil
 }
 
@@ -1129,21 +1130,8 @@ func (p *PostgresManager) ReadSchemaFromFile(filename string) (*Schema, error) {
 		p.log("Warning: Schema was created for %s database, but using with PostgreSQL", schema.DatabaseType)
 	}
 
-	// Create enum types first
-	for _, enum := range schema.Enums {
-		createEnumSQL := fmt.Sprintf("CREATE TYPE %s AS ENUM (%s);",
-			pq.QuoteIdentifier(enum.Name),
-			joinQuotedStrings(enum.Values))
-
-		p.logSQL("Create Enum", createEnumSQL)
-		if _, err := p.DB.Exec(createEnumSQL); err != nil {
-			// Ignore if enum already exists
-			if !strings.Contains(err.Error(), "already exists") {
-				return nil, fmt.Errorf("creating enum %s: %v", enum.Name, err)
-			}
-		}
-	}
-
+	// Enum creation happens in RestoreFromCSV (batched with the other
+	// missing-object DDL) — reading a schema file has no DB side effects.
 	return &schema, nil
 }
 

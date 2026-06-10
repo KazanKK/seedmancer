@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/KazanKK/seedmancer/internal/scenario"
 	"github.com/KazanKK/seedmancer/internal/ui"
@@ -42,7 +43,7 @@ func PushCommand() *cli.Command {
 			},
 			&cli.StringFlag{
 				Name:  "token",
-				Usage: "API token (falls back to ~/.seedmancer/credentials, then SEEDMANCER_API_TOKEN)",
+				Usage: "API token (falls back to SEEDMANCER_API_TOKEN, then ~/.seedmancer/credentials)",
 			},
 		},
 		Action: func(c *cli.Context) error {
@@ -125,6 +126,7 @@ func scenarioPrompt(projectRoot, storagePath, scenarioPath string) string {
 // revisionID is sent as `revision=rNNN` so the cloud stores under that label.
 // prompt, when non-empty, is synced to the cloud scenario after the upload.
 func syncOne(schemaDir, dataDir, datasetName, revisionID, baseURL, token, prompt string) error {
+	start := time.Now()
 	schemaFiles, err := utils.SchemaFiles(schemaDir)
 	if err != nil {
 		return err
@@ -137,9 +139,15 @@ func syncOne(schemaDir, dataDir, datasetName, revisionID, baseURL, token, prompt
 		return fmt.Errorf("no CSV or JSON files in %s", dataDir)
 	}
 
-	entries := make([]string, 0, len(schemaFiles)+len(dataFiles))
+	entries := make([]string, 0, len(schemaFiles)+len(dataFiles)+1)
 	entries = append(entries, schemaFiles...)
 	entries = append(entries, dataFiles...)
+	// Bundle the agent-written SQL sidecar (if present) so a round-trip
+	// pull preserves the source of truth, not just the materialised CSVs.
+	revDir := filepath.Dir(dataDir)
+	if sqlPath := DatasetSQLPath(revDir); fileExists(sqlPath) {
+		entries = append(entries, sqlPath)
+	}
 
 	sp := ui.StartSpinner("Compressing...")
 	zipData, err := compressFiles(entries)
@@ -180,17 +188,40 @@ func syncOne(schemaDir, dataDir, datasetName, revisionID, baseURL, token, prompt
 		}
 	}
 
+	// Stamp the local revision with the cloud revision it now mirrors so a
+	// subsequent `seedmancer pull` can skip the download. Best-effort.
+	stampRemoteRevision(revDir, baseURL, token, datasetName, result.FingerprintShort)
+
 	verb := "Uploaded"
 	if result.Updated {
 		verb = "Updated"
 	}
-	ui.Success("%s scenario %q", verb, result.Name)
+	ui.Success("%s scenario %q (%s in %s)", verb, result.Name,
+		formatBytes(int64(zipData.Len())), formatDuration(time.Since(start)))
 	ui.KeyValue("  Schema: ", fmt.Sprintf("%s%s", result.FingerprintShort, newSchemaBadge(result.SchemaCreated)))
 	ui.KeyValue("  ID:     ", result.ID)
 	ui.KeyValue("  Files:  ", fmt.Sprintf("%d", result.FileCount))
 	fmt.Println()
 	ui.Info("View it at https://seedmancer.dev/dashboard/schemas")
 	return nil
+}
+
+// stampRemoteRevision records the cloud's latest revision id/updatedAt on a
+// local revision manifest after a successful push. `seedmancer pull` uses
+// the stamp to detect "already up to date" without downloading. Failures
+// are swallowed — the stamp is an optimisation, not a correctness need.
+func stampRemoteRevision(revDir, baseURL, token, datasetName, schemaPrefix string) {
+	match, err := findRemoteDataset(baseURL, token, datasetName, schemaPrefix)
+	if err != nil || match.ID == "" || match.UpdatedAt == "" {
+		return
+	}
+	rm, err := scenario.ReadRevisionManifest(revDir)
+	if err != nil {
+		return
+	}
+	rm.RemoteID = match.ID
+	rm.RemoteUpdatedAt = match.UpdatedAt
+	_ = scenario.WriteRevisionManifest(revDir, rm)
 }
 
 // requestUploadURL calls POST /v1.0/datasets/sync/upload-url and returns

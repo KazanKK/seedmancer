@@ -92,7 +92,7 @@ func GenerateCommand() *cli.Command {
 			},
 			&cli.StringFlag{
 				Name:  "token",
-				Usage: "API token (falls back to ~/.seedmancer/credentials, then SEEDMANCER_API_TOKEN)",
+				Usage: "API token (falls back to SEEDMANCER_API_TOKEN, then ~/.seedmancer/credentials)",
 			},
 		},
 		Action: func(c *cli.Context) error {
