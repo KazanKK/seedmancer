@@ -72,6 +72,16 @@ func TestToolsListIncludesCoreSurface(t *testing.T) {
 			t.Errorf("tool %q missing from ListTools; got %v", n, names)
 		}
 	}
+
+	// Cloud generation tools must NOT be registered — they belong to the CLI
+	// route only (seedmancer generate / seedmancer refresh). An MCP agent
+	// generates data itself via generate_dataset_local.
+	notWant := []string{"generate_dataset", "apply_ai_refresh"}
+	for _, n := range notWant {
+		if _, ok := names[n]; ok {
+			t.Errorf("cloud-only tool %q must not be registered in MCP; agents use generate_dataset_local instead", n)
+		}
+	}
 }
 
 // TestResourcesAndPromptsListed covers the static resource + prompt

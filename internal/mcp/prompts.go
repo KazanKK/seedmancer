@@ -62,60 +62,49 @@ Success criteria:
 	s.AddPrompt(&mcp.Prompt{
 		Name:        "generate_test_data",
 		Title:       "Generate test data",
-		Description: "Generate a plan for creating a new revision under a scenario using AI (cloud) or a local SQL script.",
+		Description: "Generate a plan for creating a new scenario revision locally. You write the data; Seedmancer manages it.",
 		Arguments: []*mcp.PromptArgument{
 			{Name: "scenario", Description: "Scenario path for the new revision (e.g. 'billing/pro')", Required: true},
-			{Name: "prompt", Description: "Natural-language description of the data to generate (used for cloud AI mode)"},
-			{Name: "inherit", Description: "Base scenario whose latest revision provides the schema fingerprint"},
+			{Name: "inherit", Description: "Base scenario to seed into the local DB before your data runs (required)", Required: true},
+			{Name: "prompt", Description: "Natural-language description of the data to generate (guidance for you as you write the SQL)"},
 		},
 	}, func(ctx context.Context, req *mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
 		args := req.Params.Arguments
 		if args["scenario"] == "" {
 			return nil, fmt.Errorf("scenario argument is required")
 		}
-
-		inheritLine := ""
-		if v := args["inherit"]; v != "" {
-			inheritLine = fmt.Sprintf(", inherit=%q", v)
+		if args["inherit"] == "" {
+			return nil, fmt.Errorf("inherit argument is required")
 		}
 
-		var text string
-		if args["prompt"] != "" {
-			// Cloud AI path
-			text = fmt.Sprintf(`Goal: synthesize a new revision under scenario %q using cloud AI.
+		guidance := ""
+		if v := args["prompt"]; v != "" {
+			guidance = fmt.Sprintf("\n\nData requirements from the user:\n%s", v)
+		}
+
+		text := fmt.Sprintf(`Goal: create a new revision under scenario %q using local generation.
+You are the AI. You write the data; Seedmancer manages the revision.%s
 
 Steps:
-1. Call 'describe_schema' on the scenario's existing schema (use list_history first if you need the fingerprint).
-2. Call 'generate_dataset' with prompt=%q, scenario=%q%s.
-3. After it returns, call 'describe_dataset' on the resulting dataset id to preview the generated rows.
-4. Optionally call 'push_dataset' to publish.
-
-Success criteria:
-- 'generate_dataset' returns with a non-empty Path and a new revision id.
-- The dataset preview contains rows for every table you care about.`, args["scenario"], args["prompt"], args["scenario"], inheritLine)
-		} else {
-			// Local SQL path
-			if args["inherit"] == "" {
-				return nil, fmt.Errorf("inherit argument is required when prompt is not given")
-			}
-			text = fmt.Sprintf(`Goal: synthesize a new revision under scenario %q locally with a FULL,
-self-contained, idempotent SQL script.
-
-Steps:
-1. Read seedmancer://docs/local-generation for the SQL contract and examples.
-2. Call 'describe_schema' to get exact table and column names for every table you will populate.
-3. If a prior revision exists, call 'list_history' and 'get_dataset_sql' for REFERENCE only.
-   Do NOT patch the old SQL with delta statements — REWRITE the whole script.
-4. Call 'generate_dataset_local' with scenario=%q, inherit=%q, and a FULL SQL script.
-5. Call 'seed_database' with the scenario path to load the revision into other envs.
+1. Call 'describe_schema' to get exact table and column names for every table you will populate.
+2. Optionally call 'list_history' then 'get_dataset_sql' to see what a prior revision contained.
+   Use it as a REFERENCE only — do NOT patch it with deltas. Rewrite the whole script.
+3. Write a FULL, self-contained, idempotent SQL script:
+   - Start with one TRUNCATE covering every table you populate:
+       TRUNCATE TABLE a, b, c RESTART IDENTITY CASCADE;
+   - Follow with INSERT statements for every populated table.
+   - Running the script twice must produce the same state.
+4. Call 'generate_dataset_local' with scenario=%q, inherit=%q, and your SQL.
+   Seedmancer seeds the inherit base first as a safety net, runs your SQL, exports
+   the result as CSVs, and REJECTS the revision if any populated table is missing a wipe.
+5. Call 'seed_database' with the scenario path to load the revision into the target env.
 
 Success criteria:
 - 'generate_dataset_local' returns with a non-empty Path and a new revision id.
-- Every populated table has a corresponding TRUNCATE+INSERT pair in the SQL.`, args["scenario"], args["scenario"], args["inherit"])
-		}
+- Every populated table has a TRUNCATE before its INSERTs in the SQL.`, args["scenario"], guidance, args["scenario"], args["inherit"])
 
 		return &mcp.GetPromptResult{
-			Description: "Generate-test-data playbook",
+			Description: "Generate-test-data playbook (local)",
 			Messages: []*mcp.PromptMessage{
 				{Role: "user", Content: &mcp.TextContent{Text: text}},
 			},

@@ -52,17 +52,19 @@ revisions unless ` + "`force: true`" + ` is set.
 - ` + "`check_state_schema scenario=\"<name>\"`" + ` — returns a structured drift report
   with changes classified as auto / likely / decision / breaking.
 
-**Fix drift with the AI refresh workflow:**
-1. ` + "`check_state_schema`" + ` — inspect what changed (optional; apply_ai_refresh does this internally too).
-2. ` + "`apply_ai_refresh`" + ` — sends the existing data + schema diff to the Seedmancer AI backend,
-   which adapts every row to the new schema and commits a new ` + "`rNNN`" + ` revision.
-3. ` + "`seed_database`" + ` — loads the fresh revision.
+**Fix drift locally (MCP path):**
+1. ` + "`check_state_schema`" + ` — inspect what changed.
+2. ` + "`get_dataset_sql scenario=\"<name>\"`" + ` — retrieve the prior revision's data as a reference.
+3. Rewrite the full SQL to match the new schema (add new required columns, drop removed ones, etc.).
+4. ` + "`generate_dataset_local`" + ` with the rewritten SQL and the same inherit base.
+5. ` + "`seed_database`" + ` — loads the fresh revision.
 
-Read ` + "`seedmancer://docs/refresh`" + ` for the full workflow.
+**Fix drift via CLI (no agent):** ` + "`seedmancer refresh <scenario>`" + ` — cloud AI adapts the data.
+
+Read ` + "`seedmancer://docs/refresh`" + ` for the full local workflow.
 
 **dataset.sql note:** ` + "`dataset.sql`" + ` is NEVER deleted. It stays on every
-revision as a permanent AI reference. Revisions created by ` + "`apply_ai_refresh`" + `
-include a new ` + "`dataset.sql`" + ` with the AI-generated SQL.
+revision as a permanent reference for the next generation round.
 
 ## Need new data?
 
@@ -273,29 +275,26 @@ Every successful ` + "`generate_dataset_local`" + ` call stores the SQL as
    creates a new ` + "`rNNN`" + ` revision.
 5. ` + "`seed_database scenario=<scenario> yes=true`" + `.
 
-## dataset.sql and refresh-produced revisions
+## dataset.sql
 
 ` + "`dataset.sql`" + ` is **never deleted**. It stays on every revision as a permanent
-AI reference regardless of how the revision was created.
-
-Revisions created by ` + "`apply_ai_refresh`" + ` include a new ` + "`dataset.sql`" + ` with
-the AI-generated SQL that produced the revision. This can be retrieved and
-edited for future ` + "`generate_dataset_local`" + ` calls.
+reference regardless of how the revision was created. Use ` + "`get_dataset_sql`" + ` to
+retrieve it as the starting point for the next generation round.
 `
 
-const docRefresh = `# Schema drift refresh (for agents)
+const docRefresh = `# Schema drift — local fix workflow (for agents)
 
-The refresh system updates an outdated scenario revision so its CSVs match
-the current database schema. The AI backend adapts existing rows to the new
-schema — preserving all data and only modifying what schema drift requires.
+When the live database schema changes, existing scenario revisions become
+mismatched. ` + "`seed_database`" + ` refuses to load them unless ` + "`force: true`" + ` is set.
+This document explains how to fix drift entirely through local MCP tools.
 
-## The two-step MCP flow
+## The local drift-fix flow
 
 ` + "```" + `
-check_state_schema (optional) → apply_ai_refresh
+check_state_schema → get_dataset_sql → rewrite SQL → generate_dataset_local → seed_database
 ` + "```" + `
 
-### 1. check_state_schema (optional)
+### 1. check_state_schema
 
 Returns a structured drift report with every change classified as:
 
@@ -306,29 +305,40 @@ Returns a structured drift report with every change classified as:
 | **decision** | Ambiguous — required column without default, FK added |
 | **breaking** | PK changed, type incompatible narrowing, table removed |
 
-You can call this first to show the user what changed, but it is not required
-before apply_ai_refresh — that tool detects drift internally.
+Call this first to understand exactly what changed before rewriting the data.
 
-### 2. apply_ai_refresh
+### 2. get_dataset_sql
 
-Sends the existing data and schema diff to the Seedmancer AI backend, which:
-- Reads the existing data (dataset.sql if available, else CSVs converted to SQL)
-- Receives the new schema and schema diff
-- Produces modified SQL: same rows, new columns filled in, removed columns
-  dropped, type-changed values converted
-- Runs the SQL against the local database
-- Exports updated tables as a new rNNN revision
-- Saves the AI SQL as dataset.sql on the new revision
-- Advances manifest.latest
+Retrieves the prior revision's SQL block as a reference. The schema has
+changed since this SQL was written, so use it to understand the shape of the
+existing data — do NOT re-submit it as-is.
 
-**Required fields:** scenario (required), env or dbUrl (required — points at the
-local database with the new schema already applied).
+### 3. Rewrite the SQL
 
-**Optional:** prompt — extra context for the AI (e.g. "keep email addresses realistic").
+Write a fresh, FULL, idempotent SQL script that conforms to the new schema:
+- Add values for any new required columns.
+- Drop any columns that no longer exist.
+- Convert any type-changed values.
+- Keep TRUNCATE + INSERT structure intact (see ` + "`seedmancer://docs/local-generation`" + `).
 
-## dataset.sql role
+### 4. generate_dataset_local
 
-dataset.sql is NEVER deleted and persists on every revision as a permanent
-AI reference. Refresh-produced revisions include a new dataset.sql containing
-the AI-generated SQL that created the revision.
+Call with the rewritten SQL and the same ` + "`inherit`" + ` base as before.
+Seedmancer seeds the base, runs your SQL, and creates a new ` + "`rNNN`" + ` revision.
+The schema fingerprint on the new revision matches the live DB.
+
+### 5. seed_database
+
+Loads the fresh revision into the target environment.
+
+## CLI alternative (no agent)
+
+` + "`seedmancer refresh <scenario>`" + ` uses the Seedmancer cloud AI to adapt the data
+automatically. Use this when no local AI agent is available.
+
+## dataset.sql
+
+` + "`dataset.sql`" + ` is never deleted and stays on every revision as a permanent
+reference. The rewritten SQL from step 3 becomes the new ` + "`dataset.sql`" + ` after
+` + "`generate_dataset_local`" + ` completes.
 `

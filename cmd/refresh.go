@@ -113,13 +113,13 @@ func runRefreshOne(c *cli.Context, scenarioArg string) error {
 		spinner.Stop(false, "")
 		return err
 	}
-	spinner.Stop(true, "SQL generated")
+	spinner.Stop(true, "Test data generated")
 
 	printSQLSummary(genResult.existingSQL, genResult.generatedSQL)
 
 	if !c.Bool("yes") {
 		if !confirmApplySQL() {
-			ui.Info("Aborted. Generated SQL saved to refresh-draft.sql")
+			ui.Info("Aborted. No changes applied.")
 			return nil
 		}
 	}
@@ -343,7 +343,7 @@ func confirmApply(scenarioName string) bool {
 }
 
 func confirmApplySQL() bool {
-	fmt.Fprintf(os.Stderr, "Apply generated SQL? [y/N]: ")
+	fmt.Fprintf(os.Stderr, "Apply refreshed test data? [y/N]: ")
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Scan()
 	ans := strings.TrimSpace(strings.ToLower(scanner.Text()))
@@ -1144,7 +1144,7 @@ func printSQLSummary(oldSQL, newSQL string) {
 		}
 	}
 
-	fmt.Fprintln(os.Stderr, "\nGenerated SQL summary:")
+	fmt.Fprintln(os.Stderr, "\nTest data summary:")
 	for _, name := range tables {
 		ns, inNew := nw[name]
 		os_, inOld := old[name]

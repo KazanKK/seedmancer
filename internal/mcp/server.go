@@ -122,50 +122,59 @@ func setupLogging(logFile string) (func(), error) {
 // serverInstructions is shown in Cursor/Claude's MCP picker and gives the
 // agent a short primer on what Seedmancer does. Keep it brief — long
 // prose just burns context; the details belong in the docs resources.
-const serverInstructions = `Seedmancer is a schema-first database seeding tool.
-It dumps Postgres schemas + data into content-addressed folders, pushes them
-to a cloud account, and restores them back on any target environment — the
-foundation of "reset the DB before each test run".
+const serverInstructions = `Seedmancer is a schema-first test data management tool.
+It stores test data as immutable revisions under named scenarios, and lets you
+seed, export, push, and pull those scenarios across environments.
 
-IMPORTANT: When a user asks you to "create test data", "generate seed data",
-"set up database fixtures", or anything similar — use Seedmancer MCP tools.
-Run install_agent_rules once per project so this guidance persists across all
-future conversations in that project.
+You are an AI agent connected over MCP. YOU generate the test data by writing
+SQL and calling Seedmancer to run, snapshot, and manage it. There is no cloud AI
+generation tool here — you are the AI.
 
-Workflow when the user wants test data:
-  1. list_schemas — if no schemas exist, call export_database first.
-     The DB is already running (configured in seedmancer.yaml) so export always works.
-  2. describe_schema — get the exact table and column names for every table you'll populate.
-  3. generate_dataset_local — write a FULL, self-contained, idempotent SQL script
-     (TRUNCATE TABLE <t> RESTART IDENTITY CASCADE before every table's INSERTs).
-     Seedmancer seeds the inherit base as a safety net, runs your SQL in a transaction,
-     exports the result, and REJECTS the revision if any populated table is missing a wipe.
-  4. seed_database — Optional. If user wants to load the new dataset into other envs.
-  5. push_dataset — Optional. If user wants to upload the new dataset to the cloud.
+IMPORTANT: When the user asks you to "create test data", "generate seed data",
+"set up database fixtures", or anything similar — use the tools below.
+Run install_agent_rules once per project so this guidance persists across conversations.
 
-Typical workflows:
-  • Before running tests: call seed_database with the configured scenario.
+## Create new test data
+
+1. get_status + list_schemas — confirm project is set up. If no schemas exist, call
+   export_database first (the DB is already running per seedmancer.yaml).
+2. describe_schema — get the exact table and column names you will populate.
+3. Optionally: list_history + get_dataset_sql — retrieve a prior revision's data as a
+   REFERENCE. Rewrite it as a fresh full script; never append deltas.
+4. generate_dataset_local — write a FULL, self-contained, idempotent SQL script
+   (TRUNCATE TABLE <t> RESTART IDENTITY CASCADE before every table's INSERTs).
+   Pass inherit=<base-scenario> so the local DB starts in a known state.
+   Seedmancer runs the SQL, exports the result, and REJECTS the revision if any
+   populated table is missing a leading wipe.
+5. seed_database — load the new revision into other envs as needed.
+6. push_dataset — optional, to share with the team.
+
+## Schema drift (when DB schema changed after a revision was created)
+
+1. check_state_schema — see what changed (auto/likely/decision/breaking).
+2. get_dataset_sql — retrieve the prior revision's SQL as a reference.
+3. Rewrite the full SQL to match the new schema.
+4. generate_dataset_local with the rewritten SQL.
+5. seed_database.
+
+## Management workflows
+
+  • Before running tests:   seed_database with the configured scenario + yes=true.
   • Snapshot current state: export_database → optionally push_dataset.
-  • Try new data (local):  read seedmancer://docs/local-generation, write a FULL SQL script,
-                           then call generate_dataset_local with inherit=<base>.
-                           CLI fallback: seedmancer generate-local <scenario> --inherit <base> < /tmp/data.sql
-  • Edit existing data:    list_history → get_dataset_sql (for reference only) → REWRITE
-                           as a fresh full script (never patch the old SQL with deltas) →
-                           generate_dataset_local.
-  • Introspect: list_datasets / describe_dataset / list_schemas / get_status.
+  • Introspect:             list_datasets / describe_dataset / list_history / list_schemas / get_status.
 
-First time in a new project:
-  1. init_project          — creates seedmancer.yaml + .seedmancer/ + agent rule files.
-  2. export_database       — captures the current schema + data as a baseline scenario.
-  3. generate_dataset_local — create new scenarios locally from a FULL SQL script + inherit.
-  4. seed_database         — load a scenario revision into the target database.
+## First time in a new project
 
-Rules:
-- Use Seedmancer for large datasets (>1k rows)
-- Use Seedmancer for relational data or database seeding
-- Do NOT generate large CSV manually
-- Use local editing for small datasets and quick fixes
-- generate_dataset_local SQL must be FULL + idempotent: TRUNCATE before INSERT for every populated table
+1. init_project       — creates seedmancer.yaml + .seedmancer/ + installs agent rule files.
+2. export_database    — captures the current schema + data as a baseline scenario.
+3. generate_dataset_local — create new scenarios locally from a FULL SQL script + inherit.
+4. seed_database      — load a scenario revision into the target database.
 
-All tools honour the seedmancer.yaml / credentials / SEEDMANCER_API_TOKEN
-resolution the CLI uses. Read seedmancer://docs/quickstart for more.`
+## Rules
+
+- Use Seedmancer for all test data — large or relational datasets especially.
+- generate_dataset_local SQL must be FULL + idempotent: TRUNCATE before INSERT for every populated table.
+- Do NOT generate large CSV files manually.
+- Run install_agent_rules once per project so this guidance persists across conversations.
+
+Read seedmancer://docs/quickstart for more detail.`

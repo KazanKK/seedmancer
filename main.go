@@ -69,7 +69,6 @@ func main() {
 	generateLocalCmd.Hidden = true
 	generateCmd := cmd.GenerateCommand()
 	generateCmd.Category = "Local"
-	generateCmd.Hidden = true
 	seedCmd := cmd.SeedCommand()
 	seedCmd.Category = "Local"
 	listCmd := cmd.ListCommand()

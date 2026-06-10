@@ -1297,13 +1297,13 @@ type GenerateInput struct {
 	DBURL       string `json:"dbUrl,omitempty" jsonschema:"Ad-hoc database URL when auto-exporting schema"`
 }
 
-// GenerateOutput summarises the freshly created revision. Path points at
-// the data folder so callers can hand it straight to seed.
+// GenerateOutput summarises the freshly created revision.
 type GenerateOutput struct {
-	Scenario string `json:"scenario"`
-	Revision string `json:"revision"`
-	Schema   string `json:"schema"`
-	Path     string `json:"path"`
+	Scenario string   `json:"scenario"`
+	Revision string   `json:"revision"`
+	Schema   string   `json:"schema"`
+	Path     string   `json:"path"`
+	Tables   []string `json:"tables,omitempty"`
 }
 
 // RunGenerate uses the Seedmancer cloud API to generate a full SQL dataset
@@ -1384,9 +1384,9 @@ func RunGenerate(ctx context.Context, in GenerateInput) (GenerateOutput, error) 
 	// child tables, regardless of the order the AI chose.
 	generatedSQL = reorderInsertsByFK(generatedSQL, buildFKGraph(raw))
 
-	// Save draft immediately so it is inspectable if execution fails.
-	scenarioDir := scenario.ScenarioDir(projectRoot, cfg.StoragePath, scenarioPath)
-	draftPath := filepath.Join(scenarioDir, "generate-draft.sql")
+	// Save draft to a temp location so it is inspectable if execution fails
+	// but never lands inside the project directory.
+	draftPath := filepath.Join(os.TempDir(), fmt.Sprintf("seedmancer-generate-draft-%s.sql", strings.ReplaceAll(scenarioPath, "/", "-")))
 	_ = os.WriteFile(draftPath, []byte(generatedSQL), 0644)
 
 	// Run the SQL locally and snapshot as a new revision.
@@ -1408,6 +1408,7 @@ func RunGenerate(ctx context.Context, in GenerateInput) (GenerateOutput, error) 
 		Revision: localOut.Revision,
 		Schema:   localOut.Schema,
 		Path:     localOut.Path,
+		Tables:   localOut.Tables,
 	}, nil
 }
 

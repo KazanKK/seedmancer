@@ -216,19 +216,6 @@ func registerTools(s *mcp.Server) {
 		return nil, out, err
 	})
 
-	mcp.AddTool(s, &mcp.Tool{
-		Name:  "generate_dataset",
-		Title: "Generate scenario revision via cloud AI",
-		Description: "Ask the Seedmancer cloud AI to synthesise a full, idempotent SQL script from the " +
-			"scenario's schema and a natural-language prompt, then run the SQL locally and snapshot " +
-			"the result as a new revision. Synchronous — no polling required. The schema is resolved " +
-			"from the inherit scenario if provided, then from the scenario's existing latest revision, " +
-			"then by auto-exporting the current database.",
-		Annotations: &mcp.ToolAnnotations{DestructiveHint: falsePtr(), IdempotentHint: false},
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, in cmd.GenerateInput) (*mcp.CallToolResult, cmd.GenerateOutput, error) {
-		out, err := cmd.RunGenerate(ctx, in)
-		return nil, out, err
-	})
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "push_dataset",
@@ -278,25 +265,15 @@ func registerTools(s *mcp.Server) {
 		Title: "Check scenario schema drift (structured)",
 		Description: "Compare a scenario revision's stored schema with the live database schema. " +
 			"Returns a structured drift report with changes classified as auto/likely/decision/breaking. " +
-			"Use this to inspect schema drift before running apply_ai_refresh.",
+			"Use this to inspect schema drift, then fix it locally: get_dataset_sql (reference) → " +
+			"rewrite the full SQL script to account for schema changes → generate_dataset_local.",
 		Annotations: readOnly,
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in cmd.CheckStateSchemaInput) (*mcp.CallToolResult, cmd.CheckStateSchemaOutput, error) {
 		out, err := cmd.RunCheckStateSchema(ctx, in)
 		return nil, out, err
 	})
 
-	mcp.AddTool(s, &mcp.Tool{
-		Name:  "apply_ai_refresh",
-		Title: "Refresh scenario data with AI",
-		Description: "Detects schema drift for a scenario, sends the existing data and schema diff to the " +
-			"Seedmancer AI backend, and creates a new revision whose data conforms to the current schema. " +
-			"Existing rows are preserved; only what the schema change requires is modified. " +
-			"Requires a valid API token.",
-		Annotations: &mcp.ToolAnnotations{DestructiveHint: falsePtr(), IdempotentHint: false},
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, in cmd.ApplyAIRefreshInput) (*mcp.CallToolResult, cmd.ApplyAIRefreshOutput, error) {
-		out, err := cmd.RunApplyAIRefresh(ctx, in)
-		return nil, out, err
-	})
+
 
 	// ── Auth surface ─────────────────────────────────────────────────
 	mcp.AddTool(s, &mcp.Tool{

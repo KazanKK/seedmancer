@@ -181,8 +181,8 @@ func registerResources(s *mcp.Server) {
 	s.AddResource(&mcp.Resource{
 		URI:         "seedmancer://docs/refresh",
 		Name:        "Schema drift refresh",
-		Title:       "Refresh outdated scenario revisions",
-		Description: "How to use the four refresh MCP tools to update scenario CSVs after a schema change.",
+		Title:       "Fix schema drift locally",
+		Description: "How to fix scenario drift after a schema change using local MCP tools: check_state_schema → get_dataset_sql → rewrite SQL → generate_dataset_local.",
 		MIMEType:    "text/markdown",
 	}, func(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
 		return &mcp.ReadResourceResult{
