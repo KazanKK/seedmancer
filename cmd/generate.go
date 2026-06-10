@@ -60,16 +60,18 @@ func GenerateCommand() *cli.Command {
 		ArgsUsage: "<scenario>",
 		Description: "Uses AI to produce realistic test data for every table in your\n" +
 			"schema, then snapshots the result as a new revision under the scenario.\n\n" +
+			"The prompt is saved as the scenario's purpose and reused: running\n" +
+			"generate again without --prompt regenerates with the saved purpose,\n" +
+			"and refresh uses it to keep the data's intent after schema changes.\n\n" +
 			"Examples:\n" +
 			"  seedmancer generate baseline --prompt 'three realistic users'\n" +
-			"  seedmancer generate qa/smoke --prompt 'a few orders with line items'\n" +
+			"  seedmancer generate baseline                   # reuse the saved purpose\n" +
 			"  seedmancer generate qa/smoke --inherit baseline --prompt 'add two orders'\n\n" +
 			"NOTE: this overwrites data in the configured local env.",
 		Flags: []cli.Flag{
 			&cli.StringFlag{
-				Name:     "prompt",
-				Required: true,
-				Usage:    "(required) Natural-language description of the data to generate",
+				Name:  "prompt",
+				Usage: "Natural-language purpose of the data. Saved on the scenario and reused when omitted",
 			},
 			&cli.StringFlag{
 				Name:    "inherit",
@@ -97,7 +99,7 @@ func GenerateCommand() *cli.Command {
 		Action: func(c *cli.Context) error {
 			scenarioArg := strings.TrimSpace(c.Args().First())
 			if scenarioArg == "" {
-				return fmt.Errorf("usage: seedmancer generate <scenario>")
+				return usageError(c, "missing required argument: <scenario>")
 			}
 			spinner := ui.StartSpinner("Generating test data…")
 			out, err := RunGenerate(c.Context, GenerateInput{

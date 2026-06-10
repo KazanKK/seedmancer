@@ -151,11 +151,40 @@ Use ` + "`generate_dataset_local`" + ` when:
 **Note:** this overwrites data in the configured local env (the SQL runs against
 it). Fine for dev/test DBs; never use against a DB whose state you care about.
 
-## Performance note for large datasets
+## Realistic, compact SQL
 
-` + "`generate_dataset_local`" + ` works for any row count. For very large tables
-prefer set-based SQL (` + "`INSERT INTO ... SELECT FROM generate_series(...)`" + `)
-so Postgres does the heavy lifting natively.
+Generated data must look like it came from a real production system:
+- Real-looking names, emails, companies — never 'Test User 1' or 'foo'.
+- Emails matching names (alice.chen@example.com), plausible prices and quantities.
+- Dates spread over realistic windows (signups over months, orders after signup).
+- Status/enum values skewed like real data — mostly common values, fewer edge cases.
+
+For any table needing more than ~20 rows, put the loop INSIDE the SQL instead
+of writing literal VALUES rows — it is shorter, never truncates, and gives
+exact row counts:
+
+` + "```sql" + `
+INSERT INTO "users" ("id", "name", "email", "status", "created_at")
+SELECT
+  i,
+  (ARRAY['Alice Chen','Bob Patel','Carol Diaz','Dan Kim'])[1 + i % 4]
+    || CASE WHEN i > 4 THEN ' ' || i ELSE '' END,
+  'user' || i || '@example.com',
+  (ARRAY['active','active','active','trial','churned'])[1 + i % 5],
+  TIMESTAMP '2026-01-01 09:00:00' - (i || ' hours')::interval
+FROM generate_series(1, 200) AS i;
+` + "```" + `
+
+Repeat ARRAY elements to skew distributions (the status pool above yields
+~60% active). Postgres does the heavy lifting natively, so this works for
+any row count — including millions of rows.
+
+**Determinism requirement:** every expression must produce the same values on
+every run, or the idempotency contract breaks. Derive values from the series
+index ` + "`i`" + `; never use bare ` + "`random()`" + ` or ` + "`gen_random_uuid()`" + `. If pseudo-random
+variety genuinely helps, run ` + "`SELECT setseed(0.42);`" + ` immediately after the
+TRUNCATE — that makes ` + "`random()`" + ` reproducible. For uuid columns derive
+deterministic literals: ` + "`('00000000-0000-0000-0000-' || lpad(i::text, 12, '0'))::uuid`" + `.
 
 ## Guidance on what Seedmancer should NOT be
 
@@ -173,9 +202,11 @@ still be a full, self-contained script** — see the contract below.
    ` + "`export_database scenario=\"basic\"`" + ` to capture the live DB.
 2. ` + "`describe_schema`" + ` — get exact table and column names for every table
    you intend to populate.
-3. ` + "`generate_dataset_local scenario=\"<new>\" inherit=\"basic\" sql=\"...\"`" + ` —
+3. ` + "`generate_dataset_local scenario=\"<new>\" inherit=\"basic\" sql=\"...\" prompt=\"<purpose>\"`" + ` —
    write a FULL SQL script (see contract below). The tool rejects partial /
-   delta scripts.
+   delta scripts. Pass ` + "`prompt`" + ` with the user's natural-language purpose for
+   this test data — it is saved on the scenario and reused by later refreshes
+   and regenerations to keep the data's intent.
 4. ` + "`seed_database scenario=\"<new>\" yes=true`" + `.
 
 ## SQL contract — FULL, self-contained, idempotent
@@ -309,9 +340,10 @@ Call this first to understand exactly what changed before rewriting the data.
 
 ### 2. get_dataset_sql
 
-Retrieves the prior revision's SQL block as a reference. The schema has
-changed since this SQL was written, so use it to understand the shape of the
-existing data — do NOT re-submit it as-is.
+Retrieves the prior revision's SQL block as a reference, along with the
+scenario's saved purpose. The schema has changed since this SQL was written,
+so use it to understand the shape of the existing data — do NOT re-submit it
+as-is.
 
 ### 3. Rewrite the SQL
 
@@ -319,6 +351,7 @@ Write a fresh, FULL, idempotent SQL script that conforms to the new schema:
 - Add values for any new required columns.
 - Drop any columns that no longer exist.
 - Convert any type-changed values.
+- Keep the data true to the scenario's saved purpose.
 - Keep TRUNCATE + INSERT structure intact (see ` + "`seedmancer://docs/local-generation`" + `).
 
 ### 4. generate_dataset_local
@@ -334,7 +367,10 @@ Loads the fresh revision into the target environment.
 ## CLI alternative (no agent)
 
 ` + "`seedmancer refresh <scenario>`" + ` uses the Seedmancer cloud AI to adapt the data
-automatically. Use this when no local AI agent is available.
+automatically. Use this when no local AI agent is available. It requires a
+revision with a saved ` + "`dataset.sql`" + ` (` + "`hasSql: true`" + ` in ` + "`list_history`" + `) — plain
+exported snapshots cannot be refreshed and should be re-exported after the
+migration instead.
 
 ## dataset.sql
 

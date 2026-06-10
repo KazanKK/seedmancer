@@ -78,7 +78,7 @@ func GenerateLocalCommand() *cli.Command {
 		Action: func(c *cli.Context) error {
 			scenarioArg := strings.TrimSpace(c.Args().First())
 			if scenarioArg == "" {
-				return fmt.Errorf("usage: seedmancer generate-local <scenario>")
+				return usageError(c, "missing required argument: <scenario>")
 			}
 			inherit := strings.TrimSpace(c.String("inherit"))
 

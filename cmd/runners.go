@@ -92,6 +92,7 @@ type DescribeDatasetOutput struct {
 	SchemaDisplayName string               `json:"schemaDisplayName,omitempty"`
 	SourceEnv         string               `json:"sourceEnv,omitempty"`
 	UpdatedAt         string               `json:"updatedAt"`
+	Purpose           string               `json:"purpose,omitempty"`
 	Files             []DatasetFilePreview `json:"files"`
 }
 
@@ -146,6 +147,13 @@ func RunDescribeDataset(_ context.Context, in DescribeDatasetInput) (DescribeDat
 		SourceEnv:         utils.ReadDatasetMeta(datasetDir).SourceEnv,
 		Files:             make([]DatasetFilePreview, 0, len(files)),
 	}
+	// Surface the scenario's saved purpose when the dataset name maps to a
+	// local scenario (best-effort — legacy dataset folders have none).
+	if normalized, nErr := scenario.Normalize(in.DatasetID); nErr == nil {
+		if m, mErr := scenario.ReadManifest(scenario.ScenarioDir(projectRoot, cfg.StoragePath, normalized)); mErr == nil {
+			out.Purpose = strings.TrimSpace(m.Prompt)
+		}
+	}
 	if info, err := os.Stat(datasetDir); err == nil {
 		out.UpdatedAt = info.ModTime().UTC().Format(time.RFC3339)
 	}
@@ -173,6 +181,7 @@ type GetDatasetSQLOutput struct {
 	Scenario string `json:"scenario"`
 	Revision string `json:"revision"`
 	Path     string `json:"path"`
+	Purpose  string `json:"purpose,omitempty"`
 	SQL      string `json:"sql"`
 }
 
@@ -212,12 +221,17 @@ func RunGetDatasetSQL(_ context.Context, in GetDatasetSQLInput) (GetDatasetSQLOu
 	if err != nil {
 		return GetDatasetSQLOutput{}, fmt.Errorf("reading %s: %w", sqlPath, err)
 	}
-	return GetDatasetSQLOutput{
+	out := GetDatasetSQLOutput{
 		Scenario: scenarioPath,
 		Revision: rev.RevID,
 		Path:     sqlPath,
 		SQL:      string(data),
-	}, nil
+	}
+	// Include the scenario's saved purpose so rewrites keep the data's intent.
+	if m, mErr := scenario.ReadManifest(scenario.ScenarioDir(projectRoot, cfg.StoragePath, scenarioPath)); mErr == nil {
+		out.Purpose = strings.TrimSpace(m.Prompt)
+	}
+	return out, nil
 }
 
 // previewDatasetFile reads the first `n+1` lines of a CSV/JSON file
@@ -737,12 +751,21 @@ scenario before applying your SQL.
 against it). That's already true of ` + "`seed_database`" + `, so this is fine for
 a dev/test DB but never run it against a database whose state you care about.
 
-## Large scenarios (1M+ rows)
+## Realistic, compact SQL
 
-` + "`generate_dataset_local`" + ` works for any row count. For very large datasets
-prefer ` + "`INSERT INTO ... SELECT FROM generate_series(...)`" + ` so Postgres
-does the heavy lifting. Always use Seedmancer — never bypass it with a raw
-SQL script outside the tool.
+Data must look like it came from a real production system: real-looking
+names/emails/prices, dates spread over plausible windows, status values
+skewed like real data — never 'Test User 1' or 'foo'.
+
+For more than ~20 rows per table, put the loop INSIDE the SQL instead of
+writing literal VALUES rows:
+` + "`INSERT INTO ... SELECT FROM generate_series(...)`" + ` with modulo-indexed
+` + "`ARRAY[...]`" + ` value pools. This is compact, gives exact row counts, and
+works for any size — including millions of rows. Keep every expression
+deterministic (derive values from the series index; no bare ` + "`random()`" + ` —
+run ` + "`SELECT setseed(0.42);`" + ` first if randomness is unavoidable) so the
+saved SQL reproduces identical data on every run. Always use Seedmancer —
+never bypass it with a raw SQL script outside the tool.
 
 ## To modify existing generated data:
 
@@ -848,8 +871,13 @@ When asked to create, generate, or seed test/fixture data:
   DBs, never use against a DB whose state matters.
 - For a new project without seedmancer.yaml: ` + "`init_project`" + ` first.
 - Prefer ` + "`generate_dataset_local`" + ` (local, no quota).
-- **Always use Seedmancer for test data — even 1M+ rows.** Use
-  ` + "`INSERT INTO ... SELECT FROM generate_series(...)`" + ` for high row counts.
+- **Data must look realistic** — real-looking names/emails/prices, plausible
+  date windows, skewed status distributions; never 'Test User 1' or 'foo'.
+- **Always use Seedmancer for test data — even 1M+ rows.** For more than ~20
+  rows per table use ` + "`INSERT INTO ... SELECT FROM generate_series(...)`" + ` with
+  modulo-indexed ` + "`ARRAY[...]`" + ` value pools. Keep expressions deterministic
+  (derive from the series index; ` + "`SELECT setseed(0.42);`" + ` first if random()
+  is unavoidable) so the saved SQL replays identically.
 - **To modify existing data**: ` + "`list_history`" + ` (rows with ` + "`hasSql: true`" + ` have
   a saved ` + "`dataset.sql`" + `), then ` + "`get_dataset_sql`" + ` with ` + "`scenario`" + ` (and
   optionally ` + "`revision`" + `) to retrieve it, modify the SQL, and pass it back to
@@ -1288,7 +1316,7 @@ func pickExportTarget(cfg utils.Config, envName, dbURL string) (utils.NamedEnv, 
 // base). MCP clients always pass a scenario path so the result is a
 // proper revision rather than a free-form dataset folder.
 type GenerateInput struct {
-	Prompt      string `json:"prompt" jsonschema:"Natural-language description of the data to generate"`
+	Prompt      string `json:"prompt,omitempty" jsonschema:"Natural-language purpose of the data to generate. Optional when the scenario already has a saved purpose; when given it becomes the new saved purpose."`
 	Scenario    string `json:"scenario" jsonschema:"Scenario path for the new revision (e.g. billing/pro)"`
 	Inherit     string `json:"inherit,omitempty" jsonschema:"Scenario whose latest revision provides the schema fingerprint"`
 	Description string `json:"description,omitempty" jsonschema:"Description stored on the new revision manifest"`
@@ -1319,12 +1347,22 @@ func RunGenerate(ctx context.Context, in GenerateInput) (GenerateOutput, error) 
 	if err != nil {
 		return GenerateOutput{}, err
 	}
-	if strings.TrimSpace(in.Prompt) == "" {
-		return GenerateOutput{}, fmt.Errorf("prompt cannot be empty")
-	}
 	scenarioPath, err := scenario.Normalize(in.Scenario)
 	if err != nil {
 		return GenerateOutput{}, err
+	}
+
+	// Resolve the prompt: an explicit prompt wins and becomes the scenario's
+	// new saved purpose; otherwise reuse the purpose saved on the scenario.
+	prompt := strings.TrimSpace(in.Prompt)
+	if prompt == "" {
+		scenarioDir := scenario.ScenarioDir(projectRoot, cfg.StoragePath, scenarioPath)
+		if m, mErr := scenario.ReadManifest(scenarioDir); mErr == nil {
+			prompt = strings.TrimSpace(m.Prompt)
+		}
+	}
+	if prompt == "" {
+		return GenerateOutput{}, fmt.Errorf("no saved purpose for %s — pass --prompt to describe the data you want", scenarioPath)
 	}
 
 	token, err := utils.ResolveAPIToken(in.Token)
@@ -1375,7 +1413,7 @@ func RunGenerate(ctx context.Context, in GenerateInput) (GenerateOutput, error) 
 	}
 
 	// Call /generate-sql — synchronous, returns a full SQL script directly.
-	generatedSQL, err := callGenerateSQL(ctx, utils.GetBaseURL(), token, apiSchema, in.Prompt)
+	generatedSQL, err := callGenerateSQL(ctx, utils.GetBaseURL(), token, apiSchema, prompt)
 	if err != nil {
 		return GenerateOutput{}, err
 	}
@@ -1397,6 +1435,7 @@ func RunGenerate(ctx context.Context, in GenerateInput) (GenerateOutput, error) 
 		Env:         in.Env,
 		DBURL:       in.DBURL,
 		Description: in.Description,
+		Prompt:      prompt,
 	})
 	if err != nil {
 		return GenerateOutput{}, err
@@ -1472,6 +1511,7 @@ type GenerateLocalInput struct {
 	Env         string `json:"env,omitempty" jsonschema:"Named env to seed/export against (defaults to default_env)"`
 	DBURL       string `json:"dbUrl,omitempty" jsonschema:"Ad-hoc target URL (mutually exclusive with env)"`
 	Description string `json:"description,omitempty" jsonschema:"Optional description stored on the new revision manifest"`
+	Prompt      string `json:"prompt,omitempty" jsonschema:"Natural-language purpose of this test data. Saved on the scenario and reused by generate/refresh."`
 }
 
 // GenerateLocalOutput is the structured result. Path points at the
@@ -1708,6 +1748,9 @@ func RunGenerateLocal(ctx context.Context, in GenerateLocalInput) (GenerateLocal
 	}
 	scenarioManifest.UpdatedAt = now
 	scenarioManifest.Latest = revID
+	if p := strings.TrimSpace(in.Prompt); p != "" {
+		scenarioManifest.Prompt = p
+	}
 	if err := scenario.WriteManifest(scenarioDir, scenarioManifest); err != nil {
 		return GenerateLocalOutput{}, err
 	}
@@ -1794,6 +1837,12 @@ func RunSync(ctx context.Context, in SyncInput) (SyncOutput, error) {
 	result, err := syncUploadPresigned(ctx, token, baseURL, scenarioPath, rev.RevID, zipData)
 	if err != nil {
 		return SyncOutput{}, err
+	}
+	// Sync the scenario's saved purpose alongside the data. Best-effort:
+	// the data upload already succeeded and the prompt re-syncs next push.
+	scenarioDir := scenario.ScenarioDir(projectRoot, cfg.StoragePath, scenarioPath)
+	if m, mErr := scenario.ReadManifest(scenarioDir); mErr == nil && strings.TrimSpace(m.Prompt) != "" && result.ID != "" {
+		_ = pushScenarioPrompt(ctx, token, baseURL, result.ID, strings.TrimSpace(m.Prompt))
 	}
 	return SyncOutput{
 		Scenario: scenarioPath,
@@ -1910,6 +1959,9 @@ func RunFetch(ctx context.Context, in FetchInput) (FetchOutput, error) {
 	}
 	scenarioManifest.UpdatedAt = now
 	scenarioManifest.Latest = revID
+	if p := strings.TrimSpace(match.Prompt); p != "" {
+		scenarioManifest.Prompt = p
+	}
 	_ = scenario.WriteManifest(scenarioDir, scenarioManifest)
 
 	_ = ctx

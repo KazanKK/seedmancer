@@ -65,7 +65,7 @@ func ExportCommand() *cli.Command {
 		Action: func(c *cli.Context) error {
 			scenarioArg := strings.TrimSpace(c.Args().First())
 			if scenarioArg == "" {
-				return fmt.Errorf("usage: seedmancer export <scenario>")
+				return usageError(c, "missing required argument: <scenario>")
 			}
 
 			out, err := RunExport(c.Context, ExportInput{

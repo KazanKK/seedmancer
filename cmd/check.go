@@ -50,7 +50,7 @@ func CheckCommand() *cli.Command {
 		Action: func(c *cli.Context) error {
 			scenarioArg := strings.TrimSpace(c.Args().First())
 			if scenarioArg == "" {
-				return fmt.Errorf("usage: seedmancer check <scenario>")
+				return usageError(c, "missing required argument: <scenario>")
 			}
 			out, err := RunCheck(c.Context, CheckInput{
 				Scenario: scenarioArg,

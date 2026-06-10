@@ -16,6 +16,10 @@ type Manifest struct {
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
 	Latest    string    `json:"latest,omitempty"`
+	// Prompt is the saved purpose of this scenario's test data. It is reused
+	// by generate (when no prompt is passed) and refresh (as AI context), and
+	// syncs with the cloud scenarios.prompt column on push/pull.
+	Prompt string `json:"prompt,omitempty"`
 }
 
 // RevisionManifest is the per-revision metadata stored at

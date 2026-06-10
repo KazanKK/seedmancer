@@ -39,6 +39,39 @@ type uploadURLResponse struct {
 	Path      string `json:"path"`
 }
 
+// pushScenarioPrompt syncs the scenario's saved purpose to the cloud via
+// PATCH /v1.0/datasets/{id}. The prompt can be long, so it travels in a
+// JSON body rather than the sync query params.
+func pushScenarioPrompt(ctx context.Context, token, baseURL, datasetID, prompt string) error {
+	payload, err := json.Marshal(struct {
+		Prompt string `json:"prompt"`
+	}{Prompt: prompt})
+	if err != nil {
+		return err
+	}
+	endpoint := fmt.Sprintf("%s/v1.0/datasets/%s", baseURL, datasetID)
+	req, err := http.NewRequestWithContext(ctx, "PATCH", endpoint, bytes.NewReader(payload))
+	if err != nil {
+		return fmt.Errorf("creating prompt sync request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", utils.BearerAPIToken(token))
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("syncing prompt: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized {
+		return utils.ErrInvalidAPIToken
+	}
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("prompt sync failed (%s): %s", resp.Status, string(body))
+	}
+	return nil
+}
+
 // syncUploadPresigned uploads zipData via the three-step presigned URL flow:
 //  1. POST /v1.0/datasets/sync/upload-url  → receive { uploadUrl, path }
 //  2. PUT  uploadUrl                       → stream bytes directly to storage

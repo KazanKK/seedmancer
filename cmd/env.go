@@ -127,7 +127,7 @@ func envUseCommand() *cli.Command {
 		ArgsUsage: "<name>",
 		Action: func(c *cli.Context) error {
 			if c.NArg() != 1 {
-				return fmt.Errorf("usage: seedmancer env use <name>")
+				return usageError(c, "expected exactly one argument: <name>")
 			}
 			name := strings.TrimSpace(c.Args().First())
 			path, cfg, err := loadConfigForEnvCmd()
@@ -171,7 +171,7 @@ func envAddCommand() *cli.Command {
 		},
 		Action: func(c *cli.Context) error {
 			if c.NArg() != 1 {
-				return fmt.Errorf("usage: seedmancer env add <name> --db-url <url>")
+				return usageError(c, "expected exactly one argument: <name> (plus --db-url <url>)")
 			}
 			name := strings.TrimSpace(c.Args().First())
 			if err := validateEnvName(name); err != nil {
@@ -236,7 +236,7 @@ func envRemoveCommand() *cli.Command {
 		},
 		Action: func(c *cli.Context) error {
 			if c.NArg() != 1 {
-				return fmt.Errorf("usage: seedmancer env remove <name>")
+				return usageError(c, "expected exactly one argument: <name>")
 			}
 			name := strings.TrimSpace(c.Args().First())
 			path, cfg, err := loadConfigForEnvCmd()
@@ -290,7 +290,7 @@ func envShowCommand() *cli.Command {
 		},
 		Action: func(c *cli.Context) error {
 			if c.NArg() != 1 {
-				return fmt.Errorf("usage: seedmancer env show <name>")
+				return usageError(c, "expected exactly one argument: <name>")
 			}
 			name := strings.TrimSpace(c.Args().First())
 			_, cfg, err := loadConfigForEnvCmd()

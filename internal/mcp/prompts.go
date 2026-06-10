@@ -94,7 +94,15 @@ Steps:
        TRUNCATE TABLE a, b, c RESTART IDENTITY CASCADE;
    - Follow with INSERT statements for every populated table.
    - Running the script twice must produce the same state.
-4. Call 'generate_dataset_local' with scenario=%q, inherit=%q, and your SQL.
+   - Make the data REALISTIC: real-looking names/emails/prices, dates spread over
+     plausible windows, status values skewed like production data — never 'Test User 1'.
+   - For more than ~20 rows per table, put the loop inside the SQL:
+     INSERT INTO ... SELECT FROM generate_series(...) with modulo-indexed ARRAY
+     value pools. Keep every expression deterministic (derive from the series index;
+     no bare random() — use SELECT setseed(0.42); first if random is unavoidable).
+4. Call 'generate_dataset_local' with scenario=%q, inherit=%q, your SQL, and
+   prompt=<the user's purpose for this data> so the intent is saved on the
+   scenario and reused by later refreshes and regenerations.
    Seedmancer seeds the inherit base first as a safety net, runs your SQL, exports
    the result as CSVs, and REJECTS the revision if any populated table is missing a wipe.
 5. Call 'seed_database' with the scenario path to load the revision into the target env.

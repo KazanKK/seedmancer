@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"encoding/csv"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -50,7 +49,7 @@ func RefreshCommand() *cli.Command {
 		Action: func(c *cli.Context) error {
 			scenarioArg := strings.TrimSpace(c.Args().First())
 			if scenarioArg == "" {
-				return fmt.Errorf("usage: seedmancer refresh <scenario>")
+				return usageError(c, "missing required argument: <scenario>")
 			}
 			return runRefreshOne(c, scenarioArg)
 		},
@@ -616,11 +615,10 @@ func runGenerateRefreshSQL(ctx context.Context, in applyAIRefreshInput) (generat
 		return generateRefreshResult{}, err
 	}
 
-	// ── 1. Build existing SQL from dataset.sql or CSVs ────────────────────────
-	fkGraph := buildFKGraph(in.NewSchemaJSON)
-	existingSQL, err := loadExistingSQL(rev.RevDir, rev.DataDir, fkGraph)
+	// ── 1. Load existing SQL from the revision's dataset.sql ──────────────────
+	existingSQL, err := loadExistingSQL(rev.RevDir, scenarioPath, rev.RevID)
 	if err != nil {
-		return generateRefreshResult{}, fmt.Errorf("loading existing data: %w", err)
+		return generateRefreshResult{}, err
 	}
 
 	// ── 2. Build schema diff text ─────────────────────────────────────────────
@@ -638,14 +636,21 @@ func runGenerateRefreshSQL(ctx context.Context, in applyAIRefreshInput) (generat
 		return generateRefreshResult{}, fmt.Errorf("AI refresh requires a Seedmancer account — run `seedmancer login` first: %w", err)
 	}
 
-	generatedSQL, err := callGenerateRefreshSQL(ctx, token, apiSchema, schemaDiff, existingSQL, in.Prompt)
+	// Send the scenario's saved purpose so the adapted data keeps its
+	// original intent; --prompt rides along as per-run extra instructions.
+	scenarioDir := scenario.ScenarioDir(projectRoot, cfg.StoragePath, scenarioPath)
+	var purpose string
+	if m, mErr := scenario.ReadManifest(scenarioDir); mErr == nil {
+		purpose = strings.TrimSpace(m.Prompt)
+	}
+
+	generatedSQL, err := callGenerateRefreshSQL(ctx, token, apiSchema, schemaDiff, existingSQL, purpose, in.Prompt)
 	if err != nil {
 		return generateRefreshResult{}, err
 	}
 
 	// Save generated SQL as a draft immediately so it is inspectable even if
 	// execution fails. Overwritten on every refresh attempt.
-	scenarioDir := scenario.ScenarioDir(projectRoot, cfg.StoragePath, scenarioPath)
 	draftPath := filepath.Join(scenarioDir, "refresh-draft.sql")
 	_ = os.WriteFile(draftPath, []byte(generatedSQL), 0644)
 
@@ -769,116 +774,22 @@ func runApplyAIRefresh(ctx context.Context, in applyAIRefreshInput) (ApplyAIRefr
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-// loadExistingSQL returns the existing data as a SQL string.
-// Prefers dataset.sql from the revision; falls back to converting CSVs.
-func loadExistingSQL(revDir, dataDir string, fkGraph map[string]map[string]struct{}) (string, error) {
+// loadExistingSQL returns the revision's dataset.sql contents. Revisions
+// without dataset.sql (created by export/pull) cannot be refreshed — sending
+// every CSV row to the AI would be prohibitively expensive.
+func loadExistingSQL(revDir, scenarioPath, revID string) (string, error) {
 	sqlPath := DatasetSQLPath(revDir)
-	if fileExists(sqlPath) {
-		data, err := os.ReadFile(sqlPath)
-		if err != nil {
-			return "", err
-		}
-		return string(data), nil
+	if !fileExists(sqlPath) {
+		return "", fmt.Errorf(
+			"revision %s of %s has no generation history — refresh works on revisions created by `seedmancer generate` or a previous refresh.\n"+
+				"After migrating your database, run `seedmancer export` to snapshot it again, or `seedmancer generate` to create AI-managed test data",
+			revID, scenarioPath)
 	}
-	// No dataset.sql — convert CSVs to TRUNCATE+INSERT SQL.
-	return csvDirToSQL(dataDir, fkGraph)
-}
-
-// csvDirToSQL reads all <table>.csv files from dataDir and produces a
-// self-contained TRUNCATE+INSERT SQL script. fkGraph is used to topologically
-// sort INSERT statements so parent tables are emitted before child tables,
-// preventing FK constraint violations.
-func csvDirToSQL(dataDir string, fkGraph map[string]map[string]struct{}) (string, error) {
-	entries, err := os.ReadDir(dataDir)
+	data, err := os.ReadFile(sqlPath)
 	if err != nil {
-		return "", fmt.Errorf("reading data dir: %w", err)
+		return "", err
 	}
-
-	var sb strings.Builder
-	tableNames := make([]string, 0)
-	type tableData struct {
-		name    string
-		headers []string
-		rows    [][]string
-	}
-	tables := make([]tableData, 0)
-
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".csv") {
-			continue
-		}
-		tableName := strings.TrimSuffix(e.Name(), ".csv")
-		tableNames = append(tableNames, tableName)
-
-		f, err := os.Open(filepath.Join(dataDir, e.Name()))
-		if err != nil {
-			return "", fmt.Errorf("opening %s: %w", e.Name(), err)
-		}
-		r := csv.NewReader(f)
-		records, err := r.ReadAll()
-		f.Close()
-		if err != nil {
-			return "", fmt.Errorf("parsing %s: %w", e.Name(), err)
-		}
-		if len(records) == 0 {
-			tables = append(tables, tableData{name: tableName})
-			continue
-		}
-		tables = append(tables, tableData{name: tableName, headers: records[0], rows: records[1:]})
-	}
-
-	if len(tableNames) > 0 {
-		sb.WriteString("TRUNCATE TABLE ")
-		sb.WriteString(strings.Join(quoteIdents(tableNames), ", "))
-		sb.WriteString(" RESTART IDENTITY CASCADE;\n\n")
-	}
-
-	// Sort INSERT order so parent tables (no FK dependencies from other tables
-	// in the set) come before child tables.
-	sortedNames := topoSort(tableNames, fkGraph)
-	tablesByName := make(map[string]tableData, len(tables))
-	for _, t := range tables {
-		tablesByName[t.name] = t
-	}
-
-	for _, name := range sortedNames {
-		t := tablesByName[name]
-		if len(t.headers) == 0 || len(t.rows) == 0 {
-			continue
-		}
-		sb.WriteString(fmt.Sprintf("INSERT INTO %s (%s) VALUES\n",
-			quoteIdent(t.name),
-			strings.Join(quoteIdents(t.headers), ", "),
-		))
-		for i, row := range t.rows {
-			sb.WriteString("  (")
-			for j, val := range row {
-				if j > 0 {
-					sb.WriteString(", ")
-				}
-				sb.WriteString(sqlQuoteValue(val))
-			}
-			sb.WriteString(")")
-			if i < len(t.rows)-1 {
-				sb.WriteString(",\n")
-			} else {
-				sb.WriteString(";\n\n")
-			}
-		}
-	}
-	return sb.String(), nil
-}
-
-func quoteIdent(s string) string {
-	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
-}
-
-func quoteIdents(ss []string) []string {
-	out := make([]string, len(ss))
-	for i, s := range ss {
-		out[i] = quoteIdent(s)
-	}
-	return out
+	return string(data), nil
 }
 
 // buildFKGraph parses a schema JSON blob and returns a map from each table
@@ -980,27 +891,6 @@ func topoSort(tables []string, fkGraph map[string]map[string]struct{}) []string 
 		}
 	}
 	return result
-}
-
-// goTimestampRe matches Go's time.String() format:
-// "2006-01-02 15:04:05.999999999 -0700 MST"
-// PostgreSQL rejects the combination of a numeric offset and a timezone name.
-// We strip the trailing timezone abbreviation and keep only the numeric offset.
-var goTimestampRe = regexp.MustCompile(
-	`^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?) ([+-]\d{4}) \w+$`,
-)
-
-// sqlQuoteValue converts a CSV cell value to a SQL literal.
-func sqlQuoteValue(v string) string {
-	if v == "" || strings.ToUpper(v) == "NULL" {
-		return "NULL"
-	}
-	// Normalize Go's time.String() timestamp to a PostgreSQL-compatible form by
-	// removing the trailing timezone abbreviation (e.g. " UTC").
-	if m := goTimestampRe.FindStringSubmatch(v); m != nil {
-		return "'" + m[1] + m[2] + "'"
-	}
-	return "'" + strings.ReplaceAll(v, "'", "''") + "'"
 }
 
 // buildSchemaDiffText produces a compact human-readable list of changes.
@@ -1217,6 +1107,7 @@ type refreshSQLRequest struct {
 	Schema      generateSchema `json:"schema"`
 	SchemaDiff  string         `json:"schemaDiff"`
 	ExistingSQL string         `json:"existingSql"`
+	Purpose     string         `json:"purpose,omitempty"`
 	Prompt      string         `json:"prompt,omitempty"`
 }
 
@@ -1226,11 +1117,14 @@ type refreshSQLResponse struct {
 }
 
 // callGenerateRefreshSQL posts to the backend and returns the AI SQL.
-func callGenerateRefreshSQL(ctx context.Context, token string, schema generateSchema, schemaDiff, existingSQL, prompt string) (string, error) {
+// purpose is the scenario's saved intent; prompt carries per-run extra
+// instructions from --prompt.
+func callGenerateRefreshSQL(ctx context.Context, token string, schema generateSchema, schemaDiff, existingSQL, purpose, prompt string) (string, error) {
 	reqBody, err := json.Marshal(refreshSQLRequest{
 		Schema:      schema,
 		SchemaDiff:  schemaDiff,
 		ExistingSQL: existingSQL,
+		Purpose:     purpose,
 		Prompt:      prompt,
 	})
 	if err != nil {

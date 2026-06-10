@@ -397,7 +397,7 @@ func schemaRecency(s schemaSummary) time.Time {
 func runSchemasRename(c *cli.Context) error {
 	args := c.Args()
 	if args.Len() < 1 {
-		return fmt.Errorf("usage: seedmancer schemas rename <fp-prefix-or-id> <new-name>")
+		return usageError(c, "missing required arguments: <fp-prefix-or-id> <new-name>")
 	}
 	ref := args.Get(0)
 
@@ -599,7 +599,7 @@ func resolveRemoteSchemaID(baseURL, token, ref string) (schemaSummary, error) {
 func runSchemasRm(c *cli.Context) error {
 	args := c.Args()
 	if args.Len() < 1 {
-		return fmt.Errorf("usage: seedmancer schemas rm <fp-prefix-or-id>")
+		return usageError(c, "missing required argument: <fp-prefix-or-id>")
 	}
 	ref := args.Get(0)
 

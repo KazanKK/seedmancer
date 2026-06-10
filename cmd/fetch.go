@@ -22,6 +22,7 @@ import (
 type datasetAPI struct {
 	ID        string          `json:"id"`
 	Name      string          `json:"name"`
+	Prompt    string          `json:"prompt"`
 	FileCount int             `json:"fileCount"`
 	TotalSize int64           `json:"totalSize"`
 	CreatedAt string          `json:"createdAt"`
@@ -63,7 +64,7 @@ func PullCommand() *cli.Command {
 		Action: func(c *cli.Context) error {
 			scenarioArg := strings.TrimSpace(c.Args().First())
 			if scenarioArg == "" {
-				return fmt.Errorf("usage: seedmancer pull <scenario>")
+				return usageError(c, "missing required argument: <scenario>")
 			}
 			out, err := RunFetch(c.Context, FetchInput{
 				Scenario: scenarioArg,

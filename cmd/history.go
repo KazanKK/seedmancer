@@ -43,7 +43,7 @@ func HistoryCommand() *cli.Command {
 		Action: func(c *cli.Context) error {
 			scenarioArg := strings.TrimSpace(c.Args().First())
 			if scenarioArg == "" {
-				return fmt.Errorf("usage: seedmancer history <scenario>")
+				return usageError(c, "missing required argument: <scenario>")
 			}
 			out, err := RunHistory(c.Context, HistoryInput{Scenario: scenarioArg})
 			if err != nil {

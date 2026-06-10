@@ -66,7 +66,7 @@ func PushCommand() *cli.Command {
 				return fmt.Errorf("cannot combine --all with a scenario name")
 			}
 			if !useAll && scenarioArg == "" {
-				return fmt.Errorf("usage: seedmancer push <scenario>\n   or: seedmancer push --all")
+				return usageError(c, "missing scenario — pass a scenario path or use --all")
 			}
 
 			baseURL := utils.GetBaseURL()
@@ -89,7 +89,7 @@ func PushCommand() *cli.Command {
 					}
 					schemaDir := scenario.SchemaStoreDir(projectRoot, cfg.StoragePath, utils.FingerprintShort(rev.Manifest.SchemaFingerprint))
 					ui.Step("%s @ %s  (schema %s)", scenarioPath, rev.RevID, utils.FingerprintShort(rev.Manifest.SchemaFingerprint))
-					if err := syncOne(schemaDir, rev.DataDir, scenarioPath, rev.RevID, baseURL, token); err != nil {
+					if err := syncOne(schemaDir, rev.DataDir, scenarioPath, rev.RevID, baseURL, token, scenarioPrompt(projectRoot, cfg.StoragePath, scenarioPath)); err != nil {
 						return fmt.Errorf("push %s: %w", scenarioPath, err)
 					}
 				}
@@ -106,14 +106,25 @@ func PushCommand() *cli.Command {
 			}
 			schemaDir := scenario.SchemaStoreDir(projectRoot, cfg.StoragePath, utils.FingerprintShort(rev.Manifest.SchemaFingerprint))
 			ui.Step("%s @ %s  (schema %s)", scenarioPath, rev.RevID, utils.FingerprintShort(rev.Manifest.SchemaFingerprint))
-			return syncOne(schemaDir, rev.DataDir, scenarioPath, rev.RevID, baseURL, token)
+			return syncOne(schemaDir, rev.DataDir, scenarioPath, rev.RevID, baseURL, token, scenarioPrompt(projectRoot, cfg.StoragePath, scenarioPath))
 		},
 	}
 }
 
+// scenarioPrompt returns the saved purpose from the scenario manifest, or ""
+// when the scenario has none.
+func scenarioPrompt(projectRoot, storagePath, scenarioPath string) string {
+	m, err := scenario.ReadManifest(scenario.ScenarioDir(projectRoot, storagePath, scenarioPath))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(m.Prompt)
+}
+
 // syncOne uploads schema sidecars + revision CSVs for a single scenario.
 // revisionID is sent as `revision=rNNN` so the cloud stores under that label.
-func syncOne(schemaDir, dataDir, datasetName, revisionID, baseURL, token string) error {
+// prompt, when non-empty, is synced to the cloud scenario after the upload.
+func syncOne(schemaDir, dataDir, datasetName, revisionID, baseURL, token, prompt string) error {
 	schemaFiles, err := utils.SchemaFiles(schemaDir)
 	if err != nil {
 		return err
@@ -160,6 +171,14 @@ func syncOne(schemaDir, dataDir, datasetName, revisionID, baseURL, token string)
 		return err
 	}
 	sp.Stop(true, "Done")
+
+	// Sync the scenario's saved purpose. Best-effort: the data upload
+	// already succeeded and the prompt re-syncs on the next push.
+	if strings.TrimSpace(prompt) != "" && result.ID != "" {
+		if pErr := pushScenarioPrompt(ctx, token, baseURL, result.ID, strings.TrimSpace(prompt)); pErr != nil {
+			ui.Warn("could not sync the scenario purpose: %v", pErr)
+		}
+	}
 
 	verb := "Uploaded"
 	if result.Updated {

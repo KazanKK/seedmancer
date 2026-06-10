@@ -143,7 +143,9 @@ Run install_agent_rules once per project so this guidance persists across conver
    REFERENCE. Rewrite it as a fresh full script; never append deltas.
 4. generate_dataset_local — write a FULL, self-contained, idempotent SQL script
    (TRUNCATE TABLE <t> RESTART IDENTITY CASCADE before every table's INSERTs).
-   Pass inherit=<base-scenario> so the local DB starts in a known state.
+   Pass inherit=<base-scenario> so the local DB starts in a known state, and
+   prompt=<the user's purpose for this data> so the intent is saved on the
+   scenario and reused by later refreshes and regenerations.
    Seedmancer runs the SQL, exports the result, and REJECTS the revision if any
    populated table is missing a leading wipe.
 5. seed_database — load the new revision into other envs as needed.
@@ -152,8 +154,9 @@ Run install_agent_rules once per project so this guidance persists across conver
 ## Schema drift (when DB schema changed after a revision was created)
 
 1. check_state_schema — see what changed (auto/likely/decision/breaking).
-2. get_dataset_sql — retrieve the prior revision's SQL as a reference.
-3. Rewrite the full SQL to match the new schema.
+2. get_dataset_sql — retrieve the prior revision's SQL and the scenario's saved
+   purpose as a reference.
+3. Rewrite the full SQL to match the new schema, keeping it true to the purpose.
 4. generate_dataset_local with the rewritten SQL.
 5. seed_database.
 
@@ -174,7 +177,16 @@ Run install_agent_rules once per project so this guidance persists across conver
 
 - Use Seedmancer for all test data — large or relational datasets especially.
 - generate_dataset_local SQL must be FULL + idempotent: TRUNCATE before INSERT for every populated table.
+- Data must look REALISTIC: real-looking names/emails/prices, dates spread over plausible windows,
+  skewed status distributions (mostly common values) — never 'Test User 1' or 'foo'.
+- For more than ~20 rows per table, put the loop INSIDE the SQL:
+  INSERT INTO ... SELECT FROM generate_series(...) with modulo-indexed ARRAY value pools.
+  Keep expressions deterministic (derive from the series index; if random() is unavoidable,
+  SELECT setseed(0.42); first) so re-running the SQL reproduces identical data.
 - Do NOT generate large CSV files manually.
+- Every scenario can carry a saved purpose (the user's prompt). Set it via
+  generate_dataset_local's prompt field; read it via describe_dataset or
+  get_dataset_sql before rewriting data so the intent is preserved.
 - Run install_agent_rules once per project so this guidance persists across conversations.
 
 Read seedmancer://docs/quickstart for more detail.`

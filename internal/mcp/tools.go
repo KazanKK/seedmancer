@@ -44,7 +44,7 @@ func registerTools(s *mcp.Server) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "describe_dataset",
 		Title:       "Describe dataset",
-		Description: "Show files, row counts, and a small CSV preview for a local dataset.",
+		Description: "Show files, row counts, a small CSV preview, and the saved purpose for a local dataset.",
 		Annotations: readOnly,
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in cmd.DescribeDatasetInput) (*mcp.CallToolResult, cmd.DescribeDatasetOutput, error) {
 		out, err := cmd.RunDescribeDataset(ctx, in)
@@ -61,6 +61,7 @@ func registerTools(s *mcp.Server) {
 			"The next generate_dataset_local call will reject any SQL whose populated tables " +
 			"are missing a leading TRUNCATE or unconditional DELETE FROM. Defaults to the " +
 			"scenario's latest revision; pass `revision: \"rNNN\"` for a specific one. " +
+			"The output includes the scenario's saved purpose — keep any rewrite true to it. " +
 			"Returns an error when the revision " +
 			"has no dataset.sql sidecar (e.g. it was produced by export_database or pull_dataset).",
 		Annotations: readOnly,
@@ -207,7 +208,10 @@ func registerTools(s *mcp.Server) {
 			"(5) save the SQL as dataset.sql so it can be retrieved later with get_dataset_sql. " +
 			"Read seedmancer://docs/local-generation first for the SQL contract and examples, " +
 			"then call describe_schema to get the exact column names before writing the SQL. " +
-			"`inherit` is REQUIRED. Pointers.latest advances to the new revision automatically. " +
+			"`inherit` is REQUIRED. Pass `prompt` with the user's natural-language purpose for " +
+			"this test data — it is saved on the scenario and reused later (by refresh and by " +
+			"future regenerations) to keep the data's intent. " +
+			"Pointers.latest advances to the new revision automatically. " +
 			"Note: this overwrites data in the configured local env (the SQL runs against it). " +
 			"No cloud API, no quota, and no internet connection are needed.",
 		Annotations: &mcp.ToolAnnotations{DestructiveHint: truePtr(), IdempotentHint: false},
