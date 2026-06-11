@@ -1,0 +1,1079 @@
+{
+  "databaseType": "postgres",
+  "enums": [
+    {
+      "name": "NotificationType",
+      "values": [
+        "MENTION",
+        "COMMENT",
+        "REACTION",
+        "TEAM_INVITE",
+        "PROJECT_UPDATE"
+      ]
+    },
+    {
+      "name": "OrgRole",
+      "values": [
+        "OWNER",
+        "ADMIN",
+        "MEMBER"
+      ]
+    },
+    {
+      "name": "ProjectStatus",
+      "values": [
+        "ACTIVE",
+        "ARCHIVED",
+        "COMPLETED"
+      ]
+    },
+    {
+      "name": "ReactionType",
+      "values": [
+        "LIKE",
+        "LOVE",
+        "HAHA",
+        "WOW",
+        "SAD",
+        "ANGRY"
+      ]
+    },
+    {
+      "name": "Role",
+      "values": [
+        "USER",
+        "ADMIN"
+      ]
+    },
+    {
+      "name": "TeamRole",
+      "values": [
+        "LEADER",
+        "MEMBER"
+      ]
+    },
+    {
+      "name": "UserStatus",
+      "values": [
+        "ACTIVE",
+        "INACTIVE",
+        "SUSPENDED"
+      ]
+    }
+  ],
+  "tables": [
+    {
+      "columns": [
+        {
+          "isPrimary": true,
+          "isUnique": false,
+          "name": "id",
+          "nullable": false,
+          "type": "text"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "street",
+          "nullable": false,
+          "type": "text"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "city",
+          "nullable": false,
+          "type": "text"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "state",
+          "nullable": true,
+          "type": "text"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "country",
+          "nullable": false,
+          "type": "text"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "zipCode",
+          "nullable": false,
+          "type": "text"
+        },
+        {
+          "foreignKey": {
+            "column": "id",
+            "table": "Profile"
+          },
+          "isPrimary": false,
+          "isUnique": true,
+          "name": "profileId",
+          "nullable": false,
+          "type": "text"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "createdAt",
+          "nullable": false,
+          "type": "timestamp without time zone"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "updatedAt",
+          "nullable": false,
+          "type": "timestamp without time zone"
+        }
+      ],
+      "name": "Address"
+    },
+    {
+      "columns": [
+        {
+          "isPrimary": true,
+          "isUnique": false,
+          "name": "id",
+          "nullable": false,
+          "type": "text"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "filename",
+          "nullable": false,
+          "type": "text"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "url",
+          "nullable": false,
+          "type": "text"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "size",
+          "nullable": false,
+          "type": "integer"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "mimeType",
+          "nullable": false,
+          "type": "text"
+        },
+        {
+          "foreignKey": {
+            "column": "id",
+            "table": "Post"
+          },
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "postId",
+          "nullable": false,
+          "type": "text"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "createdAt",
+          "nullable": false,
+          "type": "timestamp without time zone"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "updatedAt",
+          "nullable": false,
+          "type": "timestamp without time zone"
+        }
+      ],
+      "name": "Attachment"
+    },
+    {
+      "columns": [
+        {
+          "isPrimary": true,
+          "isUnique": false,
+          "name": "id",
+          "nullable": false,
+          "type": "text"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": true,
+          "name": "name",
+          "nullable": false,
+          "type": "text"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "description",
+          "nullable": true,
+          "type": "text"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "parentId",
+          "nullable": true,
+          "type": "text"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "createdAt",
+          "nullable": false,
+          "type": "timestamp without time zone"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "updatedAt",
+          "nullable": false,
+          "type": "timestamp without time zone"
+        }
+      ],
+      "name": "Category"
+    },
+    {
+      "columns": [
+        {
+          "isPrimary": true,
+          "isUnique": false,
+          "name": "id",
+          "nullable": false,
+          "type": "text"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "content",
+          "nullable": false,
+          "type": "text"
+        },
+        {
+          "foreignKey": {
+            "column": "id",
+            "table": "Post"
+          },
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "postId",
+          "nullable": false,
+          "type": "text"
+        },
+        {
+          "foreignKey": {
+            "column": "id",
+            "table": "User"
+          },
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "authorId",
+          "nullable": false,
+          "type": "text"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "parentId",
+          "nullable": true,
+          "type": "text"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "createdAt",
+          "nullable": false,
+          "type": "timestamp without time zone"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "updatedAt",
+          "nullable": false,
+          "type": "timestamp without time zone"
+        }
+      ],
+      "name": "Comment"
+    },
+    {
+      "columns": [
+        {
+          "isPrimary": true,
+          "isUnique": false,
+          "name": "id",
+          "nullable": false,
+          "type": "text"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "name",
+          "nullable": false,
+          "type": "text"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "path",
+          "nullable": true,
+          "type": "text"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "icon",
+          "nullable": true,
+          "type": "text"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "order",
+          "nullable": false,
+          "type": "integer"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "parentId",
+          "nullable": true,
+          "type": "text"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "createdAt",
+          "nullable": false,
+          "type": "timestamp without time zone"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "updatedAt",
+          "nullable": false,
+          "type": "timestamp without time zone"
+        }
+      ],
+      "name": "MenuItem"
+    },
+    {
+      "columns": [
+        {
+          "isPrimary": true,
+          "isUnique": false,
+          "name": "id",
+          "nullable": false,
+          "type": "text"
+        },
+        {
+          "enum": "NotificationType",
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "type",
+          "nullable": false,
+          "type": "enum"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "title",
+          "nullable": false,
+          "type": "text"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "content",
+          "nullable": false,
+          "type": "text"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "read",
+          "nullable": false,
+          "type": "boolean"
+        },
+        {
+          "foreignKey": {
+            "column": "id",
+            "table": "User"
+          },
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "userId",
+          "nullable": false,
+          "type": "text"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "createdAt",
+          "nullable": false,
+          "type": "timestamp without time zone"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "updatedAt",
+          "nullable": false,
+          "type": "timestamp without time zone"
+        }
+      ],
+      "name": "Notification"
+    },
+    {
+      "columns": [
+        {
+          "isPrimary": true,
+          "isUnique": false,
+          "name": "id",
+          "nullable": false,
+          "type": "text"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": true,
+          "name": "name",
+          "nullable": false,
+          "type": "text"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "description",
+          "nullable": true,
+          "type": "text"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "logo",
+          "nullable": true,
+          "type": "text"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "createdAt",
+          "nullable": false,
+          "type": "timestamp without time zone"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "updatedAt",
+          "nullable": false,
+          "type": "timestamp without time zone"
+        }
+      ],
+      "name": "Organization"
+    },
+    {
+      "columns": [
+        {
+          "isPrimary": true,
+          "isUnique": false,
+          "name": "id",
+          "nullable": false,
+          "type": "text"
+        },
+        {
+          "enum": "OrgRole",
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "role",
+          "nullable": false,
+          "type": "enum"
+        },
+        {
+          "foreignKey": {
+            "column": "id",
+            "table": "User"
+          },
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "userId",
+          "nullable": false,
+          "type": "text"
+        },
+        {
+          "foreignKey": {
+            "column": "id",
+            "table": "Organization"
+          },
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "organizationId",
+          "nullable": false,
+          "type": "text"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "createdAt",
+          "nullable": false,
+          "type": "timestamp without time zone"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "updatedAt",
+          "nullable": false,
+          "type": "timestamp without time zone"
+        }
+      ],
+      "name": "OrganizationMember"
+    },
+    {
+      "columns": [
+        {
+          "isPrimary": true,
+          "isUnique": false,
+          "name": "id",
+          "nullable": false,
+          "type": "text"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "title",
+          "nullable": false,
+          "type": "text"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "content",
+          "nullable": false,
+          "type": "text"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "published",
+          "nullable": false,
+          "type": "boolean"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "viewCount",
+          "nullable": false,
+          "type": "integer"
+        },
+        {
+          "foreignKey": {
+            "column": "id",
+            "table": "User"
+          },
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "authorId",
+          "nullable": false,
+          "type": "text"
+        },
+        {
+          "foreignKey": {
+            "column": "id",
+            "table": "Project"
+          },
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "projectId",
+          "nullable": false,
+          "type": "text"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "createdAt",
+          "nullable": false,
+          "type": "timestamp without time zone"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "updatedAt",
+          "nullable": false,
+          "type": "timestamp without time zone"
+        }
+      ],
+      "name": "Post"
+    },
+    {
+      "columns": [
+        {
+          "isPrimary": true,
+          "isUnique": false,
+          "name": "id",
+          "nullable": false,
+          "type": "text"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "bio",
+          "nullable": true,
+          "type": "text"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "avatar",
+          "nullable": true,
+          "type": "text"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "phoneNumber",
+          "nullable": true,
+          "type": "text"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "dateOfBirth",
+          "nullable": true,
+          "type": "timestamp without time zone"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "address",
+          "nullable": true,
+          "type": "text"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "socialLinks",
+          "nullable": true,
+          "type": "json"
+        },
+        {
+          "foreignKey": {
+            "column": "id",
+            "table": "User"
+          },
+          "isPrimary": false,
+          "isUnique": true,
+          "name": "userId",
+          "nullable": false,
+          "type": "text"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "createdAt",
+          "nullable": false,
+          "type": "timestamp without time zone"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "updatedAt",
+          "nullable": false,
+          "type": "timestamp without time zone"
+        }
+      ],
+      "name": "Profile"
+    },
+    {
+      "columns": [
+        {
+          "isPrimary": true,
+          "isUnique": false,
+          "name": "id",
+          "nullable": false,
+          "type": "text"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "name",
+          "nullable": false,
+          "type": "text"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "description",
+          "nullable": true,
+          "type": "text"
+        },
+        {
+          "enum": "ProjectStatus",
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "status",
+          "nullable": false,
+          "type": "enum"
+        },
+        {
+          "foreignKey": {
+            "column": "id",
+            "table": "Organization"
+          },
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "organizationId",
+          "nullable": false,
+          "type": "text"
+        },
+        {
+          "foreignKey": {
+            "column": "id",
+            "table": "Team"
+          },
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "teamId",
+          "nullable": true,
+          "type": "text"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "createdAt",
+          "nullable": false,
+          "type": "timestamp without time zone"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "updatedAt",
+          "nullable": false,
+          "type": "timestamp without time zone"
+        }
+      ],
+      "name": "Project"
+    },
+    {
+      "columns": [
+        {
+          "isPrimary": true,
+          "isUnique": false,
+          "name": "id",
+          "nullable": false,
+          "type": "text"
+        },
+        {
+          "enum": "ReactionType",
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "type",
+          "nullable": false,
+          "type": "enum"
+        },
+        {
+          "foreignKey": {
+            "column": "id",
+            "table": "User"
+          },
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "userId",
+          "nullable": false,
+          "type": "text"
+        },
+        {
+          "foreignKey": {
+            "column": "id",
+            "table": "Post"
+          },
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "postId",
+          "nullable": true,
+          "type": "text"
+        },
+        {
+          "foreignKey": {
+            "column": "id",
+            "table": "Comment"
+          },
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "commentId",
+          "nullable": true,
+          "type": "text"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "createdAt",
+          "nullable": false,
+          "type": "timestamp without time zone"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "updatedAt",
+          "nullable": false,
+          "type": "timestamp without time zone"
+        }
+      ],
+      "name": "Reaction"
+    },
+    {
+      "columns": [
+        {
+          "isPrimary": true,
+          "isUnique": false,
+          "name": "id",
+          "nullable": false,
+          "type": "text"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": true,
+          "name": "name",
+          "nullable": false,
+          "type": "text"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "color",
+          "nullable": true,
+          "type": "text"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "createdAt",
+          "nullable": false,
+          "type": "timestamp without time zone"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "updatedAt",
+          "nullable": false,
+          "type": "timestamp without time zone"
+        }
+      ],
+      "name": "Tag"
+    },
+    {
+      "columns": [
+        {
+          "isPrimary": true,
+          "isUnique": false,
+          "name": "id",
+          "nullable": false,
+          "type": "text"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "name",
+          "nullable": false,
+          "type": "text"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "description",
+          "nullable": true,
+          "type": "text"
+        },
+        {
+          "foreignKey": {
+            "column": "id",
+            "table": "Organization"
+          },
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "organizationId",
+          "nullable": false,
+          "type": "text"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "createdAt",
+          "nullable": false,
+          "type": "timestamp without time zone"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "updatedAt",
+          "nullable": false,
+          "type": "timestamp without time zone"
+        }
+      ],
+      "name": "Team"
+    },
+    {
+      "columns": [
+        {
+          "isPrimary": true,
+          "isUnique": false,
+          "name": "id",
+          "nullable": false,
+          "type": "text"
+        },
+        {
+          "enum": "TeamRole",
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "role",
+          "nullable": false,
+          "type": "enum"
+        },
+        {
+          "foreignKey": {
+            "column": "id",
+            "table": "User"
+          },
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "userId",
+          "nullable": false,
+          "type": "text"
+        },
+        {
+          "foreignKey": {
+            "column": "id",
+            "table": "Team"
+          },
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "teamId",
+          "nullable": false,
+          "type": "text"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": true,
+          "name": "replacedById",
+          "nullable": true,
+          "type": "text"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "createdAt",
+          "nullable": false,
+          "type": "timestamp without time zone"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "updatedAt",
+          "nullable": false,
+          "type": "timestamp without time zone"
+        }
+      ],
+      "name": "TeamMember"
+    },
+    {
+      "columns": [
+        {
+          "isPrimary": true,
+          "isUnique": false,
+          "name": "id",
+          "nullable": false,
+          "type": "text"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": true,
+          "name": "email",
+          "nullable": false,
+          "type": "text"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "name",
+          "nullable": true,
+          "type": "text"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "password",
+          "nullable": false,
+          "type": "text"
+        },
+        {
+          "enum": "Role",
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "role",
+          "nullable": false,
+          "type": "enum"
+        },
+        {
+          "enum": "UserStatus",
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "status",
+          "nullable": false,
+          "type": "enum"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "preferences",
+          "nullable": true,
+          "type": "json"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "lastLoginAt",
+          "nullable": true,
+          "type": "timestamp without time zone"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "createdAt",
+          "nullable": false,
+          "type": "timestamp without time zone"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "updatedAt",
+          "nullable": false,
+          "type": "timestamp without time zone"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "managerId",
+          "nullable": true,
+          "type": "text"
+        },
+        {
+          "isPrimary": false,
+          "isUnique": false,
+          "name": "mentorId",
+          "nullable": true,
+          "type": "text"
+        }
+      ],
+      "name": "User"
+    }
+  ]
+}

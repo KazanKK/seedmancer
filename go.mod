@@ -1,0 +1,27 @@
+module github.com/KazanKK/seedmancer
+
+go 1.24.0
+
+require (
+	github.com/go-sql-driver/mysql v1.10.0
+	github.com/lib/pq v1.10.9
+	github.com/modelcontextprotocol/go-sdk v1.0.0
+	github.com/olekukonko/tablewriter v0.0.5
+	github.com/urfave/cli/v2 v2.25.7
+	golang.org/x/term v0.28.0
+)
+
+require (
+	filippo.io/edwards25519 v1.2.0 // indirect
+	github.com/google/jsonschema-go v0.3.0 // indirect
+	github.com/mattn/go-runewidth v0.0.9 // indirect
+	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
+	golang.org/x/sys v0.29.0 // indirect
+)
+
+require (
+	github.com/cpuguy83/go-md2man/v2 v2.0.2 // indirect
+	github.com/russross/blackfriday/v2 v2.1.0 // indirect
+	github.com/xrash/smetrics v0.0.0-20201216005158-039620a65673 // indirect
+	gopkg.in/yaml.v3 v3.0.1
+)

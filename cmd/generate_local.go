@@ -1,0 +1,163 @@
+package cmd
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/KazanKK/seedmancer/internal/ui"
+	"github.com/KazanKK/seedmancer/internal/utils"
+	"github.com/urfave/cli/v2"
+)
+
+// GenerateLocalCommand runs an agent-written SQL block, optionally on top of
+// an inherit base, and snapshots the resulting state as a new revision.
+// Pipeline:
+//
+//  1. (Optional) Seed the inherit base into the configured local env.
+//  2. Apply the user-provided SQL inside a single transaction.
+//  3. Export the resulting tables to CSV under a fresh rNNN revision.
+//  4. Save the raw SQL alongside the CSVs as dataset.sql.
+//
+// Recommended invocation (SQL piped via stdin so it never touches disk):
+//
+//	seedmancer generate-local <scenario> --inherit <base-scenario> <<'EOF'
+//	DELETE FROM order_items WHERE product_id IN (SELECT id FROM products);
+//	DELETE FROM products;
+//	INSERT INTO products (id, brand_id, name, price) VALUES (1, 1, 'P1', 9.99);
+//	EOF
+func GenerateLocalCommand() *cli.Command {
+	return &cli.Command{
+		Name:      "generate-local",
+		Usage:     "Generate a scenario revision from a FULL, idempotent SQL script",
+		ArgsUsage: "<scenario>",
+		Description: "Applies your SQL against the local env, then exports the resulting\n" +
+			"tables to CSV as a new rNNN revision. The SQL is stored alongside\n" +
+			"the CSVs as dataset.sql.\n\n" +
+			"The SQL MUST be a FULL, self-contained, idempotent script:\n" +
+			"  - every populated table starts with TRUNCATE TABLE <t> RESTART IDENTITY\n" +
+			"    CASCADE (or an unconditional DELETE FROM <t>) before its INSERTs,\n" +
+			"  - running it twice produces the same DB state,\n" +
+			"  - running it alone on an empty migrated schema reproduces the dataset.\n\n" +
+			"Use --inherit to seed a base scenario before your SQL runs (optional):\n\n" +
+			"  seedmancer generate-local billing/pro --inherit basic <<'EOF'\n" +
+			"  TRUNCATE TABLE order_items, products, brands\n" +
+			"      RESTART IDENTITY CASCADE;\n" +
+			"  INSERT INTO brands (id, name) VALUES (1, 'Acme');\n" +
+			"  EOF\n\n" +
+			"Without --inherit, the SQL runs directly against the current DB state.\n" +
+			"NOTE: this overwrites data in the configured local env.",
+		Flags: []cli.Flag{
+			&cli.StringFlag{
+				Name:    "sql-file",
+				Aliases: []string{"f"},
+				Usage:   "Path to a SQL file (use \"-\" for stdin; omit to read stdin automatically). Project-relative paths are rejected.",
+			},
+			&cli.StringFlag{
+				Name:    "inherit",
+				Aliases: []string{"b"},
+				Usage:   "Base scenario to seed before running SQL (optional — omit to run against current DB state)",
+			},
+			&cli.StringFlag{
+				Name:    "env",
+				Aliases: []string{"e"},
+				Usage:   "Named environment to seed/export against (defaults to default_env)",
+			},
+			&cli.StringFlag{
+				Name:  "db-url",
+				Usage: "Ad-hoc target URL (mutually exclusive with --env)",
+			},
+			&cli.StringFlag{
+				Name:  "description",
+				Usage: "Optional description stored on the new revision manifest",
+			},
+		},
+		Action: func(c *cli.Context) error {
+			scenarioArg := strings.TrimSpace(c.Args().First())
+			if scenarioArg == "" {
+				return usageError(c, "missing required argument: <scenario>")
+			}
+			inherit := strings.TrimSpace(c.String("inherit"))
+
+			sqlFile := strings.TrimSpace(c.String("sql-file"))
+			var sqlBody []byte
+			var err error
+			switch {
+			case sqlFile == "" || sqlFile == "-":
+				sqlBody, err = io.ReadAll(os.Stdin)
+				if err != nil {
+					return fmt.Errorf("reading SQL from stdin: %w", err)
+				}
+			default:
+				if err := rejectProjectRelativeSQLPath(sqlFile); err != nil {
+					return err
+				}
+				sqlBody, err = os.ReadFile(sqlFile)
+				if err != nil {
+					return fmt.Errorf("reading SQL file %q: %w", sqlFile, err)
+				}
+			}
+			if strings.TrimSpace(string(sqlBody)) == "" {
+				return fmt.Errorf("SQL is empty (pass via stdin or --sql-file)")
+			}
+
+			out, err := RunGenerateLocal(context.Background(), GenerateLocalInput{
+				SQL:         string(sqlBody),
+				Scenario:    scenarioArg,
+				Inherit:     inherit,
+				Env:         strings.TrimSpace(c.String("env")),
+				DBURL:       strings.TrimSpace(c.String("db-url")),
+				Description: strings.TrimSpace(c.String("description")),
+			})
+			if err != nil {
+				return err
+			}
+
+			fmt.Println()
+			ui.Success("Generated revision: %s @ %s", out.Scenario, out.Revision)
+			ui.KeyValue("Schema: ", out.Schema)
+			ui.KeyValue("Tables: ", strings.Join(out.Tables, ", "))
+			if out.InheritedFrom != "" {
+				ui.KeyValue("Inherited from: ", fmt.Sprintf("%s @ %s", out.InheritedFrom, out.InheritedRevision))
+			}
+			ui.KeyValue("Env used: ", out.Env)
+			ui.KeyValue("SQL saved: ", out.SQLPath)
+			ui.KeyValue("Run: ", fmt.Sprintf("seedmancer seed %s", out.Scenario))
+			return nil
+		},
+	}
+}
+
+// rejectProjectRelativeSQLPath returns an error when sqlFile resolves to
+// a path inside the project root (the directory containing seedmancer.yaml).
+// This keeps generator SQL files out of the repository — they should live
+// in /tmp or be piped via stdin.
+func rejectProjectRelativeSQLPath(sqlFile string) error {
+	configPath, err := utils.FindConfigFile()
+	if err != nil {
+		return nil
+	}
+	projectRoot, err := filepath.Abs(filepath.Dir(configPath))
+	if err != nil {
+		return nil
+	}
+	abs, err := filepath.Abs(sqlFile)
+	if err != nil {
+		return nil
+	}
+	rel, err := filepath.Rel(projectRoot, abs)
+	if err != nil {
+		return nil
+	}
+	if rel == "." || (!strings.HasPrefix(rel, "..") && !filepath.IsAbs(rel)) {
+		return fmt.Errorf(
+			"refusing to read --sql-file %q: path is inside the project (%s).\n"+
+				"Generator SQL files are throwaway — pipe via stdin (heredoc) or place the file under /tmp.",
+			sqlFile, projectRoot,
+		)
+	}
+	return nil
+}
