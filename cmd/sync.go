@@ -33,9 +33,9 @@ func PushCommand() *cli.Command {
 		Description: "Zips the schema sidecars + the chosen revision's CSVs and uploads\n" +
 			"them to your Seedmancer cloud account. The scenario path is the cloud name;\n" +
 			"the revision label (e.g. r002) is preserved on the server.\n\n" +
-			"With --all, every scenario under <storagePath>/scenarios/ that has a valid\n" +
-			"manifest is pushed using its latest revision (same as a single push without\n" +
-			"--revision / --stable).",
+			"With --all, only scenarios missing from the connected cloud API or whose\n" +
+			"local stamp no longer matches the cloud are pushed (diff-only). To re-push\n" +
+			"a scenario already in sync, use `seedmancer push <scenario>` directly.",
 		Flags: []cli.Flag{
 			&cli.BoolFlag{
 				Name:  "all",
@@ -80,21 +80,33 @@ func PushCommand() *cli.Command {
 				for path, manifestErr := range badManifests {
 					ui.Warn("skipping scenario %q (unreadable manifest): %v", path, manifestErr)
 				}
-				if len(paths) == 0 {
-					return fmt.Errorf("no scenarios to push — run `seedmancer export <scenario>` first")
+			if len(paths) == 0 {
+				return fmt.Errorf("no scenarios to push — run `seedmancer export <scenario>` first")
+			}
+			cloudDatasets, err := listRemoteDatasets(baseURL, token)
+			if err != nil {
+				return fmt.Errorf("listing cloud datasets: %w", err)
+			}
+			var pushed, skipped int
+			for _, scenarioPath := range paths {
+				rev, revErr := resolveScenarioRevision(projectRoot, cfg.StoragePath, scenarioPath, "")
+				if revErr != nil {
+					return fmt.Errorf("push %s: %w", scenarioPath, revErr)
 				}
-				for _, scenarioPath := range paths {
-					rev, revErr := resolveScenarioRevision(projectRoot, cfg.StoragePath, scenarioPath, "")
-					if revErr != nil {
-						return fmt.Errorf("push %s: %w", scenarioPath, revErr)
-					}
-					schemaDir := scenario.SchemaStoreDir(projectRoot, cfg.StoragePath, utils.FingerprintShort(rev.Manifest.SchemaFingerprint))
-					ui.Step("%s @ %s  (schema %s)", scenarioPath, rev.RevID, utils.FingerprintShort(rev.Manifest.SchemaFingerprint))
-					if err := syncOne(schemaDir, rev.DataDir, scenarioPath, rev.RevID, baseURL, token, scenarioPrompt(projectRoot, cfg.StoragePath, scenarioPath)); err != nil {
-						return fmt.Errorf("push %s: %w", scenarioPath, err)
-					}
+				if cloudDS, ok := cloudDatasets[scenarioPath]; ok && isPushUpToDate(rev.Manifest, cloudDS) {
+					ui.Info("  skip  %s @ %s  (already in cloud)", scenarioPath, rev.RevID)
+					skipped++
+					continue
 				}
-				return nil
+				schemaDir := scenario.SchemaStoreDir(projectRoot, cfg.StoragePath, utils.FingerprintShort(rev.Manifest.SchemaFingerprint))
+				ui.Step("%s @ %s  (schema %s)", scenarioPath, rev.RevID, utils.FingerprintShort(rev.Manifest.SchemaFingerprint))
+				if err := syncOne(schemaDir, rev.DataDir, scenarioPath, rev.RevID, baseURL, token, scenarioPrompt(projectRoot, cfg.StoragePath, scenarioPath)); err != nil {
+					return fmt.Errorf("push %s: %w", scenarioPath, err)
+				}
+				pushed++
+			}
+			ui.Info("pushed %d, skipped %d (already in cloud)", pushed, skipped)
+			return nil
 			}
 
 			scenarioPath, err := scenario.Normalize(scenarioArg)
@@ -110,6 +122,17 @@ func PushCommand() *cli.Command {
 			return syncOne(schemaDir, rev.DataDir, scenarioPath, rev.RevID, baseURL, token, scenarioPrompt(projectRoot, cfg.StoragePath, scenarioPath))
 		},
 	}
+}
+
+// isPushUpToDate reports whether the local revision stamp matches the cloud's
+// latest revision for the same scenario path. Mirrors the pull-side check in
+// RunFetch so push --all only skips scenarios the connected API confirms are
+// already in sync — a stale local remoteId alone is not enough.
+func isPushUpToDate(rm scenario.RevisionManifest, cloud datasetAPI) bool {
+	return rm.RemoteID != "" &&
+		rm.RemoteID == cloud.ID &&
+		rm.RemoteUpdatedAt != "" &&
+		rm.RemoteUpdatedAt == cloud.UpdatedAt
 }
 
 // scenarioPrompt returns the saved purpose from the scenario manifest, or ""
@@ -155,7 +178,7 @@ func syncOne(schemaDir, dataDir, datasetName, revisionID, baseURL, token, prompt
 		sp.Stop(false, "Compression failed")
 		return fmt.Errorf("compressing files: %v", err)
 	}
-	sp.Stop(true, fmt.Sprintf("Compressed (%.1f MB)", float64(zipData.Len())/1024/1024))
+	sp.Stop(true, fmt.Sprintf("Compressed (%s)", formatBytes(int64(zipData.Len()))))
 
 	ctx := context.Background()
 

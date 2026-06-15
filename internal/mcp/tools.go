@@ -54,16 +54,19 @@ func registerTools(s *mcp.Server) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name:  "get_dataset_sql",
 		Title: "Get dataset SQL",
-		Description: "Return the SQL block that was used to create a scenario revision via " +
-			"generate_dataset_local. Use it as a REFERENCE for what the previous revision " +
-			"produced. When generating a new revision, REWRITE the SQL as a fresh, full, " +
-			"self-contained script — do NOT append delta statements to the returned SQL. " +
-			"The next generate_dataset_local call will reject any SQL whose populated tables " +
-			"are missing a leading TRUNCATE or unconditional DELETE FROM. Defaults to the " +
-			"scenario's latest revision; pass `revision: \"rNNN\"` for a specific one. " +
-			"The output includes the scenario's saved purpose — keep any rewrite true to it. " +
-			"Returns an error when the revision " +
-			"has no dataset.sql sidecar (e.g. it was produced by export_database or pull_dataset).",
+		Description: "Return a SQL representation of a scenario revision to use as a REFERENCE " +
+			"before rewriting test data. For revisions created by generate_dataset_local or " +
+			"refresh, the stored dataset.sql is returned verbatim. For revisions created by " +
+			"export_database or pull_dataset (which have no dataset.sql), a TRUNCATE+INSERT " +
+			"script is synthesized from the revision's exported CSVs — the output's " +
+			"`synthesized: true` flag signals this case. " +
+			"Use the returned SQL as a REFERENCE only. When generating a new revision, " +
+			"REWRITE it as a fresh, full, self-contained script — do NOT append delta " +
+			"statements. The next generate_dataset_local call rejects any SQL whose populated " +
+			"tables are missing a leading TRUNCATE or unconditional DELETE FROM. " +
+			"Defaults to the scenario's latest revision; pass `revision: \"rNNN\"` for a " +
+			"specific one. The output includes the scenario's saved purpose — keep any " +
+			"rewrite true to it.",
 		Annotations: readOnly,
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in cmd.GetDatasetSQLInput) (*mcp.CallToolResult, cmd.GetDatasetSQLOutput, error) {
 		out, err := cmd.RunGetDatasetSQL(ctx, in)

@@ -2,10 +2,12 @@ package cmd
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -14,6 +16,8 @@ import (
 
 	db "github.com/KazanKK/seedmancer/database"
 	"github.com/KazanKK/seedmancer/internal/scenario"
+	"github.com/KazanKK/seedmancer/internal/schemahistory"
+	"github.com/KazanKK/seedmancer/internal/ui"
 	"github.com/KazanKK/seedmancer/internal/utils"
 )
 
@@ -139,6 +143,19 @@ func fingerprintCurrentDB(target utils.NamedEnv) (fingerprint string, schemaJSON
 	return fp, raw, nil
 }
 
+// tryUpdateSchemaHistory records fingerprint in history.json without failing
+// the parent command. Errors are logged as warnings so that a disk issue or
+// missing schema.json does not interrupt export/check/list/seed.
+func tryUpdateSchemaHistory(projectRoot, storagePath, fingerprint string) {
+	histPath := utils.SchemaHistoryPath(projectRoot, storagePath)
+	schemaJSONFn := func(fpShort string) string {
+		return utils.SchemaJSONPath(projectRoot, storagePath, fpShort)
+	}
+	if _, err := schemahistory.UpdateSchemaHistory(histPath, fingerprint, schemaJSONFn, time.Now()); err != nil {
+		ui.Warn("schema history: %v", err)
+	}
+}
+
 // listCSVTablesAndRowCounts walks dataDir, returns the sorted list of
 // tables (.csv basename) and their data-row counts (header excluded).
 // Files larger than the row scan threshold report rowCount=-1 so callers
@@ -256,4 +273,35 @@ func liftDatasetSQL(dataDir, revDir string) error {
 		return err
 	}
 	return os.Remove(src)
+}
+
+// reportLiveSchema notifies the Seedmancer cloud of the current live DB
+// schema fingerprint. This lets the web dashboard reliably identify which
+// scenario schemas match the live DB without relying on timestamp heuristics.
+//
+// Fire-and-forget: runs in a goroutine. Any error (no token, network failure,
+// fingerprint not yet pushed) is silently ignored so it never blocks the
+// primary command. The cloud will return 404 if the fingerprint hasn't been
+// pushed yet — that's fine; the next `push` will upload it and the next
+// DB-touching command will mark it live.
+func reportLiveSchema(fingerprint string) {
+	token, err := utils.ResolveAPIToken("")
+	if err != nil || token == "" {
+		return
+	}
+	go func() {
+		payload, _ := json.Marshal(map[string]string{"fingerprint": fingerprint})
+		req, err := http.NewRequest(http.MethodPost,
+			utils.GetBaseURL()+"/v1.0/live-schema",
+			bytes.NewReader(payload))
+		if err != nil {
+			return
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err == nil {
+			resp.Body.Close()
+		}
+	}()
 }

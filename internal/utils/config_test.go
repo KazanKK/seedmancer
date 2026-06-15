@@ -111,12 +111,12 @@ func TestResolveAPIToken_prefersCredentialsFile(t *testing.T) {
 	}
 }
 
-// TestResolveAPIToken_envVarBeatsCredentialsFile pins the CI-friendly
-// ordering: SEEDMANCER_API_TOKEN must win over ~/.seedmancer/credentials,
-// matching how every other CLI treats env vars vs. on-disk config. The
-// "stale env var shadows login" confusion is mitigated by naming the
-// token source in 401 errors instead of inverting the order.
-func TestResolveAPIToken_envVarBeatsCredentialsFile(t *testing.T) {
+// TestResolveAPIToken_credentialsFileBeatsEnvVar ensures that a fresh
+// `seedmancer login` (which writes the credentials file) takes effect
+// immediately even when SEEDMANCER_API_TOKEN is set in the shell.
+// CI pipelines that set the env var but never run `seedmancer login`
+// still work because they have no credentials file.
+func TestResolveAPIToken_credentialsFileBeatsEnvVar(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
 	prev, _ := os.Getwd()
@@ -134,8 +134,8 @@ func TestResolveAPIToken_envVarBeatsCredentialsFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
-	if got != "env-token" {
-		t.Fatalf("env var did not win over credentials file: got %q", got)
+	if got != "login-token" {
+		t.Fatalf("credentials file did not win over env var: got %q", got)
 	}
 }
 

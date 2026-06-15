@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/KazanKK/seedmancer/internal/scenario"
 	"github.com/KazanKK/seedmancer/internal/ui"
 	utils "github.com/KazanKK/seedmancer/internal/utils"
 
@@ -51,12 +52,18 @@ func PullCommand() *cli.Command {
 		Name:      "pull",
 		Aliases:   []string{"fetch"},
 		Usage:     "Download a scenario from the cloud as a new local revision",
-		ArgsUsage: "<scenario>",
+		ArgsUsage: "[scenario]",
 		Description: "Looks up the cloud dataset whose name matches <scenario>, downloads\n" +
 			"it, and writes the result as a new revision under the local\n" +
 			"scenario. Pointers.latest advances to the new revision so\n" +
-			"`seedmancer seed <scenario>` picks it up immediately.",
+			"`seedmancer seed <scenario>` picks it up immediately.\n\n" +
+			"With --all, every locally-known scenario is pulled. Scenarios whose\n" +
+			"local latest already matches the cloud are skipped (diff-only).",
 		Flags: []cli.Flag{
+			&cli.BoolFlag{
+				Name:  "all",
+				Usage: "Pull every locally-known scenario, skipping those already up to date",
+			},
 			&cli.StringFlag{
 				Name:  "token",
 				Usage: "API token (falls back to SEEDMANCER_API_TOKEN, then ~/.seedmancer/credentials)",
@@ -64,13 +71,66 @@ func PullCommand() *cli.Command {
 		},
 		Action: func(c *cli.Context) error {
 			scenarioArg := strings.TrimSpace(c.Args().First())
-			if scenarioArg == "" {
-				return usageError(c, "missing required argument: <scenario>")
+			useAll := c.Bool("all")
+
+			if useAll && scenarioArg != "" {
+				return fmt.Errorf("cannot combine --all with a scenario name")
 			}
+			if !useAll && scenarioArg == "" {
+				return usageError(c, "missing required argument: <scenario> (or use --all)")
+			}
+
+			token, err := utils.ResolveAPIToken(c.String("token"))
+			if err != nil {
+				return err
+			}
+
+			if useAll {
+				configPath, cfgErr := utils.FindConfigFile()
+				if cfgErr != nil {
+					return cfgErr
+				}
+				cfg, cfgErr := utils.LoadConfig(configPath)
+				if cfgErr != nil {
+					return cfgErr
+				}
+				projectRoot := filepath.Dir(configPath)
+
+				paths, badManifests, walkErr := scenario.WalkScenarios(projectRoot, cfg.StoragePath)
+				if walkErr != nil {
+					return walkErr
+				}
+				for path, manifestErr := range badManifests {
+					ui.Warn("skipping scenario %q (unreadable manifest): %v", path, manifestErr)
+				}
+				if len(paths) == 0 {
+					return fmt.Errorf("no local scenarios found — run `seedmancer export <scenario>` first")
+				}
+
+				var pulled, upToDate, failed int
+				for _, sp := range paths {
+					out, fetchErr := RunFetch(c.Context, FetchInput{Scenario: sp, Token: token})
+					if fetchErr != nil {
+						ui.Warn("  fail  %s: %v", sp, fetchErr)
+						failed++
+						continue
+					}
+					if out.UpToDate {
+						ui.Info("  ok    %s @ %s  (already up to date)", sp, out.Revision)
+						upToDate++
+					} else {
+						ui.Success("  pull  %s → %s", sp, out.Revision)
+						pulled++
+					}
+				}
+				ui.Info("pulled %d, up to date %d, failed %d", pulled, upToDate, failed)
+				return nil
+			}
+
 			start := time.Now()
 			out, err := RunFetch(c.Context, FetchInput{
 				Scenario: scenarioArg,
-				Token:    c.String("token"),
+				Token:    token,
 			})
 			if err != nil {
 				return err
@@ -161,6 +221,48 @@ func findRemoteDataset(baseURL, token, datasetName, schemaPrefix string) (datase
 			datasetName, strings.Join(fps, ", "),
 		)
 	}
+}
+
+// listRemoteDatasets fetches every scenario on the connected cloud API and
+// indexes them by scenario path (dataset name). Used by push --all to decide
+// which local scenarios still need uploading.
+func listRemoteDatasets(baseURL, token string) (map[string]datasetAPI, error) {
+	reqURL := fmt.Sprintf("%s/v1.0/datasets", baseURL)
+	ui.Debug("GET %s", reqURL)
+
+	req, err := http.NewRequest("GET", reqURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("creating request: %v", err)
+	}
+	req.Header.Set("Authorization", utils.BearerAPIToken(token))
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("making request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("reading response body: %v", err)
+	}
+	if resp.StatusCode == http.StatusUnauthorized {
+		return nil, utils.ErrInvalidAPIToken
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API request failed: %s - %s", resp.Status, string(body))
+	}
+
+	var dsResp datasetListResponse
+	if err := json.Unmarshal(body, &dsResp); err != nil {
+		return nil, fmt.Errorf("parsing response JSON: %v", err)
+	}
+
+	out := make(map[string]datasetAPI, len(dsResp.Datasets))
+	for _, d := range dsResp.Datasets {
+		out[d.Name] = d
+	}
+	return out, nil
 }
 
 func getDownloadURL(baseURL, token, datasetID string) (string, error) {

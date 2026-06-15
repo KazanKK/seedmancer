@@ -80,6 +80,11 @@ func SchemaJSONPath(projectRoot, storagePath, fpShort string) string {
 	return filepath.Join(SchemaDir(projectRoot, storagePath, fpShort), "schema.json")
 }
 
+// SchemaHistoryPath returns the path of the shared schema history file.
+func SchemaHistoryPath(projectRoot, storagePath string) string {
+	return filepath.Join(SchemasDir(projectRoot, storagePath), "history.json")
+}
+
 // DatasetMetaName is the filename of the per-dataset metadata sidecar.
 const DatasetMetaName = "_meta.yaml"
 
@@ -534,16 +539,15 @@ func ResolveAPIToken(flagValue string) (string, error) {
 //
 // Resolution order (highest priority first):
 //  1. explicit --token CLI flag          (always wins)
-//  2. SEEDMANCER_API_TOKEN env var       (CI convention: env beats files)
-//  3. ~/.seedmancer/credentials          (written by `seedmancer login`)
+//  2. ~/.seedmancer/credentials          (written by `seedmancer login`)
+//  3. SEEDMANCER_API_TOKEN env var       (CI / ad-hoc override)
 //  4. legacy api_token: in seedmancer.yaml / ~/.seedmancer/config.yaml
 //     (read-only fallback so pre-credentials-file installs keep working)
 //
-// The env var ranks above the credentials file so CI pipelines and ad-hoc
-// `SEEDMANCER_API_TOKEN=… seedmancer push` runs behave the way every other
-// CLI does. The historical confusion of a stale exported env var shadowing
-// `seedmancer login` is handled by naming the token source in 401 errors
-// (see main.go) instead of by inverting the ordering.
+// The credentials file ranks above the env var so that `seedmancer login`
+// immediately takes effect without requiring the user to unset a stale
+// SEEDMANCER_API_TOKEN. CI pipelines that do not run `seedmancer login` have
+// no credentials file, so the env var still resolves correctly for them.
 //
 // Note: callers must NOT wire SEEDMANCER_API_TOKEN through urfave/cli's
 // flag EnvVars — that would make the env var indistinguishable from an
@@ -554,13 +558,13 @@ func ResolveAPITokenSource(flagValue string) (string, string, error) {
 		return flagValue, lastTokenSource, nil
 	}
 
-	if tok := strings.TrimSpace(os.Getenv("SEEDMANCER_API_TOKEN")); tok != "" {
-		lastTokenSource = TokenSourceEnv
+	if tok, err := LoadAPICredentials(); err == nil && tok != "" {
+		lastTokenSource = TokenSourceCredentials
 		return tok, lastTokenSource, nil
 	}
 
-	if tok, err := LoadAPICredentials(); err == nil && tok != "" {
-		lastTokenSource = TokenSourceCredentials
+	if tok := strings.TrimSpace(os.Getenv("SEEDMANCER_API_TOKEN")); tok != "" {
+		lastTokenSource = TokenSourceEnv
 		return tok, lastTokenSource, nil
 	}
 

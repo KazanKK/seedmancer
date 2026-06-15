@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/csv"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -560,8 +562,10 @@ func runGenerateRefreshSQL(ctx context.Context, in applyAIRefreshInput) (generat
 		return generateRefreshResult{}, err
 	}
 
-	// ── 1. Load existing SQL from the revision's dataset.sql ──────────────────
-	existingSQL, err := loadExistingSQL(rev.RevDir, scenarioPath, rev.RevID)
+	// ── 1. Load existing SQL: prefer the revision's dataset.sql; for
+	// export/pull revisions that have none, synthesize INSERT SQL from the
+	// stored CSVs so the AI still sees the real previous data. ────────────────
+	existingSQL, err := resolveExistingSQL(projectRoot, cfg.StoragePath, rev)
 	if err != nil {
 		return generateRefreshResult{}, err
 	}
@@ -709,22 +713,187 @@ func runApplyGeneratedSQL(ctx context.Context, r generateRefreshResult) (ApplyAI
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-// loadExistingSQL returns the revision's dataset.sql contents. Revisions
-// without dataset.sql (created by export/pull) cannot be refreshed — sending
-// every CSV row to the AI would be prohibitively expensive.
-func loadExistingSQL(revDir, scenarioPath, revID string) (string, error) {
-	sqlPath := DatasetSQLPath(revDir)
-	if !fileExists(sqlPath) {
-		return "", fmt.Errorf(
-			"revision %s of %s has no generation history — refresh works on revisions created by `seedmancer generate` or a previous refresh.\n"+
-				"After migrating your database, run `seedmancer export` to snapshot it again, or `seedmancer generate` to create AI-managed test data",
-			revID, scenarioPath)
+// resolveExistingSQL returns a SQL representation of a revision's data to
+// hand the AI as the "before" state. Revisions created by generate/refresh
+// carry a dataset.sql and that is used verbatim. Revisions created by
+// export/pull have only CSVs, so we synthesize a full TRUNCATE+INSERT script
+// from those rows — this lets refresh preserve the previous data as closely
+// as possible regardless of how the revision was created.
+func resolveExistingSQL(projectRoot, storagePath string, rev resolvedRevision) (string, error) {
+	if sqlPath := DatasetSQLPath(rev.RevDir); fileExists(sqlPath) {
+		data, err := os.ReadFile(sqlPath)
+		if err != nil {
+			return "", err
+		}
+		return string(data), nil
 	}
-	data, err := os.ReadFile(sqlPath)
+	return synthesizeSQLFromCSV(projectRoot, storagePath, rev.Manifest.SchemaFingerprint, rev.DataDir)
+}
+
+// csvSynthesisRowWarnThreshold is the number of data rows above which we warn
+// that the synthesized refresh request may be slow or costly. Refresh still
+// proceeds — it must work on any revision.
+const csvSynthesisRowWarnThreshold = 5000
+
+// synthesizeSQLFromCSV reconstructs a full, idempotent TRUNCATE+INSERT script
+// from a revision's exported CSVs. The revision's stored schema.json supplies
+// column types so values are quoted/cast correctly. The result is used only as
+// AI reference input (it is never executed locally), so the bar is accurate,
+// plausible SQL rather than a validated idempotent script.
+func synthesizeSQLFromCSV(projectRoot, storagePath, schemaFingerprint, dataDir string) (string, error) {
+	colTypes := loadColumnTypes(projectRoot, storagePath, schemaFingerprint)
+
+	entries, err := os.ReadDir(dataDir)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("reading revision data dir: %w", err)
 	}
-	return string(data), nil
+	var csvNames []string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		if strings.HasSuffix(strings.ToLower(e.Name()), ".csv") {
+			csvNames = append(csvNames, e.Name())
+		}
+	}
+	if len(csvNames) == 0 {
+		return "", fmt.Errorf("revision has no CSV data to refresh from in %s", dataDir)
+	}
+	sort.Strings(csvNames)
+
+	var b strings.Builder
+	totalRows := 0
+	for _, name := range csvNames {
+		table := name[:len(name)-len(".csv")]
+		tableSQL, rows, err := synthesizeTableSQL(filepath.Join(dataDir, name), table, colTypes[table])
+		if err != nil {
+			return "", fmt.Errorf("synthesizing SQL for %s: %w", name, err)
+		}
+		totalRows += rows
+		b.WriteString(tableSQL)
+	}
+
+	if totalRows > csvSynthesisRowWarnThreshold {
+		ui.Warn("refresh is reconstructing %d rows from CSV — the AI request may be slow or use significant quota.", totalRows)
+	}
+
+	return b.String(), nil
+}
+
+// loadColumnTypes loads the revision's schema.json and returns a
+// table -> column -> type lookup. On any failure it returns an empty map; the
+// caller then treats every value as text, which is safe for AI reference SQL.
+func loadColumnTypes(projectRoot, storagePath, schemaFingerprint string) map[string]map[string]string {
+	out := map[string]map[string]string{}
+	if schemaFingerprint == "" {
+		return out
+	}
+	path := scenario.SchemaJSONPath(projectRoot, storagePath, utils.FingerprintShort(schemaFingerprint))
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return out
+	}
+	var schema utils.SchemaJSON
+	if err := json.Unmarshal(data, &schema); err != nil {
+		return out
+	}
+	for _, t := range schema.Tables {
+		cols := map[string]string{}
+		for _, c := range t.Columns {
+			cols[c.Name] = c.Type
+		}
+		out[t.Name] = cols
+	}
+	return out
+}
+
+// synthesizeTableSQL builds a TRUNCATE + INSERT block for one CSV file and
+// returns the SQL plus the number of data rows emitted.
+func synthesizeTableSQL(csvPath, table string, colTypes map[string]string) (string, int, error) {
+	f, err := os.Open(csvPath)
+	if err != nil {
+		return "", 0, err
+	}
+	defer f.Close()
+
+	reader := csv.NewReader(bufio.NewReader(f))
+	reader.FieldsPerRecord = -1
+	header, err := reader.Read()
+	if err == io.EOF {
+		return "", 0, nil
+	}
+	if err != nil {
+		return "", 0, fmt.Errorf("reading header: %w", err)
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "TRUNCATE TABLE %s RESTART IDENTITY CASCADE;\n", quoteSQLIdent(table))
+
+	quotedCols := make([]string, len(header))
+	for i, c := range header {
+		quotedCols[i] = quoteSQLIdent(c)
+	}
+
+	rows := 0
+	for {
+		record, err := reader.Read()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return "", 0, fmt.Errorf("reading row: %w", err)
+		}
+		vals := make([]string, len(record))
+		for i, cell := range record {
+			colType := ""
+			if i < len(header) {
+				colType = colTypes[header[i]]
+			}
+			vals[i] = formatSQLValue(cell, colType)
+		}
+		fmt.Fprintf(&b, "INSERT INTO %s (%s) VALUES (%s);\n",
+			quoteSQLIdent(table), strings.Join(quotedCols, ", "), strings.Join(vals, ", "))
+		rows++
+	}
+	b.WriteString("\n")
+	return b.String(), rows, nil
+}
+
+// quoteSQLIdent wraps a SQL identifier in double quotes, escaping any
+// embedded double quotes.
+func quoteSQLIdent(name string) string {
+	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
+}
+
+// formatSQLValue renders a CSV cell as a SQL literal. The export format writes
+// SQL NULL as the literal string "NULL"; numeric/boolean columns are emitted
+// unquoted, everything else is single-quoted with embedded quotes doubled.
+func formatSQLValue(cell, colType string) string {
+	if cell == "NULL" {
+		return "NULL"
+	}
+	if isUnquotedSQLType(colType) {
+		// An empty cell in a numeric/boolean column means SQL NULL — emitting
+		// it unquoted would produce invalid SQL.
+		if cell == "" {
+			return "NULL"
+		}
+		return cell
+	}
+	return "'" + strings.ReplaceAll(cell, "'", "''") + "'"
+}
+
+// isUnquotedSQLType reports whether values of the given column type can be
+// emitted without surrounding quotes (numbers and booleans).
+func isUnquotedSQLType(colType string) bool {
+	t := strings.ToLower(strings.TrimSpace(colType))
+	switch t {
+	case "smallint", "integer", "int", "int2", "int4", "int8", "bigint",
+		"numeric", "decimal", "real", "double precision", "float", "float4", "float8",
+		"boolean", "bool", "serial", "bigserial", "smallserial":
+		return true
+	}
+	return false
 }
 
 // buildFKGraph parses a schema JSON blob and returns a map from each table

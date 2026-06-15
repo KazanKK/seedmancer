@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/KazanKK/seedmancer/internal/scenario"
+	"github.com/KazanKK/seedmancer/internal/schemahistory"
 	"github.com/KazanKK/seedmancer/internal/ui"
 	utils "github.com/KazanKK/seedmancer/internal/utils"
 
@@ -23,8 +24,11 @@ type listEntry struct {
 	Scenario string `json:"scenario"`
 	Latest   string `json:"latest,omitempty"`
 	Schema   string `json:"schema,omitempty"`
-	// DB is set when --check is passed: "matched" or "outdated".
-	DB      string `json:"db,omitempty"`
+	// DB is populated when the live DB can be reached: "current" or "outdated".
+	DB string `json:"db,omitempty"`
+	// Drift is a compact diff summary between the scenario schema and the current
+	// DB schema, e.g. "+1 tbl +3 cols".
+	Drift    string `json:"drift,omitempty"`
 	Updated  string `json:"updated,omitempty"`
 	Services string `json:"services,omitempty"`
 }
@@ -149,9 +153,11 @@ func renderScenarioTable(entries []listEntry) {
 	}
 
 	table := tablewriter.NewWriter(os.Stdout)
-	headers := []string{"Scenario", "Latest", "Schema", "Updated", "Services"}
+	var headers []string
 	if showDB {
-		headers = []string{"Scenario", "Latest", "Schema", "DB", "Updated", "Services"}
+		headers = []string{"Scenario", "Schema Status", "Drift", "Updated"}
+	} else {
+		headers = []string{"Scenario", "Schema", "Updated"}
 	}
 	table.SetHeader(headers)
 	table.SetBorder(false)
@@ -159,41 +165,34 @@ func renderScenarioTable(entries []listEntry) {
 	table.SetHeaderAlignment(tablewriter.ALIGN_LEFT)
 	table.SetAlignment(tablewriter.ALIGN_LEFT)
 	for _, e := range entries {
-		dbCell := ""
 		if showDB {
+			dbCell := "—"
 			switch e.DB {
-			case "matched":
-				dbCell = ui.Green("matched")
+			case "current":
+				dbCell = ui.Green("current")
 			case "outdated":
 				dbCell = ui.Yellow("outdated")
-			default:
-				dbCell = "—"
 			}
-		}
-		if showDB {
 			table.Append([]string{
 				e.Scenario,
-				defaultDash(e.Latest),
-				defaultDash(e.Schema),
 				dbCell,
+				defaultDash(e.Drift),
 				defaultDash(e.Updated),
-				defaultDash(e.Services),
 			})
 		} else {
 			table.Append([]string{
 				e.Scenario,
-				defaultDash(e.Latest),
 				defaultDash(e.Schema),
 				defaultDash(e.Updated),
-				defaultDash(e.Services),
 			})
 		}
 	}
 	table.Render()
 }
 
-// annotateEntriesWithDBStatus fingerprints the live DB and fills the DB field
-// of each entry with "matched" or "outdated".
+// annotateEntriesWithDBStatus fingerprints the live DB and fills the DB and
+// Drift fields of each entry. The live DB is the single source of truth:
+// a scenario is either "current" (schema matches live DB) or "outdated".
 func annotateEntriesWithDBStatus(entries []listEntry, env, dbURL string) ([]listEntry, error) {
 	configPath, err := utils.FindConfigFile()
 	if err != nil {
@@ -203,25 +202,38 @@ func annotateEntriesWithDBStatus(entries []listEntry, env, dbURL string) ([]list
 	if err != nil {
 		return entries, err
 	}
+	projectRoot := filepath.Dir(configPath)
+
 	target, err := pickExportTarget(cfg, env, dbURL)
 	if err != nil {
 		return entries, err
 	}
-	// Use the raw fingerprint (before any stripping) because stored revision
-	// fingerprints were also computed over the full schema at export time.
-	liveFP, _, err := fingerprintCurrentDB(target)
+	liveFP, liveJSON, err := fingerprintCurrentDB(target)
 	if err != nil {
 		return entries, err
 	}
+
+	tryUpdateSchemaHistory(projectRoot, cfg.StoragePath, liveFP)
+	reportLiveSchema(liveFP)
+
 	liveShort := utils.FingerprintShort(liveFP)
+
 	for i := range entries {
 		if entries[i].Schema == "" {
 			continue
 		}
 		if entries[i].Schema == liveShort {
-			entries[i].DB = "matched"
-		} else {
-			entries[i].DB = "outdated"
+			entries[i].DB = "current"
+			continue
+		}
+		entries[i].DB = "outdated"
+
+		// Compute drift between stored schema.json and current live schema.
+		storedJSONPath := utils.SchemaJSONPath(projectRoot, cfg.StoragePath, entries[i].Schema)
+		if storedJSON, rerr := os.ReadFile(storedJSONPath); rerr == nil {
+			if d, derr := schemahistory.SummarizeSchemaDiff(storedJSON, liveJSON); derr == nil {
+				entries[i].Drift = d.String()
+			}
 		}
 	}
 	return entries, nil

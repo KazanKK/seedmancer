@@ -174,12 +174,19 @@ type GetDatasetSQLOutput struct {
 	Path     string `json:"path"`
 	Purpose  string `json:"purpose,omitempty"`
 	SQL      string `json:"sql"`
+	// Synthesized is true when the SQL was inferred from the revision's exported
+	// CSVs rather than loaded from a stored dataset.sql. Treat it as reference
+	// data — rewrite it as a fresh full script before calling generate_dataset_local.
+	Synthesized bool `json:"synthesized,omitempty"`
 }
 
-// RunGetDatasetSQL returns the dataset.sql file that was saved when the
-// revision was created with generate_dataset_local. Returns an error when
-// the revision has no dataset.sql — e.g. it was produced via export_database
-// or pulled from cloud storage that didn't carry one.
+// RunGetDatasetSQL returns a SQL representation of a scenario revision.
+// For revisions created by generate_dataset_local or refresh, the stored
+// dataset.sql is returned verbatim. For revisions created by export_database
+// or pull_dataset (which have no dataset.sql), a TRUNCATE+INSERT script is
+// synthesized from the revision's exported CSVs so the MCP AI can use it as
+// a reference without reading raw CSV files. The Synthesized flag in the
+// output distinguishes the two cases.
 func RunGetDatasetSQL(_ context.Context, in GetDatasetSQLInput) (GetDatasetSQLOutput, error) {
 	configPath, err := utils.FindConfigFile()
 	if err != nil {
@@ -200,28 +207,38 @@ func RunGetDatasetSQL(_ context.Context, in GetDatasetSQLInput) (GetDatasetSQLOu
 		return GetDatasetSQLOutput{}, err
 	}
 
-	sqlPath := DatasetSQLPath(rev.RevDir)
-	data, err := os.ReadFile(sqlPath)
-	if os.IsNotExist(err) {
-		return GetDatasetSQLOutput{}, fmt.Errorf(
-			"revision %s of scenario %q has no %s — it was likely produced by export_database "+
-				"or pull_dataset rather than generate_dataset_local",
-			rev.RevID, scenarioPath, datasetSQLName,
-		)
-	}
-	if err != nil {
-		return GetDatasetSQLOutput{}, fmt.Errorf("reading %s: %w", sqlPath, err)
-	}
 	out := GetDatasetSQLOutput{
 		Scenario: scenarioPath,
 		Revision: rev.RevID,
-		Path:     sqlPath,
-		SQL:      string(data),
 	}
+
 	// Include the scenario's saved purpose so rewrites keep the data's intent.
 	if m, mErr := scenario.ReadManifest(scenario.ScenarioDir(projectRoot, cfg.StoragePath, scenarioPath)); mErr == nil {
 		out.Purpose = strings.TrimSpace(m.Prompt)
 	}
+
+	sqlPath := DatasetSQLPath(rev.RevDir)
+	data, err := os.ReadFile(sqlPath)
+	if err == nil {
+		out.Path = sqlPath
+		out.SQL = string(data)
+		return out, nil
+	}
+	if !os.IsNotExist(err) {
+		return GetDatasetSQLOutput{}, fmt.Errorf("reading %s: %w", sqlPath, err)
+	}
+
+	// No dataset.sql — synthesize SQL from the revision's exported CSVs so
+	// the AI gets a compact SQL reference instead of reading raw CSV files.
+	sql, synthErr := synthesizeSQLFromCSV(projectRoot, cfg.StoragePath, rev.Manifest.SchemaFingerprint, rev.DataDir)
+	if synthErr != nil {
+		return GetDatasetSQLOutput{}, fmt.Errorf(
+			"revision %s of scenario %q has no %s and CSV synthesis failed: %w",
+			rev.RevID, scenarioPath, datasetSQLName, synthErr,
+		)
+	}
+	out.SQL = sql
+	out.Synthesized = true
 	return out, nil
 }
 
@@ -1212,6 +1229,9 @@ func RunExport(_ context.Context, in ExportInput) (ExportOutput, error) {
 		return ExportOutput{}, err
 	}
 
+	tryUpdateSchemaHistory(projectRoot, cfg.StoragePath, fingerprint)
+	reportLiveSchema(fingerprint)
+
 	var success bool
 	var revRoot string // set once revision dir is created; removed on failure
 	defer func() {
@@ -1383,15 +1403,21 @@ func RunGenerate(ctx context.Context, in GenerateInput) (GenerateOutput, error) 
 	}
 
 	// If --inherit is given, validate that the base scenario resolves before
-	// spending an AI call. RunGenerateLocal seeds the base itself later.
+	// spending an AI call, then load its SQL so the AI can preserve existing
+	// rows while adding new ones. RunGenerateLocal seeds the base itself later.
+	var inheritedSQL string
 	if strings.TrimSpace(in.Inherit) != "" {
 		basePath, err := scenario.Normalize(in.Inherit)
 		if err != nil {
 			return GenerateOutput{}, fmt.Errorf("invalid inherit scenario: %w", err)
 		}
-		if _, err := resolveScenarioRevision(projectRoot, cfg.StoragePath, basePath, ""); err != nil {
+		baseRev, err := resolveScenarioRevision(projectRoot, cfg.StoragePath, basePath, "")
+		if err != nil {
 			return GenerateOutput{}, fmt.Errorf("resolving inherit base %q: %w", basePath, err)
 		}
+		// Non-fatal: if the SQL cannot be resolved the AI still generates from
+		// schema + prompt alone (same behaviour as before this change).
+		inheritedSQL, _ = resolveExistingSQL(projectRoot, cfg.StoragePath, baseRev)
 	}
 
 	apiSchema, err := buildAPISchema(raw, cfg.ExcludeTables)
@@ -1400,7 +1426,7 @@ func RunGenerate(ctx context.Context, in GenerateInput) (GenerateOutput, error) 
 	}
 
 	// Call /generate-sql — synchronous, returns a full SQL script directly.
-	generatedSQL, err := callGenerateSQL(ctx, utils.GetBaseURL(), token, apiSchema, prompt)
+	generatedSQL, err := callGenerateSQL(ctx, utils.GetBaseURL(), token, apiSchema, prompt, inheritedSQL)
 	if err != nil {
 		return GenerateOutput{}, err
 	}
@@ -1439,12 +1465,15 @@ func RunGenerate(ctx context.Context, in GenerateInput) (GenerateOutput, error) 
 }
 
 // callGenerateSQL calls the /generate-sql endpoint and returns the full
-// idempotent SQL script produced by the AI.
-func callGenerateSQL(ctx context.Context, baseURL, token string, schema generateSchema, prompt string) (string, error) {
+// idempotent SQL script produced by the AI. existingSql is optional; when
+// non-empty the backend includes it as context so the AI preserves inherited
+// rows while adding the new ones requested in prompt.
+func callGenerateSQL(ctx context.Context, baseURL, token string, schema generateSchema, prompt, existingSql string) (string, error) {
 	payload := struct {
-		Schema generateSchema `json:"schema"`
-		Prompt string         `json:"prompt,omitempty"`
-	}{Schema: schema, Prompt: prompt}
+		Schema      generateSchema `json:"schema"`
+		Prompt      string         `json:"prompt,omitempty"`
+		ExistingSQL string         `json:"existingSql,omitempty"`
+	}{Schema: schema, Prompt: prompt, ExistingSQL: existingSql}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return "", err

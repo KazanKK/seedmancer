@@ -173,18 +173,17 @@ func runLogin(c *cli.Context) error {
 }
 
 // warnIfEnvTokenShadows nudges the user when SEEDMANCER_API_TOKEN is set in
-// the environment to a value that differs from the credentials we just
-// saved. The credentials file now ranks above the env var in
-// ResolveAPIToken, so the saved token will actually be used — but we still
-// want the user to know about the mismatch so a future `unset` doesn't
-// surprise them.
+// the environment to a value that differs from the credentials we just saved.
+// The credentials file now takes precedence over the env var, so login
+// works immediately — but pointing out the stale env var helps the user
+// keep their shell tidy.
 func warnIfEnvTokenShadows(saved string) {
 	envTok := strings.TrimSpace(os.Getenv("SEEDMANCER_API_TOKEN"))
 	if envTok == "" || envTok == strings.TrimSpace(saved) {
 		return
 	}
 	ui.Warn("SEEDMANCER_API_TOKEN is set in your shell to a different value.")
-	ui.Info("The newly-saved credentials file will be used instead. To remove the stale env var:")
+	ui.Info("Your new credentials are active. To clean up the stale env var:")
 	ui.Info("  unset SEEDMANCER_API_TOKEN")
 }
 

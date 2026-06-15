@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/KazanKK/seedmancer/internal/scenario"
+	"github.com/KazanKK/seedmancer/internal/schemahistory"
 	"github.com/KazanKK/seedmancer/internal/schemadiff"
 	"github.com/KazanKK/seedmancer/internal/ui"
 	utils "github.com/KazanKK/seedmancer/internal/utils"
@@ -68,6 +69,9 @@ func CheckCommand() *cli.Command {
 			ui.KeyValue("Status: ", out.Status)
 			ui.KeyValue("Dataset schema: ", out.DatasetSchema)
 			ui.KeyValue("Current schema: ", out.CurrentSchema)
+			if out.BehindStr != "" {
+				ui.KeyValue("Behind: ", out.BehindStr)
+			}
 			if len(out.Changes) == 0 {
 				ui.Info("Schemas match — safe to seed.")
 				return nil
@@ -76,6 +80,10 @@ func CheckCommand() *cli.Command {
 			ui.Info("Changes:")
 			for _, c := range out.Changes {
 				ui.KeyValue("  ", c)
+			}
+			if out.Drift != "" && out.Drift != "-" {
+				fmt.Println()
+				ui.KeyValue("Drift summary: ", out.Drift)
 			}
 			fmt.Println()
 			ui.Warn("Recommendation: create a new revision by exporting again:")
@@ -103,6 +111,11 @@ type CheckOutput struct {
 	DatasetSchema string   `json:"datasetSchema"`
 	CurrentSchema string   `json:"currentSchema"`
 	Changes       []string `json:"changes,omitempty"`
+	// Behind is the number of schema versions the dataset is behind the
+	// current DB schema. Zero means matched or unknown.
+	Behind    int    `json:"behind,omitempty"`
+	BehindStr string `json:"behindStr,omitempty"` // "3 schemas", "unknown", or ""
+	Drift     string `json:"drift,omitempty"`     // compact diff summary
 }
 
 // RunCheck does the heavy lifting for the `check` command.
@@ -136,6 +149,9 @@ func RunCheck(_ context.Context, in CheckInput) (CheckOutput, error) {
 		return CheckOutput{}, err
 	}
 
+	tryUpdateSchemaHistory(projectRoot, cfg.StoragePath, currentFP)
+	reportLiveSchema(currentFP)
+
 	out := CheckOutput{
 		Scenario:      scenarioPath,
 		Revision:      rev.RevID,
@@ -148,6 +164,17 @@ func RunCheck(_ context.Context, in CheckInput) (CheckOutput, error) {
 	}
 
 	out.Status = "outdated"
+
+	// Populate behind/drift using schema history.
+	histPath := utils.SchemaHistoryPath(projectRoot, cfg.StoragePath)
+	if hist, herr := schemahistory.LoadSchemaHistory(histPath); herr == nil {
+		if n, ok := schemahistory.VersionsBehind(hist, rev.Manifest.SchemaFingerprint, currentFP); ok {
+			out.Behind = n
+			out.BehindStr = pluralSchemas(n)
+		} else {
+			out.BehindStr = "unknown"
+		}
+	}
 
 	storedJSONPath := scenario.SchemaJSONPath(projectRoot, cfg.StoragePath, utils.FingerprintShort(rev.Manifest.SchemaFingerprint))
 	storedJSON, err := os.ReadFile(storedJSONPath)
@@ -164,5 +191,18 @@ func RunCheck(_ context.Context, in CheckInput) (CheckOutput, error) {
 	for _, c := range changes {
 		out.Changes = append(out.Changes, c.String())
 	}
+
+	if d, derr := schemahistory.SummarizeSchemaDiff(storedJSON, currentJSON); derr == nil {
+		out.Drift = d.String()
+	}
+
 	return out, nil
+}
+
+// pluralSchemas returns "N schema" or "N schemas".
+func pluralSchemas(n int) string {
+	if n == 1 {
+		return "1 schema"
+	}
+	return fmt.Sprintf("%d schemas", n)
 }
