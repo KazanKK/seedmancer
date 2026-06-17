@@ -89,36 +89,92 @@ revision as a permanent reference for the next generation round.
 
 const docPlaywrightRecipe = `# Reset DB before Playwright
 
-Wire Seedmancer into Playwright's ` + "`globalSetup`" + ` so every run starts
-from a known dataset.
+Seed the database explicitly inside your test files using Playwright hooks.
+Every run starts from the same deterministic snapshot — no hidden setup files.
 
-### playwright.config.ts
+## Pattern 1 — beforeAll: seed once for the file
+
+Use when tests read but do not mutate the database.
 
 ` + "```ts" + `
-import { defineConfig } from "@playwright/test";
-export default defineConfig({
-  globalSetup: "./tests/global-setup.ts",
-  // …
+// tests/api/users.spec.ts
+import { spawnSync } from "node:child_process";
+import { test, expect } from "@playwright/test";
+
+test.beforeAll(() => {
+  const res = spawnSync("seedmancer", ["seed", "myapp/api-test", "--yes"], {
+    stdio: "inherit",
+  });
+  if (res.status !== 0) throw new Error("seedmancer seed failed");
+});
+
+test("GET /api/users returns seeded rows", async ({ request }) => {
+  const res = await request.get("/api/users");
+  expect(res.ok()).toBeTruthy();
 });
 ` + "```" + `
 
-### tests/global-setup.ts
+## Pattern 2 — beforeEach: reset before every test
+
+Use when tests write to the database and cannot share state.
 
 ` + "```ts" + `
+// tests/api/signup.spec.ts
 import { spawnSync } from "node:child_process";
+import { test, expect } from "@playwright/test";
 
-export default async function globalSetup() {
-  if (process.env.SEEDMANCER_RESET_DATABASE === "false") return;
-  const res = spawnSync(
-    "seedmancer",
-    ["seed", "api-test", "--yes"],
-    { stdio: "inherit" },
-  );
+test.beforeEach(() => {
+  const res = spawnSync("seedmancer", ["seed", "myapp/api-test", "--yes"], {
+    stdio: "inherit",
+  });
   if (res.status !== 0) throw new Error("seedmancer seed failed");
-}
+});
+
+test("creates a new user", async ({ request }) => {
+  const res = await request.post("/api/users", {
+    data: { email: "new@example.com" },
+  });
+  expect(res.status()).toBe(201);
+});
 ` + "```" + `
 
-### Agents calling this through MCP
+## Pattern 3 — different scenario per describe group
+
+Use when different test groups need different starting states.
+
+` + "```ts" + `
+// tests/e2e/billing.spec.ts
+import { spawnSync } from "node:child_process";
+import { test, expect } from "@playwright/test";
+
+test.describe("Pro plan", () => {
+  test.beforeAll(() => {
+    spawnSync("seedmancer", ["seed", "billing/pro", "--yes"], {
+      stdio: "inherit",
+    });
+  });
+
+  test("shows active subscription", async ({ page }) => {
+    await page.goto("/billing");
+    await expect(page.getByText("Pro — active")).toBeVisible();
+  });
+});
+
+test.describe("Free plan", () => {
+  test.beforeAll(() => {
+    spawnSync("seedmancer", ["seed", "billing/free", "--yes"], {
+      stdio: "inherit",
+    });
+  });
+
+  test("shows upgrade prompt", async ({ page }) => {
+    await page.goto("/billing");
+    await expect(page.getByText("Upgrade to Pro")).toBeVisible();
+  });
+});
+` + "```" + `
+
+## Agents calling this through MCP
 
 Prefer the ` + "`seed_database`" + ` tool over shelling out. Pass:
 
