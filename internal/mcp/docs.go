@@ -38,6 +38,37 @@ Run this sequence once to set everything up:
    into the target env.
 5. Run the actual test command outside MCP (e.g. Playwright, pytest).
 
+## Environment markers (env-specific values)
+
+If a CSV cell should contain a different value per environment (e.g. a
+Supabase Auth user ID or org ID that differs between local and staging),
+write ` + "`@env:KEY_NAME`" + ` as the value in your SQL INSERT:
+
+` + "```sql" + `
+INSERT INTO users (id, email) VALUES ('@env:FIXED_USER_ID', 'test@example.com');
+` + "```" + `
+
+Seedmancer saves ` + "`@env:FIXED_USER_ID`" + ` literally to CSV. At seed time it is
+replaced with the value from ` + "`environments.<env>.values`" + ` in seedmancer.yaml,
+or from the OS environment variable ` + "`FIXED_USER_ID`" + ` (fallback for CI).
+The original CSV is never modified.
+
+Configure in seedmancer.yaml:
+
+` + "```yaml" + `
+environments:
+  local:
+    database_url: postgres://localhost:5432/mydb
+    values:
+      FIXED_USER_ID: "11111111-1111-1111-1111-111111111111"
+  staging:
+    database_url: postgres://staging-host/mydb
+    values:
+      FIXED_USER_ID: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+` + "```" + `
+
+Read ` + "`seedmancer://docs/env-markers`" + ` for the full reference.
+
 ## Pinning for CI
 
 Seedmancer always uses the latest revision. Use ` + "`--revision rNNN`" + ` to lock onto
@@ -433,4 +464,109 @@ re-exported after the migration instead.
 ` + "`dataset.sql`" + ` is never deleted and stays on every revision as a permanent
 reference. The rewritten SQL from step 3 becomes the new ` + "`dataset.sql`" + ` after
 ` + "`generate_dataset_local`" + ` completes.
+`
+
+const docEnvMarkers = `# Environment markers
+
+Environment markers let a single CSV dataset work across multiple environments
+where certain IDs differ — for example, a Supabase Auth user ID that is
+different between local and staging.
+
+## Marker syntax
+
+` + "```" + `
+@env:KEY_NAME
+` + "```" + `
+
+Rules:
+- Must be the **entire cell value** — partial interpolation is not supported.
+- ` + "`KEY_NAME`" + ` must use uppercase letters, digits, and underscores only.
+- Examples: ` + "`@env:FIXED_USER_ID`" + `, ` + "`@env:ADMIN_USER_ID`" + `, ` + "`@env:ORG_ID_1`" + `
+
+## How to use markers in generated data
+
+When writing SQL for ` + "`generate_dataset_local`" + `, use the marker as the value:
+
+` + "```sql" + `
+TRUNCATE TABLE users RESTART IDENTITY CASCADE;
+INSERT INTO users (id, email, name)
+VALUES ('@env:FIXED_USER_ID', 'test@example.com', 'Test User');
+` + "```" + `
+
+Seedmancer saves the literal string ` + "`@env:FIXED_USER_ID`" + ` to CSV. The marker
+is replaced at seed time — not at generate time.
+
+## Config
+
+Add a ` + "`values:`" + ` map to each environment in seedmancer.yaml:
+
+` + "```yaml" + `
+environments:
+  local:
+    database_url: postgres://localhost:5432/mydb
+    values:
+      FIXED_USER_ID: "11111111-1111-1111-1111-111111111111"
+      ADMIN_USER_ID: "22222222-2222-2222-2222-222222222222"
+
+  staging:
+    database_url: postgres://staging-host/mydb
+    values:
+      FIXED_USER_ID: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+      ADMIN_USER_ID: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+` + "```" + `
+
+## Value lookup order
+
+For each ` + "`@env:KEY`" + ` marker, Seedmancer checks in this order:
+
+1. ` + "`environments.<env>.values.KEY`" + ` in seedmancer.yaml
+2. OS environment variable ` + "`KEY`" + ` — fallback for CI / values you do not want committed
+3. Hard error if neither is set
+
+The yaml value always wins when both are present.
+
+## Seeding with markers
+
+` + "```bash" + `
+seedmancer seed base --env local    # resolves from local values
+seedmancer seed base --env staging  # resolves from staging values
+seedmancer seed base --env local,staging  # each env resolves its own values
+` + "```" + `
+
+Via MCP:
+` + "```" + `
+seed_database(scenario="base", env="staging", yes=true)
+` + "```" + `
+
+## Missing value error
+
+If a marker key is missing from both the yaml config and OS env, seeding fails
+with a clear error:
+
+` + "```" + `
+Missing environment value: FIXED_USER_ID
+
+Environment: staging
+Marker:      @env:FIXED_USER_ID
+File:        users.csv
+Column:      id
+
+Add it to your seedmancer config:
+
+  environments:
+    staging:
+      values:
+        FIXED_USER_ID: "..."
+
+Or export it as an environment variable before running seed:
+
+  export FIXED_USER_ID="..."
+` + "```" + `
+
+## Safety
+
+- The original revision CSVs are **never modified**.
+- Replacement happens only in a temporary per-env directory that is deleted
+  after seeding completes.
+- Markers in column headers are ignored (replacement only applies to data rows).
 `

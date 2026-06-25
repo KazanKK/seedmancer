@@ -191,4 +191,18 @@ func registerResources(s *mcp.Server) {
 			}},
 		}, nil
 	})
+
+	s.AddResource(&mcp.Resource{
+		URI:         "seedmancer://docs/env-markers",
+		Name:        "Environment markers",
+		Title:       "Environment-specific value markers (@env:KEY)",
+		Description: "How to use @env:KEY markers so one CSV dataset works across environments with different IDs (e.g. Supabase Auth user IDs, org IDs).",
+		MIMEType:    "text/markdown",
+	}, func(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
+		return &mcp.ReadResourceResult{
+			Contents: []*mcp.ResourceContents{{
+				URI: req.Params.URI, MIMEType: "text/markdown", Text: docEnvMarkers,
+			}},
+		}, nil
+	})
 }

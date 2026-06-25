@@ -15,6 +15,7 @@ import (
 	"time"
 
 	db "github.com/KazanKK/seedmancer/database"
+	"github.com/KazanKK/seedmancer/internal/envmarker"
 	"github.com/KazanKK/seedmancer/internal/scenario"
 	"github.com/KazanKK/seedmancer/internal/schemahistory"
 	"github.com/KazanKK/seedmancer/internal/ui"
@@ -273,6 +274,82 @@ func liftDatasetSQL(dataDir, revDir string) error {
 		return err
 	}
 	return os.Remove(src)
+}
+
+// resolveMarkersDir returns a directory suitable for passing to RestoreFromCSV
+// after resolving all @env:KEY markers in CSV files.
+//
+// Fast path — no markers anywhere in the CSV files: returns srcDir unchanged
+// with a no-op cleanup so callers pay zero overhead in the common case.
+//
+// Slow path — markers present: creates a sibling temp dir, copies every
+// non-CSV file (schema sidecars) via linkOrCopy, writes resolved CSV files
+// for every *.csv file, and returns the new dir with a cleanup func.
+//
+// envName is included in error messages when a key is missing.
+func resolveMarkersDir(srcDir string, values envmarker.EnvironmentValues, envName string) (string, func(), error) {
+	entries, err := os.ReadDir(srcDir)
+	if err != nil {
+		return "", func() {}, fmt.Errorf("reading restore dir: %w", err)
+	}
+
+	// First pass: collect CSV paths and check whether any markers exist.
+	// Use HasAnyMarkerInFile so we parse without resolving — avoids false
+	// errors when values is nil/empty and a marker happens to exist.
+	var csvPaths []string
+	anyMarker := false
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(strings.ToLower(e.Name()), ".csv") {
+			continue
+		}
+		p := filepath.Join(srcDir, e.Name())
+		csvPaths = append(csvPaths, p)
+		if !anyMarker {
+			if found, _ := envmarker.HasAnyMarkerInFile(p); found {
+				anyMarker = true
+			}
+		}
+	}
+
+	if !anyMarker {
+		return srcDir, func() {}, nil
+	}
+
+	// Markers present — build a per-env resolved copy.
+	tmp, err := os.MkdirTemp("", "seedmancer-env-*")
+	if err != nil {
+		return "", func() {}, fmt.Errorf("creating env temp dir: %w", err)
+	}
+	cleanup := func() { _ = os.RemoveAll(tmp) }
+
+	// Copy non-CSV files (schema sidecars) unchanged.
+	for _, e := range entries {
+		if e.IsDir() || strings.HasSuffix(strings.ToLower(e.Name()), ".csv") {
+			continue
+		}
+		src := filepath.Join(srcDir, e.Name())
+		dst := filepath.Join(tmp, e.Name())
+		if err := linkOrCopy(src, dst); err != nil {
+			cleanup()
+			return "", func() {}, fmt.Errorf("staging sidecar %s: %w", e.Name(), err)
+		}
+	}
+
+	// Write resolved CSV files.
+	for _, csvPath := range csvPaths {
+		records, _, err := envmarker.ResolveCSVFile(csvPath, values, envName)
+		if err != nil {
+			cleanup()
+			return "", func() {}, err
+		}
+		dst := filepath.Join(tmp, filepath.Base(csvPath))
+		if err := envmarker.WriteCSV(dst, records); err != nil {
+			cleanup()
+			return "", func() {}, fmt.Errorf("writing resolved %s: %w", filepath.Base(csvPath), err)
+		}
+	}
+
+	return tmp, cleanup, nil
 }
 
 // reportLiveSchema notifies the Seedmancer cloud of the current live DB

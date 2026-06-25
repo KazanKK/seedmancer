@@ -47,6 +47,7 @@ Cloud API origin defaults to `https://api.seedmancer.dev`. Do not use `api_url` 
 | `internal/mcp/` | MCP server: tools, resources, prompts, docs. |
 | `internal/mcpcmd/` | `seedmancer mcp` subcommand (outside `cmd/` to avoid an import cycle with `internal/mcp`). |
 | `internal/utils/` | Config, token resolution, schema fingerprint helpers. |
+| `internal/envmarker/` | `@env:KEY` marker detection and resolution for CSV data during seeding. Pure logic, no I/O dependencies on the CLI. |
 | `internal/ui/` | Human-facing spinners, colors, logging. Never imported from MCP paths — stdio owns stdout. |
 | `database/` | Postgres-specific export/restore glue. |
 
@@ -61,6 +62,23 @@ Cloud API origin defaults to `https://api.seedmancer.dev`. Do not use `api_url` 
 - Tests sit alongside the code they exercise; run `go test ./...` (plus
   `GOTOOLCHAIN=auto` if your system Go is older than the one in
   `go.mod`).
+
+## Environment markers
+
+CSV cells can contain `@env:KEY_NAME` markers that are replaced at seed time
+with values from `environments.<env>.values` in seedmancer.yaml, or the OS
+environment variable `KEY_NAME` (fallback).
+
+When modifying the seed path (`cmd/seed.go`, `cmd/runners.go`):
+- Marker resolution happens in `resolveMarkersDir` (`cmd/scenario_helpers.go`)
+  **before** `RestoreFromCSV`, via the `internal/envmarker` package.
+- `resolveMarkersDir` is a no-op when no markers are present — zero overhead
+  for the common case.
+- Original revision CSVs are never modified. Resolution writes to a per-env
+  temp dir that is cleaned up after seeding.
+
+When adding new `EnvConfig` fields to `internal/utils/config.go`, check whether
+they affect `resolveMarkersDir`'s value lookup.
 
 ## Quick verification loop
 

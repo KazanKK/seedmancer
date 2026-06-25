@@ -51,6 +51,11 @@ type Config struct {
 // EnvConfig is one named target inside `environments:`.
 type EnvConfig struct {
 	DatabaseURL string `yaml:"database_url"`
+	// Values holds environment-specific substitution values for @env:KEY markers
+	// found in CSV data during seeding. Keys must be uppercase letters, digits,
+	// and underscores. If a key is absent here, Seedmancer falls back to
+	// os.Getenv(KEY) before failing with a clear error.
+	Values map[string]string `yaml:"values,omitempty"`
 }
 
 // NamedEnv pairs a resolved env with its name so callers can render banners

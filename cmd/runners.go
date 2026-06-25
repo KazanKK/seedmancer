@@ -840,6 +840,40 @@ so your SQL only has to express the delta.
 **Never write the SQL to a file in the project directory.** ` + "`generate-local`" + `
 refuses ` + "`--sql-file`" + ` paths inside the project — pipe via stdin instead.
 **Never mention the SQL content or generation details to the user.**
+
+## Environment markers (env-specific values in CSV)
+
+If a column should hold a different value per environment (e.g. a Supabase Auth
+user ID, org ID, or any UUID from an external system), write ` + "`@env:KEY_NAME`" + `
+as the SQL INSERT value — **not a hardcoded UUID**:
+
+` + "```sql" + `
+INSERT INTO users (id, email) VALUES ('@env:FIXED_USER_ID', 'test@example.com');
+` + "```" + `
+
+Seedmancer saves the literal marker to CSV. At seed time the marker is replaced
+with the value from ` + "`environments.<env>.values`" + ` in seedmancer.yaml, or the OS
+environment variable ` + "`FIXED_USER_ID`" + ` (fallback for CI). The original CSV is
+never modified.
+
+Configure in seedmancer.yaml:
+
+` + "```yaml" + `
+environments:
+  local:
+    values:
+      FIXED_USER_ID: "11111111-1111-1111-1111-111111111111"
+  staging:
+    values:
+      FIXED_USER_ID: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+` + "```" + `
+
+Seed with the env flag so markers are resolved:
+` + "```" + `
+seedmancer seed base --env local    # or: seed_database(scenario="base", env="local")
+` + "```" + `
+
+Read ` + "`seedmancer://docs/env-markers`" + ` for the full reference.
 `
 
 // claudeMdBlock is appended to (or used to replace an existing block in)
@@ -903,6 +937,19 @@ When asked to create, generate, or seed test/fixture data:
   ` + "```" + `
   ` + "`generate-local`" + ` rejects ` + "`--sql-file`" + ` paths inside the project; always pipe.
 - Simply say "Generating test data…" and report the result.
+- **Environment-specific IDs** (Supabase Auth user IDs, org IDs, any UUID from an
+  external system): write ` + "`@env:KEY_NAME`" + ` in the SQL INSERT instead of a hardcoded
+  UUID. Seedmancer saves the marker to CSV and replaces it at seed time from
+  ` + "`environments.<env>.values.KEY_NAME`" + ` in seedmancer.yaml, or the OS env var
+  ` + "`KEY_NAME`" + `. Configure:
+  ` + "```yaml" + `
+  environments:
+    local:
+      values:
+        FIXED_USER_ID: "11111111-1111-1111-1111-111111111111"
+  ` + "```" + `
+  Seed with ` + "`seedmancer seed <scenario> --env local`" + ` so markers are resolved.
+  Original CSVs are never modified. Read ` + "`seedmancer://docs/env-markers`" + `.
 <!-- seedmancer:end -->`
 
 type InstallAgentRulesInput struct {
@@ -1134,6 +1181,14 @@ func seedOneEnvQuiet(target utils.NamedEnv, mergedDir string, yes bool, scenario
 		msg := fmt.Sprintf("confirmation required to seed %q @ %s into %q — set yes:true to confirm", scenarioPath, revID, dest)
 		return seedResult{Env: dest, Err: fmt.Errorf("%s", msg), Duration: time.Since(start)}
 	}
+
+	// Resolve @env:KEY markers per env without mutating the shared mergedDir.
+	restoreDir, cleanupResolved, err := resolveMarkersDir(mergedDir, target.Values, target.Name)
+	if err != nil {
+		return seedResult{Env: dest, Err: err, Duration: time.Since(start)}
+	}
+	defer cleanupResolved()
+
 	manager, normalizedURL, err := db.NewManager(target.DatabaseURL)
 	if err != nil {
 		return seedResult{Env: dest, Err: err, Duration: time.Since(start)}
@@ -1141,7 +1196,7 @@ func seedOneEnvQuiet(target utils.NamedEnv, mergedDir string, yes bool, scenario
 	if err := manager.ConnectWithDSN(normalizedURL); err != nil {
 		return seedResult{Env: dest, Err: fmt.Errorf("connecting: %v", err), Duration: time.Since(start)}
 	}
-	if err := manager.RestoreFromCSV(mergedDir); err != nil {
+	if err := manager.RestoreFromCSV(restoreDir); err != nil {
 		return seedResult{Env: dest, Err: err, Duration: time.Since(start)}
 	}
 	return seedResult{Env: dest, Duration: time.Since(start)}

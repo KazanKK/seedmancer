@@ -243,6 +243,15 @@ func seedOneEnv(target utils.NamedEnv, mergedDir, revID, scenarioPath string, sk
 		}
 	}
 
+	// Resolve @env:KEY markers into a per-env temp dir so each env gets its
+	// own substituted copies without mutating the shared mergedDir or the
+	// original revision CSVs.
+	restoreDir, cleanupResolved, err := resolveMarkersDir(mergedDir, target.Values, target.Name)
+	if err != nil {
+		return seedResult{Env: targetDisplay(target), Err: err, Duration: time.Since(start)}
+	}
+	defer cleanupResolved()
+
 	manager, normalizedURL, err := db.NewManager(target.DatabaseURL)
 	if err != nil {
 		return seedResult{Env: targetDisplay(target), Err: err, Duration: time.Since(start)}
@@ -252,7 +261,7 @@ func seedOneEnv(target utils.NamedEnv, mergedDir, revID, scenarioPath string, sk
 	}
 
 	sp := ui.StartSpinner("Importing dataset...")
-	if err := manager.RestoreFromCSV(mergedDir); err != nil {
+	if err := manager.RestoreFromCSV(restoreDir); err != nil {
 		sp.Stop(false, fmt.Sprintf("Import failed (%s)", targetDisplay(target)))
 		ui.Error("%v", err)
 		return seedResult{Env: targetDisplay(target), Err: err, Duration: time.Since(start)}

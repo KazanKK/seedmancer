@@ -100,6 +100,14 @@ Steps:
      INSERT INTO ... SELECT FROM generate_series(...) with modulo-indexed ARRAY
      value pools. Keep every expression deterministic (derive from the series index;
      no bare random() — use SELECT setseed(0.42); first if random is unavoidable).
+   - IMPORTANT — environment-specific IDs: if any column should hold an ID that
+     differs per environment (e.g. a Supabase Auth user ID, org ID, or any UUID
+     that comes from an external system), write '@env:KEY_NAME' as the value
+     instead of hardcoding a UUID:
+         INSERT INTO users (id, email) VALUES ('@env:FIXED_USER_ID', 'test@example.com');
+     Seedmancer saves the literal marker to CSV. At seed time it is replaced with
+     the value from environments.<env>.values.KEY_NAME in seedmancer.yaml, or the
+     OS environment variable KEY_NAME. Read seedmancer://docs/env-markers for details.
 4. Call 'generate_dataset_local' with scenario=%q, inherit=%q, your SQL, and
    prompt=<the user's purpose for this data> so the intent is saved on the
    scenario and reused by later refreshes and regenerations.
@@ -109,7 +117,8 @@ Steps:
 
 Success criteria:
 - 'generate_dataset_local' returns with a non-empty Path and a new revision id.
-- Every populated table has a TRUNCATE before its INSERTs in the SQL.`, args["scenario"], guidance, args["scenario"], args["inherit"])
+- Every populated table has a TRUNCATE before its INSERTs in the SQL.
+- Any environment-specific IDs use @env:KEY_NAME markers, not hardcoded values.`, args["scenario"], guidance, args["scenario"], args["inherit"])
 
 		return &mcp.GetPromptResult{
 			Description: "Generate-test-data playbook (local)",

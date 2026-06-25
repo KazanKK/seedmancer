@@ -55,6 +55,32 @@ seedmancer seed baseline
 seedmancer push baseline
 ```
 
+### Environment markers
+
+If a value differs per environment (e.g. a Supabase Auth user ID), use an `@env:KEY` marker in your CSV data:
+
+```csv
+id,email
+@env:FIXED_USER_ID,test@example.com
+```
+
+Configure the resolved value in `seedmancer.yaml`:
+
+```yaml
+environments:
+  local:
+    database_url: postgres://localhost:5432/mydb
+    values:
+      FIXED_USER_ID: "11111111-1111-1111-1111-111111111111"
+  staging:
+    database_url: postgres://staging-host/mydb
+    values:
+      FIXED_USER_ID: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+```
+
+Seedmancer replaces the marker at seed time. The original CSV is never modified.
+If the key is absent from `values:`, Seedmancer falls back to `os.Getenv("FIXED_USER_ID")`.
+
 For the full command reference, configuration guide, Playwright integration, and MCP server setup, see the **[docs](https://seedmancer.dev/docs)**.
 
 ## Development
