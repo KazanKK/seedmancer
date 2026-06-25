@@ -74,7 +74,8 @@ func runLogin(c *cli.Context) error {
 		if err := utils.SaveAPICredentials(manual); err != nil {
 			return fmt.Errorf("saving token: %w", err)
 		}
-		ui.Success("Saved API token to ~/.seedmancer/credentials")
+		credPath, _ := utils.CredentialsPath()
+		ui.Success("Saved API token to %s", credPath)
 		warnIfEnvTokenShadows(manual)
 		return nil
 	}
@@ -159,7 +160,8 @@ func runLogin(c *cli.Context) error {
 			return fmt.Errorf("saving token: %w", err)
 		}
 		spinner.Stop(true, "Signed in")
-		ui.Success("Saved API token to ~/.seedmancer/credentials")
+		credPath, _ := utils.CredentialsPath()
+		ui.Success("Signed in to %s — token saved to %s", dashboard, credPath)
 		warnIfEnvTokenShadows(res.token)
 		ui.Info("Try it out with:  seedmancer schemas list")
 		return nil
@@ -172,18 +174,17 @@ func runLogin(c *cli.Context) error {
 	}
 }
 
-// warnIfEnvTokenShadows nudges the user when SEEDMANCER_API_TOKEN is set in
-// the environment to a value that differs from the credentials we just saved.
-// The credentials file now takes precedence over the env var, so login
-// works immediately — but pointing out the stale env var helps the user
-// keep their shell tidy.
+// warnIfEnvTokenShadows warns when SEEDMANCER_API_TOKEN is set in the
+// environment to a value that differs from the token just saved. Since the
+// env var takes precedence over the credentials file, the saved token will
+// be ignored until the env var is unset.
 func warnIfEnvTokenShadows(saved string) {
 	envTok := strings.TrimSpace(os.Getenv("SEEDMANCER_API_TOKEN"))
 	if envTok == "" || envTok == strings.TrimSpace(saved) {
 		return
 	}
-	ui.Warn("SEEDMANCER_API_TOKEN is set in your shell to a different value.")
-	ui.Info("Your new credentials are active. To clean up the stale env var:")
+	ui.Warn("SEEDMANCER_API_TOKEN is set in your shell — it will take precedence over the saved token.")
+	ui.Info("To use the saved token, unset the env var:")
 	ui.Info("  unset SEEDMANCER_API_TOKEN")
 }
 

@@ -43,7 +43,7 @@ func PushCommand() *cli.Command {
 			},
 			&cli.StringFlag{
 				Name:  "token",
-				Usage: "API token (falls back to SEEDMANCER_API_TOKEN, then ~/.seedmancer/credentials)",
+				Usage: "API token (falls back to SEEDMANCER_API_TOKEN env var, then ~/.seedmancer/credentials)",
 			},
 		},
 		Action: func(c *cli.Context) error {

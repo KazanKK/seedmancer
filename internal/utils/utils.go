@@ -11,9 +11,10 @@ import (
 )
 
 // ErrMissingAPIToken is returned when no API token could be resolved from the
-// flag, env var, project config, or global config. Commands and the top-level
-// error handler use errors.Is to detect it so they can render the interactive
-// login guide (see ui.PrintLoginHint) instead of a plain error line.
+// --token flag, SEEDMANCER_API_TOKEN env var, or ~/.seedmancer/credentials.
+// Commands and the top-level error handler use errors.Is to detect it so they
+// can render the interactive login guide (see ui.PrintLoginHint) instead of a
+// plain error line.
 var ErrMissingAPIToken = errors.New("API token required")
 
 // ErrInvalidAPIToken is returned when the API rejects the configured token
@@ -515,7 +516,6 @@ const (
 	TokenSourceFlag        = "--token flag"
 	TokenSourceEnv         = "SEEDMANCER_API_TOKEN env var"
 	TokenSourceCredentials = "~/.seedmancer/credentials (seedmancer login)"
-	TokenSourceConfig      = "api_token in seedmancer.yaml"
 )
 
 // lastTokenSource records where the most recently resolved token came from.
@@ -539,15 +539,14 @@ func ResolveAPIToken(flagValue string) (string, error) {
 //
 // Resolution order (highest priority first):
 //  1. explicit --token CLI flag          (always wins)
-//  2. ~/.seedmancer/credentials          (written by `seedmancer login`)
-//  3. SEEDMANCER_API_TOKEN env var       (CI / ad-hoc override)
-//  4. legacy api_token: in seedmancer.yaml / ~/.seedmancer/config.yaml
-//     (read-only fallback so pre-credentials-file installs keep working)
+//  2. SEEDMANCER_API_TOKEN env var       (explicit runtime override; CI-friendly)
+//  3. ~/.seedmancer/credentials          (saved default from `seedmancer login`)
 //
-// The credentials file ranks above the env var so that `seedmancer login`
-// immediately takes effect without requiring the user to unset a stale
-// SEEDMANCER_API_TOKEN. CI pipelines that do not run `seedmancer login` have
-// no credentials file, so the env var still resolves correctly for them.
+// Env var beats credentials file — the standard convention across CLI tools
+// (aws, gh, docker, heroku). An explicit env var means the caller wants that
+// token regardless of any saved state. CI pipelines set the env var and never
+// have a credentials file; interactive users rely on the credentials file and
+// typically leave the env var unset.
 //
 // Note: callers must NOT wire SEEDMANCER_API_TOKEN through urfave/cli's
 // flag EnvVars — that would make the env var indistinguishable from an
@@ -558,21 +557,14 @@ func ResolveAPITokenSource(flagValue string) (string, string, error) {
 		return flagValue, lastTokenSource, nil
 	}
 
-	if tok, err := LoadAPICredentials(); err == nil && tok != "" {
-		lastTokenSource = TokenSourceCredentials
-		return tok, lastTokenSource, nil
-	}
-
 	if tok := strings.TrimSpace(os.Getenv("SEEDMANCER_API_TOKEN")); tok != "" {
 		lastTokenSource = TokenSourceEnv
 		return tok, lastTokenSource, nil
 	}
 
-	if configPath, err := FindConfigFile(); err == nil {
-		if cfg, err := LoadConfig(configPath); err == nil && cfg.APIToken != "" {
-			lastTokenSource = TokenSourceConfig
-			return cfg.APIToken, lastTokenSource, nil
-		}
+	if tok, err := LoadAPICredentials(); err == nil && tok != "" {
+		lastTokenSource = TokenSourceCredentials
+		return tok, lastTokenSource, nil
 	}
 
 	lastTokenSource = ""

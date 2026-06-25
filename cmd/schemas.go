@@ -82,7 +82,7 @@ func SchemasCommand() *cli.Command {
 				Flags: []cli.Flag{
 					&cli.StringFlag{
 						Name:  "token",
-						Usage: "API token (falls back to SEEDMANCER_API_TOKEN, then ~/.seedmancer/credentials)",
+						Usage: "API token (falls back to SEEDMANCER_API_TOKEN env var, then ~/.seedmancer/credentials)",
 					},
 					&cli.BoolFlag{
 						Name:  "local",
@@ -114,7 +114,7 @@ func SchemasCommand() *cli.Command {
 				Flags: []cli.Flag{
 					&cli.StringFlag{
 						Name:  "token",
-						Usage: "API token (falls back to SEEDMANCER_API_TOKEN, then ~/.seedmancer/credentials)",
+						Usage: "API token (falls back to SEEDMANCER_API_TOKEN env var, then ~/.seedmancer/credentials)",
 					},
 					&cli.BoolFlag{
 						Name:  "local",
@@ -146,7 +146,7 @@ func SchemasCommand() *cli.Command {
 				Flags: []cli.Flag{
 					&cli.StringFlag{
 						Name:  "token",
-						Usage: "API token (falls back to SEEDMANCER_API_TOKEN, then ~/.seedmancer/credentials)",
+						Usage: "API token (falls back to SEEDMANCER_API_TOKEN env var, then ~/.seedmancer/credentials)",
 					},
 					&cli.BoolFlag{
 						Name:  "local",

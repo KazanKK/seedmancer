@@ -160,13 +160,13 @@ func buildStatusReport(showDBURL bool) statusReport {
 		report.Auth.TokenFingerpr = maskToken(src.Token)
 		report.Auth.EnvTokenInUse = src.Source == "env"
 
-		// Flag the case where the credentials file is authoritative but
-		// SEEDMANCER_API_TOKEN is also set. Nothing is broken — the
-		// credentials file wins — but users should know the env var will
-		// only matter if they `seedmancer logout` or delete the file.
-		envTok := strings.TrimSpace(os.Getenv("SEEDMANCER_API_TOKEN"))
-		if envTok != "" && src.Source == "credentials" && envTok != src.Token {
-			report.Auth.ShadowedByEnv = true
+		// Flag the case where the env var is authoritative but a credentials
+		// file also exists. Nothing is broken — the env var wins by design —
+		// but users should know their saved credentials are being bypassed.
+		if src.Source == "env" {
+			if saved, err := utils.LoadAPICredentials(); err == nil && saved != "" && saved != src.Token {
+				report.Auth.ShadowedByEnv = true
+			}
 		}
 	} else {
 		report.Auth.Source = "none"
@@ -233,8 +233,8 @@ func renderStatus(r statusReport) {
 		}
 		if r.Auth.ShadowedByEnv {
 			fmt.Println()
-			ui.Warn("SEEDMANCER_API_TOKEN is set in your shell but is being ignored — the credentials file takes precedence.")
-			ui.Info("The env var will only be used after `seedmancer logout`. To clear it now:  unset SEEDMANCER_API_TOKEN")
+			ui.Warn("SEEDMANCER_API_TOKEN is set — your saved credentials file is being bypassed.")
+			ui.Info("To use the saved token instead:  unset SEEDMANCER_API_TOKEN")
 		}
 	} else {
 		ui.KeyValue("signed in:    ", "no")
@@ -270,19 +270,14 @@ func resolveAPIURLSource() (string, string) {
 
 // locateActiveToken reproduces utils.ResolveAPIToken's priority order
 // but also records *where* the token came from so status can show it.
-// Credentials file beats env var beats legacy config — matching
-// ResolveAPIToken. Keep these two in lockstep if you change one.
+// Env var beats credentials file — matching ResolveAPIToken.
+// Keep these two in lockstep if you change one.
 func locateActiveToken() tokenSource {
-	if tok, err := utils.LoadAPICredentials(); err == nil && tok != "" {
-		return tokenSource{Source: "credentials", Token: tok}
-	}
 	if v := strings.TrimSpace(os.Getenv("SEEDMANCER_API_TOKEN")); v != "" {
 		return tokenSource{Source: "env", Token: v}
 	}
-	if cfgPath, err := utils.FindConfigFile(); err == nil {
-		if cfg, err := utils.LoadConfig(cfgPath); err == nil && cfg.APIToken != "" {
-			return tokenSource{Source: "config", Token: cfg.APIToken}
-		}
+	if tok, err := utils.LoadAPICredentials(); err == nil && tok != "" {
+		return tokenSource{Source: "credentials", Token: tok}
 	}
 	return tokenSource{}
 }
@@ -301,11 +296,6 @@ func humanizeTokenSource(s string) string {
 			return "~/.seedmancer/credentials"
 		}
 		return path
-	case "config":
-		if cfgPath, err := utils.FindConfigFile(); err == nil {
-			return fmt.Sprintf("%s (legacy api_token)", cfgPath)
-		}
-		return "seedmancer.yaml (legacy api_token)"
 	default:
 		return s
 	}

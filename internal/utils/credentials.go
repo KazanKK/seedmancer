@@ -11,12 +11,21 @@ import (
 // stores the API token. Secrets live in their own file (never in
 // seedmancer.yaml / ~/.seedmancer/config.yaml) so project config can be
 // checked into source control without leaking tokens.
+//
+// When SEEDMANCER_API_URL points at a non-production host (local dev), a
+// separate file credentials.local is used so prod and local tokens never
+// overwrite each other. Switching between environments is as simple as
+// setting or unsetting SEEDMANCER_API_URL.
 func CredentialsPath() (string, error) {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("getting home directory: %v", err)
 	}
-	return filepath.Join(homeDir, ".seedmancer", "credentials"), nil
+	filename := "credentials"
+	if apiURL := GetBaseURL(); !strings.Contains(apiURL, "api.seedmancer.dev") {
+		filename = "credentials.local"
+	}
+	return filepath.Join(homeDir, ".seedmancer", filename), nil
 }
 
 // LoadAPICredentials reads the API token from the credentials file. A

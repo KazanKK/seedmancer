@@ -156,9 +156,9 @@ func main() {
 			if src := utils.LastTokenSource(); src != "" {
 				ui.Error("%v (token came from %s).", err, src)
 				if src == utils.TokenSourceEnv {
-					if stored, credErr := utils.LoadAPICredentials(); credErr == nil && stored != "" {
-						ui.Info("A ~/.seedmancer/credentials file also exists — unset SEEDMANCER_API_TOKEN to use it instead.")
-					}
+					ui.Info("Update SEEDMANCER_API_TOKEN or unset it and run `seedmancer login`.")
+				} else if src == utils.TokenSourceCredentials {
+					ui.Info("Your saved token may be expired. Run `seedmancer login` to refresh it.")
 				}
 			} else {
 				ui.Error("%v — sign in again.", err)

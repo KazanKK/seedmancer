@@ -30,11 +30,15 @@ func TestLoadConfig_missingFile(t *testing.T) {
 func TestAPICredentials_roundtrip(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
+	t.Setenv("SEEDMANCER_API_URL", "") // use prod path so filename is always "credentials"
 
 	if err := SaveAPICredentials("my-secret"); err != nil {
 		t.Fatalf("save: %v", err)
 	}
-	path := filepath.Join(dir, ".seedmancer", "credentials")
+	path, err := CredentialsPath()
+	if err != nil {
+		t.Fatalf("CredentialsPath: %v", err)
+	}
 
 	// Token file must be 0600 — tokens are secrets.
 	info, err := os.Stat(path)
@@ -77,48 +81,36 @@ func TestSaveAPICredentials_rejectsEmpty(t *testing.T) {
 	}
 }
 
-// TestResolveAPIToken_prefersCredentialsFile pins the source order: an
-// explicit credentials file wins over a legacy `api_token:` left in an
-// older ~/.seedmancer/config.yaml.
-func TestResolveAPIToken_prefersCredentialsFile(t *testing.T) {
+// TestResolveAPIToken_credentialsFileUsedWithoutEnvVar verifies that the
+// credentials file written by `seedmancer login` is used when
+// SEEDMANCER_API_TOKEN is not set.
+func TestResolveAPIToken_credentialsFileUsedWithoutEnvVar(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
-	// Unset any inherited env var so the test isolates the
-	// credentials-file-vs-legacy-config precedence. The env-vs-file
-	// precedence is covered by its own test.
 	t.Setenv("SEEDMANCER_API_TOKEN", "")
+	t.Setenv("SEEDMANCER_API_URL", "")
 	prev, _ := os.Getwd()
 	t.Cleanup(func() { _ = os.Chdir(prev) })
 	if err := os.Chdir(dir); err != nil {
 		t.Fatalf("chdir: %v", err)
 	}
 
-	// Legacy user state: api_token in config.yaml.
-	writeFile(t, filepath.Join(dir, ".seedmancer", "config.yaml"), "api_token: legacy\n")
-
-	got, err := ResolveAPIToken("")
-	if err != nil || got != "legacy" {
-		t.Fatalf("legacy read: got=%q err=%v", got, err)
-	}
-
-	// After login, credentials file must take precedence.
-	if err := SaveAPICredentials("fresh"); err != nil {
+	if err := SaveAPICredentials("login-token"); err != nil {
 		t.Fatalf("save: %v", err)
 	}
-	got, err = ResolveAPIToken("")
-	if err != nil || got != "fresh" {
-		t.Fatalf("credentials first: got=%q err=%v", got, err)
+
+	got, err := ResolveAPIToken("")
+	if err != nil || got != "login-token" {
+		t.Fatalf("credentials file: got=%q err=%v", got, err)
 	}
 }
 
-// TestResolveAPIToken_credentialsFileBeatsEnvVar ensures that a fresh
-// `seedmancer login` (which writes the credentials file) takes effect
-// immediately even when SEEDMANCER_API_TOKEN is set in the shell.
-// CI pipelines that set the env var but never run `seedmancer login`
-// still work because they have no credentials file.
-func TestResolveAPIToken_credentialsFileBeatsEnvVar(t *testing.T) {
+// TestResolveAPIToken_envVarWinsOnLogin ensures the env var takes
+// precedence over a freshly-written credentials file.
+func TestResolveAPIToken_envVarWinsOnLogin(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
+	t.Setenv("SEEDMANCER_API_URL", "")
 	prev, _ := os.Getwd()
 	t.Cleanup(func() { _ = os.Chdir(prev) })
 	if err := os.Chdir(dir); err != nil {
@@ -134,8 +126,8 @@ func TestResolveAPIToken_credentialsFileBeatsEnvVar(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
-	if got != "login-token" {
-		t.Fatalf("credentials file did not win over env var: got %q", got)
+	if got != "env-token" {
+		t.Fatalf("env var must beat credentials file: got %q", got)
 	}
 }
 
@@ -146,6 +138,7 @@ func TestResolveAPIToken_credentialsFileBeatsEnvVar(t *testing.T) {
 func TestResolveAPIToken_envVarUsedWhenNoCredentials(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
+	t.Setenv("SEEDMANCER_API_URL", "")
 	prev, _ := os.Getwd()
 	t.Cleanup(func() { _ = os.Chdir(prev) })
 	if err := os.Chdir(dir); err != nil {
@@ -170,6 +163,7 @@ func TestResolveAPIToken_envVarUsedWhenNoCredentials(t *testing.T) {
 func TestResolveAPIToken_flagBeatsEverything(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
+	t.Setenv("SEEDMANCER_API_URL", "")
 	prev, _ := os.Getwd()
 	t.Cleanup(func() { _ = os.Chdir(prev) })
 	if err := os.Chdir(dir); err != nil {

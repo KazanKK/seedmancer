@@ -105,7 +105,7 @@ func TestResolveAPIToken_flagBeatsConfig(t *testing.T) {
 	}
 }
 
-func TestResolveAPIToken_credentialsFileBeatsEnv(t *testing.T) {
+func TestResolveAPIToken_envVarBeatsCredentialsFile(t *testing.T) {
 	dir := t.TempDir()
 	prev, _ := os.Getwd()
 	t.Cleanup(func() { _ = os.Chdir(prev) })
@@ -113,58 +113,40 @@ func TestResolveAPIToken_credentialsFileBeatsEnv(t *testing.T) {
 		t.Fatalf("chdir: %v", err)
 	}
 	t.Setenv("HOME", dir)
-	writeFile(t, filepath.Join(dir, ".seedmancer", "credentials"), "file-tok\n")
+	t.Setenv("SEEDMANCER_API_URL", "") // ensure prod path so CredentialsPath() uses "credentials"
+	credPath, err := CredentialsPath()
+	if err != nil {
+		t.Fatalf("CredentialsPath: %v", err)
+	}
+	writeFile(t, credPath, "file-tok\n")
 	t.Setenv("SEEDMANCER_API_TOKEN", "env-tok")
 
-	// Credentials file wins over env var so `seedmancer login` takes effect
-	// immediately without requiring the user to unset SEEDMANCER_API_TOKEN.
+	// Env var wins over credentials file — standard CLI convention.
 	got, src, err := ResolveAPITokenSource("")
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
-	if got != "file-tok" {
-		t.Fatalf("credentials file must beat env var: got %q", got)
-	}
-	if src != TokenSourceCredentials {
-		t.Fatalf("source = %q, want %q", src, TokenSourceCredentials)
-	}
-
-	// Without the credentials file, the env var is used.
-	t.Setenv("SEEDMANCER_API_TOKEN", "env-tok")
-	writeFile(t, filepath.Join(dir, ".seedmancer", "credentials"), "")
-	got, src, err = ResolveAPITokenSource("")
-	if err != nil {
-		t.Fatalf("unexpected err: %v", err)
-	}
 	if got != "env-tok" {
-		t.Fatalf("env var fallback: got %q", got)
+		t.Fatalf("env var must beat credentials file: got %q", got)
 	}
 	if src != TokenSourceEnv {
 		t.Fatalf("source = %q, want %q", src, TokenSourceEnv)
 	}
-}
 
-func TestResolveAPIToken_fromProjectConfig(t *testing.T) {
-	dir := t.TempDir()
-	prev, _ := os.Getwd()
-	t.Cleanup(func() { _ = os.Chdir(prev) })
-	if err := os.Chdir(dir); err != nil {
-		t.Fatalf("chdir: %v", err)
-	}
-	t.Setenv("HOME", dir)
-	// Unset any inherited SEEDMANCER_API_TOKEN so the project config is
-	// actually the lowest-priority source that contains a value.
+	// Without the env var, the credentials file is used.
 	t.Setenv("SEEDMANCER_API_TOKEN", "")
-	writeFile(t, filepath.Join(dir, "seedmancer.yaml"), "storage_path: .seedmancer\napi_token: cfg-tok\n")
-
-	got, err := ResolveAPIToken("")
+	got, src, err = ResolveAPITokenSource("")
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
-	if got != "cfg-tok" {
-		t.Fatalf("got %q", got)
+	if got != "file-tok" {
+		t.Fatalf("credentials file fallback: got %q", got)
+	}
+	if src != TokenSourceCredentials {
+		t.Fatalf("source = %q, want %q", src, TokenSourceCredentials)
 	}
 }
+
 
 func TestResolveAPIToken_errorWhenMissing(t *testing.T) {
 	dir := t.TempDir()
@@ -175,6 +157,7 @@ func TestResolveAPIToken_errorWhenMissing(t *testing.T) {
 	}
 	t.Setenv("HOME", dir)
 	t.Setenv("SEEDMANCER_API_TOKEN", "")
+	t.Setenv("SEEDMANCER_API_URL", "")
 
 	_, err := ResolveAPIToken("")
 	if err == nil || !errors.Is(err, ErrMissingAPIToken) {
