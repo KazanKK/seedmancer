@@ -1551,6 +1551,9 @@ func callGenerateSQL(ctx context.Context, baseURL, token string, schema generate
 	if resp.StatusCode == http.StatusPaymentRequired || resp.StatusCode == http.StatusForbidden {
 		return "", formatLimitError(respBody)
 	}
+	if resp.StatusCode == http.StatusBadGateway || resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode == http.StatusGatewayTimeout {
+		return "", fmt.Errorf("AI SQL generation timed out or the API is temporarily unavailable (HTTP %d). Try again in a moment.", resp.StatusCode)
+	}
 	if resp.StatusCode >= 400 {
 		return "", fmt.Errorf("generate-sql failed (HTTP %d): %s", resp.StatusCode, string(respBody))
 	}

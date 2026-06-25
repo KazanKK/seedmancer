@@ -1256,6 +1256,9 @@ func callGenerateRefreshSQL(ctx context.Context, token string, schema generateSc
 	if resp.StatusCode == http.StatusPaymentRequired || resp.StatusCode == http.StatusForbidden {
 		return "", formatLimitError(respBody)
 	}
+	if resp.StatusCode == http.StatusBadGateway || resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode == http.StatusGatewayTimeout {
+		return "", fmt.Errorf("AI SQL refresh timed out or the API is temporarily unavailable (HTTP %d). Try again in a moment.", resp.StatusCode)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("generate-refresh-sql failed (HTTP %d): %s", resp.StatusCode, string(respBody))
 	}
