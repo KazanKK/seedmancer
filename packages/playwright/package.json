@@ -1,0 +1,43 @@
+{
+  "name": "@seedmancer/playwright",
+  "version": "0.1.0",
+  "description": "Playwright integration for Seedmancer – automatically seed your database before each test",
+  "keywords": [
+    "playwright",
+    "seedmancer",
+    "testing",
+    "seed",
+    "database",
+    "fixtures"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/KazanKK/seedmancer.git",
+    "directory": "packages/playwright"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "npm run build"
+  },
+  "peerDependencies": {
+    "@playwright/test": ">=1.40.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.50.0",
+    "@types/node": "^26.0.1",
+    "typescript": "^5.7.0"
+  }
+}

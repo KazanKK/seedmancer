@@ -1,0 +1,67 @@
+name: Publish @seedmancer/playwright
+
+on:
+  push:
+    tags:
+      - 'playwright/v*'
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  publish:
+    name: Build and publish to npm
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: packages/playwright
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: 'https://registry.npmjs.org'
+          cache: npm
+          cache-dependency-path: packages/playwright/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          # Tag format: playwright/v1.2.3 → 1.2.3
+          VERSION="${GITHUB_REF_NAME#playwright/v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Bump package version
+        run: npm version "${{ steps.version.outputs.version }}" --no-git-tag-version
+
+      - name: Publish to npm
+        run: npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: '@seedmancer/playwright v${{ steps.version.outputs.version }}'
+          body: |
+            Published [`@seedmancer/playwright@${{ steps.version.outputs.version }}`](https://www.npmjs.com/package/@seedmancer/playwright/v/${{ steps.version.outputs.version }}) to npm.
+
+            **Install**
+            ```sh
+            npm install --save-dev @seedmancer/playwright@${{ steps.version.outputs.version }}
+            ```
+          generate_release_notes: true
+          make_latest: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
