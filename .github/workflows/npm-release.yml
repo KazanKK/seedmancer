@@ -42,8 +42,8 @@ jobs:
           VERSION="${GITHUB_REF_NAME#playwright/v}"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Bump package version
-        run: npm version "${{ steps.version.outputs.version }}" --no-git-tag-version
+      - name: Set package version
+        run: npm pkg set version="${{ steps.version.outputs.version }}"
 
       - name: Publish to npm
         run: npm publish --access public --provenance
