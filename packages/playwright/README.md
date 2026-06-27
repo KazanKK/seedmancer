@@ -72,3 +72,44 @@ test.describe("admin flows", () => {
 | CLI not found | `Seedmancer CLI not found. Make sure it is installed and available in PATH.` |
 | Non-zero exit | `Seedmancer exited with status <N>: <stderr/stdout>` |
 | Killed by signal | `Seedmancer was terminated by signal: <signal>` |
+
+## Global setup — pull scenarios before the suite
+
+Use `@seedmancer/playwright/global-setup` to pull seed data from Seedmancer Cloud once before the test suite starts. This is separate from the per-test seeding fixture.
+
+### 1. Create a global setup file
+
+```ts
+// playwright.global-setup.ts
+import { createSeedmancerGlobalSetup } from "@seedmancer/playwright/global-setup"
+
+export default createSeedmancerGlobalSetup({
+  scenarios: ["api-test"],
+  // tokenEnv defaults to "SEEDMANCER_API_TOKEN"
+  tokenEnv: "SEEDMANCER_API_TOKEN",
+  // cwd defaults to process.cwd()
+  cwd: "../",
+})
+```
+
+### 2. Reference it from your Playwright config
+
+```ts
+// playwright.config.ts
+import { defineConfig } from "@playwright/test"
+
+export default defineConfig({
+  globalSetup: "./playwright.global-setup.ts",
+})
+```
+
+### Options
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `scenarios` | `string[]` | required | Scenarios to pull from Seedmancer Cloud. |
+| `token` | `string` | — | API token. Takes precedence over `tokenEnv`. |
+| `tokenEnv` | `string` | `"SEEDMANCER_API_TOKEN"` | Environment variable name to read the token from. |
+| `cwd` | `string` | `process.cwd()` | Working directory for the CLI (directory containing `seedmancer.yaml`). |
+
+The token is never logged or included in error messages.

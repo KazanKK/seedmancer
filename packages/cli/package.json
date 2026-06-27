@@ -1,0 +1,29 @@
+{
+  "name": "@seedmancer/cli",
+  "version": "0.1.0",
+  "description": "npm wrapper for the Seedmancer CLI",
+  "keywords": [
+    "seedmancer",
+    "cli",
+    "database",
+    "seed",
+    "testing"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/KazanKK/seedmancer.git",
+    "directory": "packages/cli"
+  },
+  "bin": {
+    "seedmancer": "./bin/seedmancer.js"
+  },
+  "files": [
+    "bin",
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  }
+}

@@ -120,24 +120,28 @@ revision as a permanent reference for the next generation round.
 
 const docPlaywrightRecipe = `# Reset DB before Playwright
 
-Seed the database explicitly inside your test files using Playwright hooks.
-Every run starts from the same deterministic snapshot — no hidden setup files.
+Use the ` + "`@seedmancer/playwright`" + ` package to seed automatically before each test.
+It wraps the Playwright base test with a fixture that runs
+` + "`seedmancer seed <scenario> --yes`" + ` before every test that opts in.
 
-## Pattern 1 — beforeAll: seed once for the file
+## Installation
 
-Use when tests read but do not mutate the database.
+` + "```sh" + `
+npm install --save-dev @seedmancer/playwright
+` + "```" + `
+
+The Seedmancer CLI must be installed and available in PATH.
+
+## Basic usage
+
+Replace the ` + "`@playwright/test`" + ` import and call ` + "`test.use()`" + ` with the scenario name.
+Seeding happens automatically — no ` + "`beforeEach`" + ` hook needed.
 
 ` + "```ts" + `
 // tests/api/users.spec.ts
-import { spawnSync } from "node:child_process";
-import { test, expect } from "@playwright/test";
+import { test, expect } from "@seedmancer/playwright";
 
-test.beforeAll(() => {
-  const res = spawnSync("seedmancer", ["seed", "myapp/api-test", "--yes"], {
-    stdio: "inherit",
-  });
-  if (res.status !== 0) throw new Error("seedmancer seed failed");
-});
+test.use({ seedmancerScenario: "api-test" });
 
 test("GET /api/users returns seeded rows", async ({ request }) => {
   const res = await request.get("/api/users");
@@ -145,45 +149,24 @@ test("GET /api/users returns seeded rows", async ({ request }) => {
 });
 ` + "```" + `
 
-## Pattern 2 — beforeEach: reset before every test
+## Options
 
-Use when tests write to the database and cannot share state.
+| Option | Type | Description |
+|---|---|---|
+| ` + "`seedmancerScenario`" + ` | ` + "`string`" + ` | Scenario to seed. Omit to skip seeding entirely. |
+| ` + "`seedmancerEnv`" + ` | ` + "`string`" + ` | Target environment (` + "`--env`" + ` flag). Defaults to the project default. |
+| ` + "`seedmancerCwd`" + ` | ` + "`string`" + ` | Working directory for the CLI. Defaults to ` + "`process.cwd()`" + `. |
 
-` + "```ts" + `
-// tests/api/signup.spec.ts
-import { spawnSync } from "node:child_process";
-import { test, expect } from "@playwright/test";
+## Different scenarios per describe group
 
-test.beforeEach(() => {
-  const res = spawnSync("seedmancer", ["seed", "myapp/api-test", "--yes"], {
-    stdio: "inherit",
-  });
-  if (res.status !== 0) throw new Error("seedmancer seed failed");
-});
-
-test("creates a new user", async ({ request }) => {
-  const res = await request.post("/api/users", {
-    data: { email: "new@example.com" },
-  });
-  expect(res.status()).toBe(201);
-});
-` + "```" + `
-
-## Pattern 3 — different scenario per describe group
-
-Use when different test groups need different starting states.
+` + "`test.use()`" + ` scopes to the nearest ` + "`describe`" + ` block.
 
 ` + "```ts" + `
 // tests/e2e/billing.spec.ts
-import { spawnSync } from "node:child_process";
-import { test, expect } from "@playwright/test";
+import { test, expect } from "@seedmancer/playwright";
 
 test.describe("Pro plan", () => {
-  test.beforeAll(() => {
-    spawnSync("seedmancer", ["seed", "billing/pro", "--yes"], {
-      stdio: "inherit",
-    });
-  });
+  test.use({ seedmancerScenario: "billing/pro" });
 
   test("shows active subscription", async ({ page }) => {
     await page.goto("/billing");
@@ -192,11 +175,7 @@ test.describe("Pro plan", () => {
 });
 
 test.describe("Free plan", () => {
-  test.beforeAll(() => {
-    spawnSync("seedmancer", ["seed", "billing/free", "--yes"], {
-      stdio: "inherit",
-    });
-  });
+  test.use({ seedmancerScenario: "billing/free" });
 
   test("shows upgrade prompt", async ({ page }) => {
     await page.goto("/billing");
@@ -204,6 +183,38 @@ test.describe("Free plan", () => {
   });
 });
 ` + "```" + `
+
+## Global defaults in playwright.config.ts
+
+Set ` + "`seedmancerCwd`" + ` (and optionally ` + "`seedmancerEnv`" + `) once at the config level so
+individual spec files only need to declare ` + "`seedmancerScenario`" + `.
+
+` + "```ts" + `
+// playwright.config.ts
+import { defineConfig } from "@playwright/test";
+import * as path from "node:path";
+
+export default defineConfig({
+  use: {
+    // Points the CLI at the directory containing seedmancer.yaml.
+    // Cast needed because defineConfig types don't know about custom options.
+    ...(({
+      seedmancerCwd: path.resolve(__dirname, ".."),
+      seedmancerEnv: process.env.PLAYWRIGHT_ENV === "staging" ? "staging" : undefined,
+    }) as object),
+  },
+});
+` + "```" + `
+
+## Error handling
+
+The fixture throws a descriptive error for three failure modes:
+
+| Situation | Error |
+|---|---|
+| CLI not found | ` + "`Seedmancer CLI not found. Make sure it is installed and available in PATH.`" + ` |
+| Non-zero exit | ` + "`Seedmancer exited with status <N>: <stderr>`" + ` |
+| Killed by signal | ` + "`Seedmancer was terminated by signal: <signal>`" + ` |
 
 ## Agents calling this through MCP
 
