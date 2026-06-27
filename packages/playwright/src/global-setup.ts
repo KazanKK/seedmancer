@@ -7,8 +7,16 @@ export type SeedmancerGlobalSetupOptions = {
   cwd?: string;
 };
 
-function runSeedmancerPull(scenario: string, token: string, cwd: string): void {
-  const result = spawnSync('seedmancer', ['pull', scenario, '--token', token], {
+function runSeedmancerPull(
+  scenario: string,
+  token: string | undefined,
+  cwd: string,
+): void {
+  const args = ['pull', scenario];
+  if (token !== undefined && token !== '') {
+    args.push('--token', token);
+  }
+  const result = spawnSync('seedmancer', args, {
     cwd,
     stdio: 'pipe',
     encoding: 'utf-8',
@@ -47,13 +55,9 @@ export function createSeedmancerGlobalSetup(
     const cwd = options.cwd ?? process.cwd();
     const tokenEnv = options.tokenEnv ?? 'SEEDMANCER_API_TOKEN';
     const token = options.token ?? process.env[tokenEnv];
-
-    if (token === undefined || token === '') {
-      throw new Error(
-        `Seedmancer API token is missing. ` +
-          `Set the ${tokenEnv} environment variable or pass token directly.`,
-      );
-    }
+    // If no token is found, run without --token so the CLI falls back to
+    // stored credentials from `seedmancer login`. This is the expected
+    // behaviour for local development.
 
     for (const scenario of options.scenarios) {
       runSeedmancerPull(scenario, token, cwd);
