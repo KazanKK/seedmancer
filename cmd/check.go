@@ -7,10 +7,12 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/KazanKK/seedmancer/internal/contract"
 	"github.com/KazanKK/seedmancer/internal/scenario"
 	"github.com/KazanKK/seedmancer/internal/schemahistory"
 	"github.com/KazanKK/seedmancer/internal/schemadiff"
 	"github.com/KazanKK/seedmancer/internal/ui"
+	"github.com/KazanKK/seedmancer/internal/usage"
 	utils "github.com/KazanKK/seedmancer/internal/utils"
 
 	"github.com/urfave/cli/v2"
@@ -66,13 +68,28 @@ func CheckCommand() *cli.Command {
 				return outputJSON(out)
 			}
 			ui.Title(fmt.Sprintf("%s @ %s", out.Scenario, out.Revision))
+			if out.Purpose != "" {
+				ui.KeyValue("Purpose: ", out.Purpose)
+			}
 			ui.KeyValue("Status: ", out.Status)
 			ui.KeyValue("Dataset schema: ", out.DatasetSchema)
 			ui.KeyValue("Current schema: ", out.CurrentSchema)
 			if out.BehindStr != "" {
 				ui.KeyValue("Behind: ", out.BehindStr)
 			}
+			if len(out.UsedBy) > 0 {
+				fmt.Println()
+				ui.Info("Used by:")
+				for _, r := range out.UsedBy {
+					label := fmt.Sprintf("%s > %s", r.File, r.Title)
+					if r.Project != "" {
+						label += fmt.Sprintf(" [%s]", r.Project)
+					}
+					ui.KeyValue("  - ", label)
+				}
+			}
 			if len(out.Changes) == 0 {
+				fmt.Println()
 				ui.Info("Schemas match — safe to seed.")
 				return nil
 			}
@@ -116,6 +133,11 @@ type CheckOutput struct {
 	Behind    int    `json:"behind,omitempty"`
 	BehindStr string `json:"behindStr,omitempty"` // "3 schemas", "unknown", or ""
 	Drift     string `json:"drift,omitempty"`     // compact diff summary
+	// Purpose is the state's contract purpose, when a contract.yaml exists.
+	Purpose string `json:"purpose,omitempty"`
+	// UsedBy lists the Playwright tests that have seeded this state, from
+	// local usage tracking. Empty when no usage has been recorded.
+	UsedBy []usage.Ref `json:"usedBy,omitempty"`
 }
 
 // RunCheck does the heavy lifting for the `check` command.
@@ -158,6 +180,10 @@ func RunCheck(_ context.Context, in CheckInput) (CheckOutput, error) {
 		DatasetSchema: utils.FingerprintShort(rev.Manifest.SchemaFingerprint),
 		CurrentSchema: utils.FingerprintShort(currentFP),
 	}
+	// Attach local metadata: contract purpose + which tests use this state.
+	// Both are best-effort and independent of schema status.
+	annotateCheckMeta(&out, projectRoot, cfg.StoragePath, scenarioPath)
+
 	if currentFP == rev.Manifest.SchemaFingerprint {
 		out.Status = "ok"
 		return out, nil
@@ -197,6 +223,21 @@ func RunCheck(_ context.Context, in CheckInput) (CheckOutput, error) {
 	}
 
 	return out, nil
+}
+
+// annotateCheckMeta loads the state's contract purpose and recorded test
+// usage. Both are local project metadata and best-effort — any failure leaves
+// the corresponding field empty without surfacing an error to the user.
+func annotateCheckMeta(out *CheckOutput, projectRoot, storagePath, scenarioPath string) {
+	scenarioDir := scenario.ScenarioDir(projectRoot, storagePath, scenarioPath)
+	if c, ok, err := contract.Load(scenarioDir); err == nil && ok && c != nil {
+		out.Purpose = c.Purpose
+	}
+	if agg, err := usage.Load(projectRoot, storagePath); err == nil {
+		if su := agg.States[scenarioPath]; su != nil {
+			out.UsedBy = su.UsedBy
+		}
+	}
 }
 
 // pluralSchemas returns "N schema" or "N schemas".

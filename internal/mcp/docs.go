@@ -118,34 +118,41 @@ revision as a permanent reference for the next generation round.
 - Logs are written to --log-file, never stdout. stdio stays pristine.
 `
 
-const docPlaywrightRecipe = `# Reset DB before Playwright
+const docPlaywrightRecipe = `# Connect Playwright tests to Seedmancer states
 
-Use the ` + "`@seedmancer/playwright`" + ` package to seed automatically before each test.
-It wraps the Playwright base test with a fixture that runs
-` + "`seedmancer seed <scenario> --yes`" + ` before every test that opts in.
+Use the ` + "`@seedmancer/playwright`" + ` package to link each Playwright test to a
+named Seedmancer **state** (a scenario). The integration seeds the state before
+the test, exposes named data handles from the state's contract, and records
+which tests use which states.
 
 ## Installation
 
 ` + "```sh" + `
-npm install --save-dev @seedmancer/playwright
+npm install --save-dev @seedmancer/playwright @seedmancer/cli
 ` + "```" + `
-
-The Seedmancer CLI must be installed and available in PATH.
 
 ## Basic usage
 
-Replace the ` + "`@playwright/test`" + ` import and call ` + "`test.use()`" + ` with the scenario name.
-Seeding happens automatically — no ` + "`beforeEach`" + ` hook needed.
+Replace the ` + "`@playwright/test`" + ` import, declare the state with ` + "`test.use()`" + `,
+and read named data via the ` + "`seedmancer`" + ` fixture.
 
 ` + "```ts" + `
-// tests/api/users.spec.ts
 import { test, expect } from "@seedmancer/playwright";
 
-test.use({ seedmancerScenario: "api-test" });
+test.use({
+  seedmancerState: "auth/login-success",
+  seedmancerReset: "beforeEach",
+});
 
-test("GET /api/users returns seeded rows", async ({ request }) => {
-  const res = await request.get("/api/users");
-  expect(res.ok()).toBeTruthy();
+test("user can login successfully", async ({ page, seedmancer }) => {
+  const user = seedmancer.get("user:login");
+
+  await page.goto("/login");
+  await page.fill("[name=email]", user.email);
+  await page.fill("[name=password]", user.password);
+  await page.click("button[type=submit]");
+
+  await expect(page.getByText("Dashboard")).toBeVisible();
 });
 ` + "```" + `
 
@@ -153,78 +160,57 @@ test("GET /api/users returns seeded rows", async ({ request }) => {
 
 | Option | Type | Description |
 |---|---|---|
-| ` + "`seedmancerScenario`" + ` | ` + "`string`" + ` | Scenario to seed. Omit to skip seeding entirely. |
-| ` + "`seedmancerEnv`" + ` | ` + "`string`" + ` | Target environment (` + "`--env`" + ` flag). Defaults to the project default. |
+| ` + "`seedmancerState`" + ` | ` + "`string`" + ` | State (scenario) to seed. Omit to skip seeding. |
+| ` + "`seedmancerReset`" + ` | ` + "`\"beforeEach\" | \"beforeAll\" | \"manual\"`" + ` | When to seed (default ` + "`beforeEach`" + `). |
+| ` + "`seedmancerEnv`" + ` | ` + "`string`" + ` | Target environment (` + "`--env`" + ` flag). |
 | ` + "`seedmancerCwd`" + ` | ` + "`string`" + ` | Working directory for the CLI. Defaults to ` + "`process.cwd()`" + `. |
 
-## Different scenarios per describe group
+## State contract
 
-` + "`test.use()`" + ` scopes to the nearest ` + "`describe`" + ` block.
+A state can carry a ` + "`contract.yaml`" + ` describing what it means and the named
+data handles ` + "`seedmancer.get()`" + ` returns:
 
-` + "```ts" + `
-// tests/e2e/billing.spec.ts
-import { test, expect } from "@seedmancer/playwright";
-
-test.describe("Pro plan", () => {
-  test.use({ seedmancerScenario: "billing/pro" });
-
-  test("shows active subscription", async ({ page }) => {
-    await page.goto("/billing");
-    await expect(page.getByText("Pro — active")).toBeVisible();
-  });
-});
-
-test.describe("Free plan", () => {
-  test.use({ seedmancerScenario: "billing/free" });
-
-  test("shows upgrade prompt", async ({ page }) => {
-    await page.goto("/billing");
-    await expect(page.getByText("Upgrade to Pro")).toBeVisible();
-  });
-});
+` + "```yaml" + `
+# .seedmancer/scenarios/auth/login-success/contract.yaml
+state: auth/login-success
+purpose: A valid verified user who can log in
+provides:
+  user:login:
+    email: login@example.com
+    passwordEnv: SEEDMANCER_TEST_PASSWORD
+mustHave:
+  - user exists
+  - user email is verified
 ` + "```" + `
 
-## Global defaults in playwright.config.ts
+Keys ending in ` + "`Env`" + ` are resolved from the environment at test time
+(` + "`passwordEnv`" + ` → ` + "`password: process.env.SEEDMANCER_TEST_PASSWORD`" + `).
+Author or update a contract with the ` + "`create_or_update_state_contract`" + ` tool.
 
-Set ` + "`seedmancerCwd`" + ` (and optionally ` + "`seedmancerEnv`" + `) once at the config level so
-individual spec files only need to declare ` + "`seedmancerScenario`" + `.
+## Usage tracking
 
-` + "```ts" + `
-// playwright.config.ts
-import { defineConfig } from "@playwright/test";
-import * as path from "node:path";
+Each run records a usage event under ` + "`.seedmancer/.usage-events`" + `. Inspect the
+state↔test links with:
 
-export default defineConfig({
-  use: {
-    // Points the CLI at the directory containing seedmancer.yaml.
-    // Cast needed because defineConfig types don't know about custom options.
-    ...(({
-      seedmancerCwd: path.resolve(__dirname, ".."),
-      seedmancerEnv: process.env.PLAYWRIGHT_ENV === "staging" ? "staging" : undefined,
-    }) as object),
-  },
-});
+` + "```sh" + `
+seedmancer list --usage
+seedmancer check auth/login-success
 ` + "```" + `
 
-## Error handling
+or the ` + "`check_state_usage`" + ` tool. This reveals unused states and which tests
+depend on a state before you change its data.
 
-The fixture throws a descriptive error for three failure modes:
+## Agents authoring a Playwright test
 
-| Situation | Error |
-|---|---|
-| CLI not found | ` + "`Seedmancer CLI not found. Make sure it is installed and available in PATH.`" + ` |
-| Non-zero exit | ` + "`Seedmancer exited with status <N>: <stderr>`" + ` |
-| Killed by signal | ` + "`Seedmancer was terminated by signal: <signal>`" + ` |
+1. ` + "`list_datasets`" + ` / ` + "`check_state_usage`" + ` — see existing states and reuse one
+   that matches the scenario instead of creating a near-duplicate.
+2. If no state fits, ` + "`create_or_update_state_contract`" + ` then
+   ` + "`generate_dataset_local`" + ` to produce the data.
+3. Add ` + "`test.use({ seedmancerState: \"...\" })`" + ` to the test and read data via
+   ` + "`seedmancer.get()`" + `.
+4. Avoid one state per tiny test — prefer one state per suite/scenario.
 
-## Agents calling this through MCP
-
-Prefer the ` + "`seed_database`" + ` tool over shelling out. Pass:
-
-- ` + "`scenario: \"api-test\"`" + ` (the scenario you keep for tests).
-- ` + "`yes: true`" + ` so the prod-guard is acknowledged but not bypassed.
-
-On success the tool returns ` + "`anyError: false`" + `; only then should the
-agent kick off the test command.
+Seeding stays deterministic at runtime: tests never require an AI/MCP host to run.
 `
 
 const docLocalGeneration = `# Local dataset generation

@@ -302,4 +302,40 @@ func registerTools(s *mcp.Server) {
 		out, err := cmd.RunLogout(ctx)
 		return nil, out, err
 	})
+
+	// ── Playwright test-data link (read-only) ─────────────────────────
+	mcp.AddTool(s, &mcp.Tool{
+		Name:  "check_state_usage",
+		Title: "Check which tests use a state",
+		Description: "Report which Playwright tests have seeded each Seedmancer state, " +
+			"aggregated from the usage events the @seedmancer/playwright integration writes " +
+			"under .seedmancer/.usage-events. Pass `state` to narrow to one state (empty " +
+			"usedBy means no test currently links to it). Use this to find unused states, " +
+			"or to see which tests depend on a state before changing its data. " +
+			"This is local project metadata, not test-result reporting.",
+		Annotations: readOnly,
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in cmd.StateUsageInput) (*mcp.CallToolResult, cmd.StateUsageOutput, error) {
+		out, err := cmd.RunStateUsage(ctx, in)
+		return nil, out, err
+	})
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:  "create_or_update_state_contract",
+		Title: "Create or update a state contract",
+		Description: "Write the contract.yaml for a Seedmancer state. A contract describes what " +
+			"the state means (purpose), the named data handles it provides, and the invariants " +
+			"it must satisfy (mustHave). `provides` entries are exposed to Playwright tests via " +
+			"seedmancer.get(name); keys ending in 'Env' (e.g. passwordEnv) are resolved from the " +
+			"environment at test time rather than stored in plaintext. Overwrites any existing " +
+			"contract for the state. Authoring-time only — does not generate or seed data.",
+		Annotations: &mcp.ToolAnnotations{DestructiveHint: falsePtr(), IdempotentHint: true},
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in cmd.WriteContractInput) (*mcp.CallToolResult, cmd.WriteContractOutput, error) {
+		out, err := cmd.RunWriteContract(ctx, in)
+		return nil, out, err
+	})
+
+	// TODO(playwright): a `generate_state_from_contract` tool could turn a
+	// contract's `provides`/`mustHave` into generate_dataset_local SQL. For now
+	// agents compose check_state_usage + create_or_update_state_contract +
+	// generate_dataset_local manually.
 }

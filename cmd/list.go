@@ -11,6 +11,7 @@ import (
 	"github.com/KazanKK/seedmancer/internal/scenario"
 	"github.com/KazanKK/seedmancer/internal/schemahistory"
 	"github.com/KazanKK/seedmancer/internal/ui"
+	"github.com/KazanKK/seedmancer/internal/usage"
 	utils "github.com/KazanKK/seedmancer/internal/utils"
 
 	"github.com/olekukonko/tablewriter"
@@ -31,6 +32,11 @@ type listEntry struct {
 	Drift    string `json:"drift,omitempty"`
 	Updated  string `json:"updated,omitempty"`
 	Services string `json:"services,omitempty"`
+	// UsedBy / LastUsed are populated when usage tracking is requested
+	// (--usage). UsedBy is the number of distinct tests that have seeded
+	// this state; LastUsed is a humanized "time ago" of the most recent run.
+	UsedBy   int    `json:"usedBy,omitempty"`
+	LastUsed string `json:"lastUsed,omitempty"`
 }
 
 // ListCommand prints every scenario known on disk, grouped by name with
@@ -58,6 +64,10 @@ func ListCommand() *cli.Command {
 				Name:  "db-url",
 				Usage: "Ad-hoc database URL (overrides --env)",
 			},
+			&cli.BoolFlag{
+				Name:  "usage",
+				Usage: "Show which Playwright tests use each state (USED BY / LAST USED)",
+			},
 		},
 		Action: func(c *cli.Context) error {
 			entries, badManifests, err := collectListEntries()
@@ -68,6 +78,11 @@ func ListCommand() *cli.Command {
 			// Always attempt to fingerprint the live DB. Silently skip the DB
 			// column if the database is not configured or unreachable.
 			entries, _ = annotateEntriesWithDBStatus(entries, c.String("env"), c.String("db-url"))
+
+			showUsage := c.Bool("usage")
+			if showUsage {
+				entries, _ = annotateEntriesWithUsage(entries)
+			}
 
 			if c.Bool("json") {
 				return outputJSON(struct {
@@ -80,7 +95,11 @@ func ListCommand() *cli.Command {
 				ui.Info("No scenarios yet. Run `seedmancer export <scenario>` to create one.")
 				return nil
 			}
-			renderScenarioTable(entries)
+			if showUsage {
+				renderScenarioUsageTable(entries)
+			} else {
+				renderScenarioTable(entries)
+			}
 			for path, err := range badManifests {
 				ui.Warn("scenario %q has a corrupt manifest: %v", path, err)
 			}
@@ -239,6 +258,81 @@ func annotateEntriesWithDBStatus(entries []listEntry, env, dbURL string) ([]list
 	return entries, nil
 }
 
+// annotateEntriesWithUsage folds the per-test usage events into each entry,
+// setting UsedBy (distinct test count) and LastUsed (humanized). Best-effort:
+// on any error the entries are returned unchanged so `list --usage` still
+// renders the rest of the table.
+func annotateEntriesWithUsage(entries []listEntry) ([]listEntry, error) {
+	configPath, err := utils.FindConfigFile()
+	if err != nil {
+		return entries, err
+	}
+	cfg, err := utils.LoadConfig(configPath)
+	if err != nil {
+		return entries, err
+	}
+	projectRoot := filepath.Dir(configPath)
+
+	agg, err := usage.Load(projectRoot, cfg.StoragePath)
+	if err != nil {
+		return entries, err
+	}
+	// Persist the derived view so it can be inspected directly. Non-fatal.
+	_ = usage.Persist(projectRoot, cfg.StoragePath, agg)
+
+	for i := range entries {
+		su := agg.States[entries[i].Scenario]
+		if su == nil {
+			continue
+		}
+		entries[i].UsedBy = len(su.UsedBy)
+		if !su.LastUsedAt.IsZero() {
+			entries[i].LastUsed = utils.HumanizeAgo(su.LastUsedAt)
+		}
+	}
+	return entries, nil
+}
+
+func renderScenarioUsageTable(entries []listEntry) {
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Scenario < entries[j].Scenario })
+
+	table := tablewriter.NewWriter(os.Stdout)
+	table.SetHeader([]string{"State", "Latest", "DB", "Used By", "Last Used"})
+	table.SetBorder(false)
+	table.SetColumnSeparator("  ")
+	table.SetHeaderAlignment(tablewriter.ALIGN_LEFT)
+	table.SetAlignment(tablewriter.ALIGN_LEFT)
+	for _, e := range entries {
+		dbCell := "—"
+		switch e.DB {
+		case "current":
+			dbCell = ui.Green("current")
+		case "outdated":
+			dbCell = ui.Yellow("outdated")
+		}
+		lastUsed := e.LastUsed
+		if strings.TrimSpace(lastUsed) == "" {
+			lastUsed = "never"
+		}
+		table.Append([]string{
+			e.Scenario,
+			defaultDash(e.Latest),
+			dbCell,
+			pluralTests(e.UsedBy),
+			lastUsed,
+		})
+	}
+	table.Render()
+}
+
+// pluralTests renders a usage count like "0 tests", "1 test", "5 tests".
+func pluralTests(n int) string {
+	if n == 1 {
+		return "1 test"
+	}
+	return fmt.Sprintf("%d tests", n)
+}
+
 func defaultDash(s string) string {
 	if strings.TrimSpace(s) == "" {
 		return "—"
@@ -269,9 +363,6 @@ func listLocalEntries() ([]listEntry, error) {
 	entries, _, err := collectListEntries()
 	return entries, err
 }
-
-// silence unused-import warning when `fmt` isn't needed by stub paths.
-var _ = fmt.Sprintf
 
 
 

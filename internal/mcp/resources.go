@@ -154,7 +154,7 @@ func registerResources(s *mcp.Server) {
 		URI:         "seedmancer://docs/playwright-recipe",
 		Name:        "Playwright recipe",
 		Title:       "Reset DB before Playwright",
-		Description: "How to use @seedmancer/playwright to seed the database automatically before each test, with per-describe scenario scoping.",
+		Description: "How to link Playwright tests to Seedmancer states: seed before each test, read named data via seedmancer.get(), and track which tests use which states.",
 		MIMEType:    "text/markdown",
 	}, func(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
 		return &mcp.ReadResourceResult{

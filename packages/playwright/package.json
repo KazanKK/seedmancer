@@ -1,7 +1,7 @@
 {
   "name": "@seedmancer/playwright",
-  "version": "0.1.0",
-  "description": "Playwright integration for Seedmancer – automatically seed your database before each test",
+  "version": "0.4.0",
+  "description": "Playwright integration for Seedmancer – seed test-data states, read named data handles, and track which tests use which states",
   "keywords": [
     "playwright",
     "seedmancer",
@@ -35,6 +35,9 @@
   "scripts": {
     "build": "tsc",
     "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "yaml": "^2.6.0"
   },
   "peerDependencies": {
     "@playwright/test": ">=1.40.0"

@@ -166,6 +166,18 @@ Run install_agent_rules once per project so this guidance persists across conver
   • Snapshot current state: export_database → optionally push_dataset.
   • Introspect:             list_datasets / describe_dataset / list_history / list_schemas / get_status.
 
+## Connect Playwright tests to states (@seedmancer/playwright)
+
+When authoring a Playwright test, link it to a Seedmancer state instead of
+generating fresh data per test:
+1. check_state_usage / list_datasets — reuse an existing state that matches the
+   scenario; prefer one state per suite, not one per tiny test.
+2. If none fits: create_or_update_state_contract (purpose + provides), then
+   generate_dataset_local to produce the data.
+3. The test declares test.use({ seedmancerState: "auth/login-success" }) and
+   reads data via seedmancer.get("user:login").
+Read seedmancer://docs/playwright for the full recipe.
+
 ## First time in a new project
 
 1. init_project       — creates seedmancer.yaml + .seedmancer/ + installs agent rule files.

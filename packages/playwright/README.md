@@ -1,65 +1,110 @@
 # @seedmancer/playwright
 
-Playwright integration for [Seedmancer](https://seedmancer.dev). Automatically seeds your database with a named scenario before each test.
+Playwright integration for [Seedmancer](https://seedmancer.dev). Connects Playwright tests to named Seedmancer **states** (test-data scenarios): seed a state before each test, read named data handles from the state's contract, and track which tests use which states.
 
 ## Installation
 
 ```sh
-npm install --save-dev @seedmancer/playwright
+npm install --save-dev @seedmancer/playwright @seedmancer/cli
 ```
 
-The [Seedmancer CLI](https://seedmancer.dev/docs/install) must be installed and available in `PATH`.
+`@seedmancer/cli` makes the `seedmancer` command available in your project without a global install.
 
 ## Usage
 
-Replace the standard Playwright `test` import with the one from this package:
+Replace the standard Playwright `test` import with the one from this package and declare the state with `test.use()`:
 
 ```ts
 import { test, expect } from "@seedmancer/playwright";
 
 test.use({
-  seedmancerScenario: "api-test",
+  seedmancerState: "auth/login-success",
+  seedmancerReset: "beforeEach",
 });
 
-test("user can open dashboard", async ({ page }) => {
-  await page.goto("/dashboard");
-  await expect(page.getByRole("heading", { name: "Dashboard" })).toBeVisible();
+test("user can login successfully", async ({ page, seedmancer }) => {
+  const user = seedmancer.get("user:login");
+
+  await page.goto("/login");
+  await page.fill("[name=email]", user.email);
+  await page.fill("[name=password]", user.password);
+  await page.click("button[type=submit]");
+
+  await expect(page.getByText("Dashboard")).toBeVisible();
 });
 ```
 
-Before each test, `seedmancer seed <scenario> --yes` is executed automatically. If `seedmancerScenario` is not set, the fixture is a no-op and no seeding occurs.
+The `seedmancer` fixture seeds `seedmancerState` before the test (per `seedmancerReset`) and exposes named data handles from the state's contract via `seedmancer.get()`.
 
 ## Options
 
 Set options via `test.use()` at the file or describe level:
 
-| Option | Type | Description |
-|---|---|---|
-| `seedmancerScenario` | `string` | Scenario name to seed. No seeding happens when omitted. |
-| `seedmancerEnv` | `string` | Target environment (`--env` flag). Defaults to the project default. |
-| `seedmancerCwd` | `string` | Working directory for the CLI. Defaults to `process.cwd()`. |
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `seedmancerState` | `string` | — | State (scenario) to seed. No seeding happens when omitted. |
+| `seedmancerReset` | `"beforeEach" \| "beforeAll" \| "manual"` | `"beforeEach"` | When to seed. `beforeAll` seeds once per worker per state; `manual` only seeds via `seedmancer.seed()`. |
+| `seedmancerEnv` | `string` | — | Target environment (`--env` flag). Defaults to the project default. |
+| `seedmancerCwd` | `string` | `process.cwd()` | Working directory for the CLI. |
 
-## Scoping
+## The `seedmancer` fixture
 
-Options follow Playwright's standard scoping rules. You can apply them globally in `playwright.config.ts`, per file with `test.use()`, or per describe block:
+| Member | Description |
+|---|---|
+| `seedmancer.state` | The state declared for this test, if any. |
+| `seedmancer.get(name)` | Returns a named data handle from the state's contract `provides` block. |
+| `seedmancer.seed(state?)` | Seeds a state on demand (for `reset: "manual"`). |
 
-```ts
-// playwright.config.ts
-import { defineConfig } from "@playwright/test";
+### Reading data with `get()`
 
-export default defineConfig({
-  use: {
-    seedmancerScenario: "baseline",
-  },
-});
+`get(name)` reads from the state's contract at `.seedmancer/scenarios/<state>/contract.yaml`. Keys ending in `Env` are resolved from the environment:
+
+```yaml
+# .seedmancer/scenarios/auth/login-success/contract.yaml
+state: auth/login-success
+purpose: A valid verified user who can log in
+
+provides:
+  user:login:
+    email: login@example.com
+    passwordEnv: SEEDMANCER_TEST_PASSWORD
 ```
 
 ```ts
-// override for one describe block
-test.describe("admin flows", () => {
-  test.use({ seedmancerScenario: "admin-data" });
+const user = seedmancer.get("user:login");
+// => { email: "login@example.com", password: process.env.SEEDMANCER_TEST_PASSWORD }
+```
 
-  test("admin can manage users", async ({ page }) => {
+### Manual seeding
+
+```ts
+test.use({ seedmancerState: "auth/login-success", seedmancerReset: "manual" });
+
+test("...", async ({ seedmancer }) => {
+  await seedmancer.seed(); // or seedmancer.seed("other/state")
+});
+```
+
+## Usage tracking
+
+When a test runs with a state declared, the fixture records a usage event under `.seedmancer/.usage-events/`. The CLI aggregates these so you can see which states are used by which tests:
+
+```sh
+seedmancer list --usage
+seedmancer check auth/login-success
+```
+
+Tracking is best-effort and never fails a test. Set `SEEDMANCER_USAGE_STRICT=1` to surface write errors.
+
+## Scoping
+
+Options follow Playwright's standard scoping rules — global in `playwright.config.ts`, per file, or per describe block:
+
+```ts
+test.describe("admin flows", () => {
+  test.use({ seedmancerState: "auth/admin-user" });
+
+  test("admin can manage users", async ({ page, seedmancer }) => {
     // ...
   });
 });
@@ -70,7 +115,7 @@ test.describe("admin flows", () => {
 | Situation | Error message |
 |---|---|
 | CLI not found | `Seedmancer CLI not found. Make sure it is installed and available in PATH.` |
-| Non-zero exit | `Seedmancer exited with status <N>: <stderr/stdout>` |
+| Non-zero exit | `seedmancer seed failed for state "<state>" with status <N>: <output>` |
 | Killed by signal | `Seedmancer was terminated by signal: <signal>` |
 
 ## Global setup — pull scenarios before the suite
