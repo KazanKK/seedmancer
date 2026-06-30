@@ -1,6 +1,6 @@
 {
   "name": "@seedmancer/playwright",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Playwright integration for Seedmancer – seed test-data states, read named data handles, and track which tests use which states",
   "keywords": [
     "playwright",
@@ -26,6 +26,10 @@
     "./global-setup": {
       "types": "./dist/global-setup.d.ts",
       "default": "./dist/global-setup.js"
+    },
+    "./global-teardown": {
+      "types": "./dist/global-teardown.d.ts",
+      "default": "./dist/global-teardown.js"
     }
   },
   "files": [

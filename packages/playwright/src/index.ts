@@ -155,6 +155,7 @@ export const test = base.extend<
           project: testInfo.project.name,
           resetMode: 'manual',
           cwd,
+          provides: Object.keys(provides),
         });
       },
     };
@@ -185,16 +186,20 @@ export const test = base.extend<
         }
       }
 
-      if (seedmancerState !== undefined) {
-        recordUsage({
-          state: seedmancerState,
-          file: testInfo.file,
-          title: testInfo.title,
-          project: testInfo.project.name,
-          resetMode: seedmancerReset,
-          cwd,
-        });
-      }
+      // Record usage for every test — including those with no linked state —
+      // so the dashboard can surface "No linked data" tests too.
+      recordUsage({
+        state: seedmancerState,
+        file: testInfo.file,
+        title: testInfo.title,
+        project: testInfo.project.name,
+        resetMode: seedmancerReset,
+        cwd,
+        provides:
+          seedmancerState !== undefined
+            ? Object.keys(loadProvides(cwd, seedmancerState))
+            : undefined,
+      });
 
       await use();
     },
