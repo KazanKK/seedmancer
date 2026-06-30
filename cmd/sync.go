@@ -45,6 +45,10 @@ func PushCommand() *cli.Command {
 				Name:  "token",
 				Usage: "API token (falls back to SEEDMANCER_API_TOKEN env var, then ~/.seedmancer/credentials)",
 			},
+			&cli.StringFlag{
+				Name:  "project",
+				Usage: "Cloud project slug (falls back to default_project in seedmancer.yaml, then server Default)",
+			},
 		},
 		Action: func(c *cli.Context) error {
 			configPath, err := utils.FindConfigFile()
@@ -60,6 +64,7 @@ func PushCommand() *cli.Command {
 			if err != nil {
 				return err
 			}
+			projectSlug := utils.ResolveProjectSlug(c.String("project"), cfg)
 
 			scenarioArg := strings.TrimSpace(c.Args().First())
 			useAll := c.Bool("all")
@@ -100,7 +105,7 @@ func PushCommand() *cli.Command {
 				}
 				schemaDir := scenario.SchemaStoreDir(projectRoot, cfg.StoragePath, utils.FingerprintShort(rev.Manifest.SchemaFingerprint))
 				ui.Step("%s @ %s  (schema %s)", scenarioPath, rev.RevID, utils.FingerprintShort(rev.Manifest.SchemaFingerprint))
-				if err := syncOne(schemaDir, rev.DataDir, scenarioPath, rev.RevID, baseURL, token, scenarioPrompt(projectRoot, cfg.StoragePath, scenarioPath)); err != nil {
+				if err := syncOne(schemaDir, rev.DataDir, scenarioPath, rev.RevID, baseURL, token, projectSlug, scenarioPrompt(projectRoot, cfg.StoragePath, scenarioPath)); err != nil {
 					return fmt.Errorf("push %s: %w", scenarioPath, err)
 				}
 				pushed++
@@ -119,7 +124,7 @@ func PushCommand() *cli.Command {
 			}
 			schemaDir := scenario.SchemaStoreDir(projectRoot, cfg.StoragePath, utils.FingerprintShort(rev.Manifest.SchemaFingerprint))
 			ui.Step("%s @ %s  (schema %s)", scenarioPath, rev.RevID, utils.FingerprintShort(rev.Manifest.SchemaFingerprint))
-			return syncOne(schemaDir, rev.DataDir, scenarioPath, rev.RevID, baseURL, token, scenarioPrompt(projectRoot, cfg.StoragePath, scenarioPath))
+			return syncOne(schemaDir, rev.DataDir, scenarioPath, rev.RevID, baseURL, token, projectSlug, scenarioPrompt(projectRoot, cfg.StoragePath, scenarioPath))
 		},
 	}
 }
@@ -148,7 +153,7 @@ func scenarioPrompt(projectRoot, storagePath, scenarioPath string) string {
 // syncOne uploads schema sidecars + revision CSVs for a single scenario.
 // revisionID is sent as `revision=rNNN` so the cloud stores under that label.
 // prompt, when non-empty, is synced to the cloud scenario after the upload.
-func syncOne(schemaDir, dataDir, datasetName, revisionID, baseURL, token, prompt string) error {
+func syncOne(schemaDir, dataDir, datasetName, revisionID, baseURL, token, projectSlug, prompt string) error {
 	start := time.Now()
 	schemaFiles, err := utils.SchemaFiles(schemaDir)
 	if err != nil {
@@ -184,7 +189,7 @@ func syncOne(schemaDir, dataDir, datasetName, revisionID, baseURL, token, prompt
 
 	sp = ui.StartSpinner("Uploading...")
 	ui.Debug("POST %s/v1.0/datasets/sync/upload-url?name=%s", baseURL, datasetName)
-	uploadURLResp, err := requestUploadURL(ctx, token, baseURL, datasetName, revisionID)
+	uploadURLResp, err := requestUploadURL(ctx, token, baseURL, datasetName, revisionID, projectSlug)
 	if err != nil {
 		sp.Stop(false, "Upload failed")
 		return err
@@ -196,7 +201,7 @@ func syncOne(schemaDir, dataDir, datasetName, revisionID, baseURL, token, prompt
 	sp.Stop(true, "Uploaded")
 
 	sp = ui.StartSpinner("Processing...")
-	result, err := confirmUpload(ctx, token, baseURL, datasetName, uploadURLResp.Path, revisionID)
+	result, err := confirmUpload(ctx, token, baseURL, datasetName, uploadURLResp.Path, revisionID, projectSlug)
 	if err != nil {
 		sp.Stop(false, "Processing failed")
 		return err
@@ -206,7 +211,7 @@ func syncOne(schemaDir, dataDir, datasetName, revisionID, baseURL, token, prompt
 	// Sync the scenario's saved purpose. Best-effort: the data upload
 	// already succeeded and the prompt re-syncs on the next push.
 	if strings.TrimSpace(prompt) != "" && result.ID != "" {
-		if pErr := pushScenarioPrompt(ctx, token, baseURL, result.ID, strings.TrimSpace(prompt)); pErr != nil {
+		if pErr := pushScenarioPrompt(ctx, token, baseURL, result.ID, strings.TrimSpace(prompt), projectSlug); pErr != nil {
 			ui.Warn("could not sync the scenario purpose: %v", pErr)
 		}
 	}
@@ -249,7 +254,7 @@ func stampRemoteRevision(revDir, baseURL, token, datasetName, schemaPrefix strin
 
 // requestUploadURL calls POST /v1.0/datasets/sync/upload-url and returns
 // the presigned storage URL and staging path.
-func requestUploadURL(ctx context.Context, token, baseURL, datasetName, revisionID string) (uploadURLResponse, error) {
+func requestUploadURL(ctx context.Context, token, baseURL, datasetName, revisionID, projectSlug string) (uploadURLResponse, error) {
 	q := url.Values{}
 	q.Set("name", datasetName)
 	if strings.TrimSpace(revisionID) != "" {
@@ -262,6 +267,7 @@ func requestUploadURL(ctx context.Context, token, baseURL, datasetName, revision
 		return uploadURLResponse{}, fmt.Errorf("creating upload-url request: %v", err)
 	}
 	req.Header.Set("Authorization", utils.BearerAPIToken(token))
+	utils.ApplyProjectHeader(req, projectSlug)
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -308,7 +314,7 @@ func putToStorage(ctx context.Context, signedURL string, zipData *bytes.Buffer) 
 }
 
 // confirmUpload calls POST /v1.0/datasets/sync/confirm and returns the result.
-func confirmUpload(ctx context.Context, token, baseURL, datasetName, stagingPath, revisionID string) (syncUploadResult, error) {
+func confirmUpload(ctx context.Context, token, baseURL, datasetName, stagingPath, revisionID, projectSlug string) (syncUploadResult, error) {
 	q := url.Values{}
 	q.Set("name", datasetName)
 	q.Set("path", stagingPath)
@@ -322,6 +328,7 @@ func confirmUpload(ctx context.Context, token, baseURL, datasetName, stagingPath
 		return syncUploadResult{}, fmt.Errorf("creating confirm request: %v", err)
 	}
 	req.Header.Set("Authorization", utils.BearerAPIToken(token))
+	utils.ApplyProjectHeader(req, projectSlug)
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

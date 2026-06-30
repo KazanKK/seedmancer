@@ -3,6 +3,7 @@ package utils
 import (
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -508,6 +509,40 @@ func GetBaseURL() string {
 // BearerAPIToken returns the Authorization header value for a dashboard API token.
 func BearerAPIToken(token string) string {
 	return "Bearer " + token
+}
+
+// globalProjectSlug is set once per CLI invocation (from --project flag or
+// default_project config). It is read by ApplyProjectHeader when no explicit
+// slug is passed, avoiding the need to thread the value through every helper.
+var globalProjectSlug string
+
+// SetGlobalProjectSlug stores the active project slug for the current process.
+// Call this once per command invocation before making any cloud requests.
+func SetGlobalProjectSlug(slug string) {
+	globalProjectSlug = strings.TrimSpace(slug)
+}
+
+// ResolveProjectSlug returns the project slug to use for cloud API calls.
+// Priority: flagValue (--project flag) > cfg.DefaultProject > "" (server falls back to Default project).
+func ResolveProjectSlug(flagValue string, cfg Config) string {
+	if v := strings.TrimSpace(flagValue); v != "" {
+		return v
+	}
+	return strings.TrimSpace(cfg.DefaultProject)
+}
+
+// ApplyProjectHeader sets the X-Project-Slug header on req when projectSlug is non-empty.
+// When projectSlug is "" the global slug (set via SetGlobalProjectSlug) is used as a
+// fallback. The server resolves the project by slug. When the header is absent the
+// server falls back to the user's Default project, so omitting is always safe.
+func ApplyProjectHeader(req *http.Request, projectSlug string) {
+	slug := projectSlug
+	if slug == "" {
+		slug = globalProjectSlug
+	}
+	if slug != "" {
+		req.Header.Set("X-Project-Slug", slug)
+	}
 }
 
 // Token source labels reported by ResolveAPITokenSource and surfaced in

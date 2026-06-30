@@ -22,11 +22,12 @@ import (
 // "maybe populated" fields where possible.
 type statusReport struct {
 	Project struct {
-		ConfigPath   string           `json:"configPath,omitempty"`
-		ConfigScope  string           `json:"configScope"`
-		StoragePath  string           `json:"storagePath,omitempty"`
-		DefaultEnv   string           `json:"defaultEnv,omitempty"`
-		Environments []statusEnvEntry `json:"environments,omitempty"`
+		ConfigPath     string           `json:"configPath,omitempty"`
+		ConfigScope    string           `json:"configScope"`
+		StoragePath    string           `json:"storagePath,omitempty"`
+		DefaultEnv     string           `json:"defaultEnv,omitempty"`
+		DefaultProject string           `json:"defaultProject,omitempty"`
+		Environments   []statusEnvEntry `json:"environments,omitempty"`
 	} `json:"project"`
 	API struct {
 		URL    string `json:"url"`
@@ -134,6 +135,9 @@ func buildStatusReport(showDBURL bool) statusReport {
 		if cfg, err := utils.LoadConfig(configPath); err == nil {
 			report.Project.StoragePath = cfg.StoragePath
 			report.Project.DefaultEnv = cfg.ActiveEnvName()
+			if cfg.DefaultProject != "" {
+				report.Project.DefaultProject = cfg.DefaultProject
+			}
 			envs := cfg.EffectiveEnvs()
 			for _, name := range cfg.SortedEnvNames() {
 				url := envs[name].DatabaseURL
@@ -201,6 +205,11 @@ func renderStatus(r statusReport) {
 		ui.KeyValue("default_env:  ", r.Project.DefaultEnv)
 	} else {
 		ui.KeyValue("default_env:  ", "(unset — run `seedmancer env use <name>`)")
+	}
+	if r.Project.DefaultProject != "" {
+		ui.KeyValue("cloud project:", r.Project.DefaultProject)
+	} else {
+		ui.KeyValue("cloud project:", "(default — set with `seedmancer project use <slug>`)")
 	}
 	if len(r.Project.Environments) > 0 {
 		ui.KeyValue("environments: ", fmt.Sprintf("%d", len(r.Project.Environments)))

@@ -68,6 +68,10 @@ func PullCommand() *cli.Command {
 				Name:  "token",
 				Usage: "API token (falls back to SEEDMANCER_API_TOKEN env var, then ~/.seedmancer/credentials)",
 			},
+			&cli.StringFlag{
+				Name:  "project",
+				Usage: "Cloud project slug (falls back to default_project in seedmancer.yaml, then server Default)",
+			},
 		},
 		Action: func(c *cli.Context) error {
 			scenarioArg := strings.TrimSpace(c.Args().First())
@@ -95,6 +99,7 @@ func PullCommand() *cli.Command {
 					return cfgErr
 				}
 				projectRoot := filepath.Dir(configPath)
+				utils.SetGlobalProjectSlug(utils.ResolveProjectSlug(c.String("project"), cfg))
 
 				paths, badManifests, walkErr := scenario.WalkScenarios(projectRoot, cfg.StoragePath)
 				if walkErr != nil {
@@ -170,6 +175,7 @@ func findRemoteDataset(baseURL, token, datasetName, schemaPrefix string) (datase
 		return datasetAPI{}, fmt.Errorf("creating request: %v", err)
 	}
 	req.Header.Set("Authorization", utils.BearerAPIToken(token))
+	utils.ApplyProjectHeader(req, "")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -235,6 +241,7 @@ func listRemoteDatasets(baseURL, token string) (map[string]datasetAPI, error) {
 		return nil, fmt.Errorf("creating request: %v", err)
 	}
 	req.Header.Set("Authorization", utils.BearerAPIToken(token))
+	utils.ApplyProjectHeader(req, "")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -274,6 +281,7 @@ func getDownloadURL(baseURL, token, datasetID string) (string, error) {
 		return "", fmt.Errorf("creating request: %v", err)
 	}
 	req.Header.Set("Authorization", utils.BearerAPIToken(token))
+	utils.ApplyProjectHeader(req, "")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

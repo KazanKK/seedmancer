@@ -350,6 +350,7 @@ func fetchRemoteSchemas(token string) ([]schemaSummary, error) {
 		return nil, fmt.Errorf("creating request: %v", err)
 	}
 	req.Header.Set("Authorization", utils.BearerAPIToken(token))
+	utils.ApplyProjectHeader(req, "")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -521,6 +522,7 @@ func renameRemoteSchema(tokenFlag, ref, newName string, clear bool) error {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", utils.BearerAPIToken(token))
+	utils.ApplyProjectHeader(req, "")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -560,6 +562,7 @@ func resolveRemoteSchemaID(baseURL, token, ref string) (schemaSummary, error) {
 		return schemaSummary{}, fmt.Errorf("creating request: %v", err)
 	}
 	req.Header.Set("Authorization", utils.BearerAPIToken(token))
+	utils.ApplyProjectHeader(req, "")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -708,6 +711,7 @@ func rmRemoteSchema(tokenFlag, ref string, force bool) error {
 		return fmt.Errorf("creating request: %v", err)
 	}
 	req.Header.Set("Authorization", utils.BearerAPIToken(token))
+	utils.ApplyProjectHeader(req, "")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

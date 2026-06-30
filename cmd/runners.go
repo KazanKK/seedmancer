@@ -1887,6 +1887,9 @@ func RunSync(ctx context.Context, in SyncInput) (SyncOutput, error) {
 	schemaDir := scenario.SchemaStoreDir(projectRoot, cfg.StoragePath, fpShort)
 	baseURL := utils.GetBaseURL()
 
+	projectSlug := utils.ResolveProjectSlug("", cfg)
+	utils.SetGlobalProjectSlug(projectSlug)
+
 	schemaFiles, err := utils.SchemaFiles(schemaDir)
 	if err != nil {
 		return SyncOutput{}, err
@@ -1908,7 +1911,7 @@ func RunSync(ctx context.Context, in SyncInput) (SyncOutput, error) {
 	if err != nil {
 		return SyncOutput{}, fmt.Errorf("compressing files: %v", err)
 	}
-	result, err := syncUploadPresigned(ctx, token, baseURL, scenarioPath, rev.RevID, zipData)
+	result, err := syncUploadPresigned(ctx, token, baseURL, scenarioPath, rev.RevID, utils.ResolveProjectSlug("", cfg), zipData)
 	if err != nil {
 		return SyncOutput{}, err
 	}
@@ -1916,7 +1919,7 @@ func RunSync(ctx context.Context, in SyncInput) (SyncOutput, error) {
 	// the data upload already succeeded and the prompt re-syncs next push.
 	scenarioDir := scenario.ScenarioDir(projectRoot, cfg.StoragePath, scenarioPath)
 	if m, mErr := scenario.ReadManifest(scenarioDir); mErr == nil && strings.TrimSpace(m.Prompt) != "" && result.ID != "" {
-		_ = pushScenarioPrompt(ctx, token, baseURL, result.ID, strings.TrimSpace(m.Prompt))
+		_ = pushScenarioPrompt(ctx, token, baseURL, result.ID, strings.TrimSpace(m.Prompt), utils.ResolveProjectSlug("", cfg))
 	}
 	// Stamp the local revision with the cloud revision it now mirrors so a
 	// subsequent pull can skip the download. Best-effort.
@@ -1971,6 +1974,7 @@ func RunFetch(ctx context.Context, in FetchInput) (FetchOutput, error) {
 		return FetchOutput{}, err
 	}
 	baseURL := utils.GetBaseURL()
+	utils.SetGlobalProjectSlug(utils.ResolveProjectSlug("", cfg))
 	match, err := findRemoteDataset(baseURL, token, scenarioPath, "")
 	if err != nil {
 		return FetchOutput{}, err
@@ -2179,4 +2183,56 @@ func ListLocalSchemasBrief() ([]LocalSchemaBrief, error) {
 		})
 	}
 	return out, nil
+}
+
+// ── Project management ────────────────────────────────────────────────────────
+
+type ListProjectsInput struct {
+	Token string `json:"token,omitempty" jsonschema:"API token override"`
+}
+
+type ListProjectsOutput struct {
+	Projects []projectAPI `json:"projects"`
+}
+
+// RunListProjects returns all cloud projects for the authenticated user.
+func RunListProjects(ctx context.Context, in ListProjectsInput) (ListProjectsOutput, error) {
+	token, err := utils.ResolveAPIToken(in.Token)
+	if err != nil {
+		return ListProjectsOutput{}, err
+	}
+	projects, err := listProjects(token)
+	if err != nil {
+		return ListProjectsOutput{}, err
+	}
+	return ListProjectsOutput{Projects: projects}, nil
+}
+
+type UseProjectInput struct {
+	Slug string `json:"slug" jsonschema:"Project slug to set as the default in seedmancer.yaml"`
+}
+
+type UseProjectOutput struct {
+	Slug string `json:"slug"`
+}
+
+// RunUseProject writes the given project slug as default_project in seedmancer.yaml.
+func RunUseProject(ctx context.Context, in UseProjectInput) (UseProjectOutput, error) {
+	slug := strings.TrimSpace(in.Slug)
+	if slug == "" {
+		return UseProjectOutput{}, fmt.Errorf("slug is required")
+	}
+	configPath, err := utils.FindConfigFile()
+	if err != nil {
+		return UseProjectOutput{}, fmt.Errorf("no seedmancer.yaml found: %v", err)
+	}
+	cfg, err := utils.LoadConfig(configPath)
+	if err != nil {
+		return UseProjectOutput{}, err
+	}
+	cfg.DefaultProject = slug
+	if err := utils.SaveConfig(configPath, cfg); err != nil {
+		return UseProjectOutput{}, fmt.Errorf("saving config: %v", err)
+	}
+	return UseProjectOutput{Slug: slug}, nil
 }

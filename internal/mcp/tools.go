@@ -338,4 +338,25 @@ func registerTools(s *mcp.Server) {
 	// contract's `provides`/`mustHave` into generate_dataset_local SQL. For now
 	// agents compose check_state_usage + create_or_update_state_contract +
 	// generate_dataset_local manually.
+
+	// ── Cloud project management ──────────────────────────────────────────────
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "list_projects",
+		Title:       "List cloud projects",
+		Description: "Return all cloud projects for the authenticated user. Each project scopes its own scenarios, schemas, and test data. Use this to find the slug you need for use_project or the --project flag.",
+		Annotations: readOnly,
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in cmd.ListProjectsInput) (*mcp.CallToolResult, cmd.ListProjectsOutput, error) {
+		out, err := cmd.RunListProjects(ctx, in)
+		return nil, out, err
+	})
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "use_project",
+		Title:       "Set the default cloud project",
+		Description: "Write the given project slug as default_project in seedmancer.yaml. Subsequent cloud operations (push, pull, generate_dataset_local, etc.) will target this project unless overridden with --project.",
+		Annotations: &mcp.ToolAnnotations{DestructiveHint: falsePtr(), IdempotentHint: true},
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in cmd.UseProjectInput) (*mcp.CallToolResult, cmd.UseProjectOutput, error) {
+		out, err := cmd.RunUseProject(ctx, in)
+		return nil, out, err
+	})
 }

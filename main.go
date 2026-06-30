@@ -87,6 +87,8 @@ func main() {
 	schemasCmd := cmd.SchemasCommand()
 	schemasCmd.Category = "Remote"
 	schemasCmd.Hidden = true
+	projectCmd := cmd.ProjectCommand()
+	projectCmd.Category = "Remote"
 
 	// "Integrations" sorts after G/L/R alphabetically (I < L), so we use
 	// a leading space on the label to force it to the end of --help. The
@@ -116,9 +118,20 @@ func main() {
 				Usage:   "Show detailed debug output",
 				EnvVars: []string{"SEEDMANCER_DEBUG"},
 			},
+			&cli.StringFlag{
+				Name:    "project",
+				Usage:   "Cloud project slug (falls back to default_project in seedmancer.yaml, then server Default)",
+				EnvVars: []string{"SEEDMANCER_PROJECT"},
+			},
 		},
 		Before: func(c *cli.Context) error {
 			ui.SetDebug(c.Bool("debug"))
+			// Resolve and cache the active project slug for all cloud calls.
+			// Commands that load config themselves will refine this with
+			// ResolveProjectSlug; this handles the global-flag-only case.
+			if slug := strings.TrimSpace(c.String("project")); slug != "" {
+				utils.SetGlobalProjectSlug(slug)
+			}
 			return nil
 		},
 		Commands: []*cli.Command{
@@ -134,10 +147,11 @@ func main() {
 		historyCmd,
 		checkCmd,
 			refreshCmd,
-			pushCmd,
-			pullCmd,
-			schemasCmd,
-			mcpCmd,
+		pushCmd,
+		pullCmd,
+		schemasCmd,
+		projectCmd,
+		mcpCmd,
 		},
 	}
 

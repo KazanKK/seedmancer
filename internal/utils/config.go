@@ -37,6 +37,10 @@ type Config struct {
 	DefaultEnv   string               `yaml:"default_env,omitempty"`
 	Environments map[string]EnvConfig `yaml:"environments,omitempty"`
 
+	// DefaultProject is the cloud project slug used when --project is omitted.
+	// If empty, the server falls back to the user's "Default" project.
+	DefaultProject string `yaml:"default_project,omitempty"`
+
 	// Legacy single-target fields — kept for read-compat.
 	DatabaseURL string `yaml:"database_url,omitempty"`
 

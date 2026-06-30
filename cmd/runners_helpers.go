@@ -40,7 +40,7 @@ type uploadURLResponse struct {
 // pushScenarioPrompt syncs the scenario's saved purpose to the cloud via
 // PATCH /v1.0/datasets/{id}. The prompt can be long, so it travels in a
 // JSON body rather than the sync query params.
-func pushScenarioPrompt(ctx context.Context, token, baseURL, datasetID, prompt string) error {
+func pushScenarioPrompt(ctx context.Context, token, baseURL, datasetID, prompt, projectSlug string) error {
 	payload, err := json.Marshal(struct {
 		Prompt string `json:"prompt"`
 	}{Prompt: prompt})
@@ -54,6 +54,7 @@ func pushScenarioPrompt(ctx context.Context, token, baseURL, datasetID, prompt s
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", utils.BearerAPIToken(token))
+	utils.ApplyProjectHeader(req, projectSlug)
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -77,7 +78,7 @@ func pushScenarioPrompt(ctx context.Context, token, baseURL, datasetID, prompt s
 //
 // This bypasses the Vercel function body-size limit (≈4.5 MB) so datasets
 // of any size can be synced.
-func syncUploadPresigned(ctx context.Context, token, baseURL, datasetName, revisionLabel string, zipData *bytes.Buffer) (syncUploadResult, error) {
+func syncUploadPresigned(ctx context.Context, token, baseURL, datasetName, revisionLabel, projectSlug string, zipData *bytes.Buffer) (syncUploadResult, error) {
 	// Step 1: request a presigned upload URL.
 	q1 := url.Values{}
 	q1.Set("name", datasetName)
@@ -91,6 +92,7 @@ func syncUploadPresigned(ctx context.Context, token, baseURL, datasetName, revis
 		return syncUploadResult{}, fmt.Errorf("creating upload-url request: %v", err)
 	}
 	req1.Header.Set("Authorization", utils.BearerAPIToken(token))
+	utils.ApplyProjectHeader(req1, projectSlug)
 
 	resp1, err := http.DefaultClient.Do(req1)
 	if err != nil {
@@ -145,6 +147,7 @@ func syncUploadPresigned(ctx context.Context, token, baseURL, datasetName, revis
 		return syncUploadResult{}, fmt.Errorf("creating confirm request: %v", err)
 	}
 	req3.Header.Set("Authorization", utils.BearerAPIToken(token))
+	utils.ApplyProjectHeader(req3, projectSlug)
 
 	resp3, err := http.DefaultClient.Do(req3)
 	if err != nil {
