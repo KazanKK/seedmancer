@@ -2,12 +2,10 @@ package cmd
 
 import (
 	"bufio"
-	"bytes"
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -59,11 +57,12 @@ func stripExcludedTables(schemaJSON []byte, exclude []string) ([]byte, error) {
 // --revision / latest precedence rules. It carries the
 // loaded manifest so callers don't need a second read.
 type resolvedRevision struct {
-	Scenario string
-	RevID    string
-	RevDir   string
-	DataDir  string
-	Manifest scenario.RevisionManifest
+	Scenario         string
+	RevID            string
+	RevDir           string
+	DataDir          string
+	Manifest         scenario.RevisionManifest
+	ScenarioManifest scenario.Manifest
 }
 
 // resolveScenarioRevision picks one revision for a scenario. Precedence:
@@ -104,11 +103,12 @@ func resolveScenarioRevision(projectRoot, storagePath, scenarioPath, revID strin
 	}
 
 	return resolvedRevision{
-		Scenario: scenarioPath,
-		RevID:    target,
-		RevDir:   revDir,
-		DataDir:  filepath.Join(revDir, "data"),
-		Manifest: revManifest,
+		Scenario:         scenarioPath,
+		RevID:            target,
+		RevDir:           revDir,
+		DataDir:          filepath.Join(revDir, "data"),
+		Manifest:         revManifest,
+		ScenarioManifest: manifest,
 	}, nil
 }
 
@@ -350,36 +350,4 @@ func resolveMarkersDir(srcDir string, values envmarker.EnvironmentValues, envNam
 	}
 
 	return tmp, cleanup, nil
-}
-
-// reportLiveSchema notifies the Seedmancer cloud of the current live DB
-// schema fingerprint. This lets the web dashboard reliably identify which
-// scenario schemas match the live DB without relying on timestamp heuristics.
-//
-// Fire-and-forget: runs in a goroutine. Any error (no token, network failure,
-// fingerprint not yet pushed) is silently ignored so it never blocks the
-// primary command. The cloud will return 404 if the fingerprint hasn't been
-// pushed yet — that's fine; the next `push` will upload it and the next
-// DB-touching command will mark it live.
-func reportLiveSchema(fingerprint string) {
-	token, err := utils.ResolveAPIToken("")
-	if err != nil || token == "" {
-		return
-	}
-	go func() {
-		payload, _ := json.Marshal(map[string]string{"fingerprint": fingerprint})
-		req, err := http.NewRequest(http.MethodPost,
-			utils.GetBaseURL()+"/v1.0/live-schema",
-			bytes.NewReader(payload))
-		if err != nil {
-			return
-		}
-		req.Header.Set("Authorization", "Bearer "+token)
-		req.Header.Set("Content-Type", "application/json")
-		utils.ApplyProjectHeader(req, "")
-		resp, err := http.DefaultClient.Do(req)
-		if err == nil {
-			resp.Body.Close()
-		}
-	}()
 }

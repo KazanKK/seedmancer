@@ -1285,7 +1285,6 @@ func RunExport(_ context.Context, in ExportInput) (ExportOutput, error) {
 	}
 
 	tryUpdateSchemaHistory(projectRoot, cfg.StoragePath, fingerprint)
-	reportLiveSchema(fingerprint)
 
 	var success bool
 	var revRoot string // set once revision dir is created; removed on failure
@@ -1975,7 +1974,13 @@ func RunFetch(ctx context.Context, in FetchInput) (FetchOutput, error) {
 	}
 	baseURL := utils.GetBaseURL()
 	utils.SetGlobalProjectSlug(utils.ResolveProjectSlug("", cfg))
-	match, err := findRemoteDataset(baseURL, token, scenarioPath, "")
+
+	// Read the local scenario manifest to get RemoteScenarioID for id-based matching.
+	localScenarioDir := scenario.ScenarioDir(projectRoot, cfg.StoragePath, scenarioPath)
+	localManifest, _ := scenario.ReadManifest(localScenarioDir)
+
+	// Find the cloud dataset: try by stable id first (rename-transparent), then by name.
+	match, err := findRemoteDatasetByIDOrName(baseURL, token, scenarioPath, localManifest.RemoteScenarioID)
 	if err != nil {
 		return FetchOutput{}, err
 	}
@@ -1989,7 +1994,28 @@ func RunFetch(ctx context.Context, in FetchInput) (FetchOutput, error) {
 		return FetchOutput{}, fmt.Errorf("creating schema dir: %v", err)
 	}
 
-	scenarioDir := scenario.ScenarioDir(projectRoot, cfg.StoragePath, scenarioPath)
+	// If the cloud canonical name differs from the local path (post-rename),
+	// rename the local scenario folder to match.
+	canonicalPath := match.Name
+	if canonicalPath == "" {
+		canonicalPath = scenarioPath
+	}
+	scenarioDir := localScenarioDir
+	if canonicalPath != scenarioPath {
+		newScenarioDir := scenario.ScenarioDir(projectRoot, cfg.StoragePath, canonicalPath)
+		if _, statErr := os.Stat(newScenarioDir); os.IsNotExist(statErr) {
+			if mkErr := os.MkdirAll(filepath.Dir(newScenarioDir), 0755); mkErr == nil {
+				if mvErr := os.Rename(localScenarioDir, newScenarioDir); mvErr == nil {
+					scenarioDir = newScenarioDir
+					scenarioPath = canonicalPath
+				}
+			}
+		} else {
+			// Target exists — use canonical path for new revisions, keep old folder
+			scenarioDir = newScenarioDir
+			scenarioPath = canonicalPath
+		}
+	}
 
 	// Skip the download when the local latest revision already mirrors the
 	// cloud's latest revision (stamped by a previous pull or push). This
@@ -2070,6 +2096,10 @@ func RunFetch(ctx context.Context, in FetchInput) (FetchOutput, error) {
 	scenarioManifest.Latest = revID
 	if p := strings.TrimSpace(match.Prompt); p != "" {
 		scenarioManifest.Prompt = p
+	}
+	// Stamp the stable scenario id so future push/pull can resolve by id.
+	if match.ScenarioID != "" {
+		scenarioManifest.RemoteScenarioID = match.ScenarioID
 	}
 	_ = scenario.WriteManifest(scenarioDir, scenarioManifest)
 

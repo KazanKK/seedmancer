@@ -27,20 +27,16 @@ import (
 func PushCommand() *cli.Command {
 	return &cli.Command{
 		Name:      "push",
-		Aliases:   []string{"sync"},
-		Usage:     "Upload a scenario's latest revision to the cloud",
+		Usage:     "Upload scenario revisions to the cloud",
 		ArgsUsage: "[scenario]",
 		Description: "Zips the schema sidecars + the chosen revision's CSVs and uploads\n" +
 			"them to your Seedmancer cloud account. The scenario path is the cloud name;\n" +
 			"the revision label (e.g. r002) is preserved on the server.\n\n" +
-			"With --all, only scenarios missing from the connected cloud API or whose\n" +
-			"local stamp no longer matches the cloud are pushed (diff-only). To re-push\n" +
-			"a scenario already in sync, use `seedmancer push <scenario>` directly.",
+			"With no argument, every local scenario is pushed: scenarios missing from\n" +
+			"the connected cloud API or whose local stamp no longer matches the cloud\n" +
+			"are uploaded (diff-only). Pass a scenario path to push just that one\n" +
+			"(re-pushes even if already in sync).",
 		Flags: []cli.Flag{
-			&cli.BoolFlag{
-				Name:  "all",
-				Usage: "Push every local scenario (latest revision each)",
-			},
 			&cli.StringFlag{
 				Name:  "token",
 				Usage: "API token (falls back to SEEDMANCER_API_TOKEN env var, then ~/.seedmancer/credentials)",
@@ -65,19 +61,13 @@ func PushCommand() *cli.Command {
 				return err
 			}
 			projectSlug := utils.ResolveProjectSlug(c.String("project"), cfg)
+			utils.SetGlobalProjectSlug(projectSlug)
 
 			scenarioArg := strings.TrimSpace(c.Args().First())
-			useAll := c.Bool("all")
-			if useAll && scenarioArg != "" {
-				return fmt.Errorf("cannot combine --all with a scenario name")
-			}
-			if !useAll && scenarioArg == "" {
-				return usageError(c, "missing scenario — pass a scenario path or use --all")
-			}
 
 			baseURL := utils.GetBaseURL()
 
-			if useAll {
+			if scenarioArg == "" {
 				paths, badManifests, walkErr := scenario.WalkScenarios(projectRoot, cfg.StoragePath)
 				if walkErr != nil {
 					return walkErr
@@ -98,14 +88,26 @@ func PushCommand() *cli.Command {
 				if revErr != nil {
 					return fmt.Errorf("push %s: %w", scenarioPath, revErr)
 				}
-				if cloudDS, ok := cloudDatasets[scenarioPath]; ok && isPushUpToDate(rev.Manifest, cloudDS) {
+				// Also check by remoteScenarioID for renamed scenarios.
+				remoteScenarioID := rev.ScenarioManifest.RemoteScenarioID
+				cloudDS, foundByName := cloudDatasets[scenarioPath]
+				if !foundByName && remoteScenarioID != "" {
+					for _, ds := range cloudDatasets {
+						if ds.ScenarioID == remoteScenarioID {
+							cloudDS = ds
+							foundByName = true
+							break
+						}
+					}
+				}
+				if foundByName && isPushUpToDate(rev.Manifest, cloudDS) {
 					ui.Info("  skip  %s @ %s  (already in cloud)", scenarioPath, rev.RevID)
 					skipped++
 					continue
 				}
 				schemaDir := scenario.SchemaStoreDir(projectRoot, cfg.StoragePath, utils.FingerprintShort(rev.Manifest.SchemaFingerprint))
 				ui.Step("%s @ %s  (schema %s)", scenarioPath, rev.RevID, utils.FingerprintShort(rev.Manifest.SchemaFingerprint))
-				if err := syncOne(schemaDir, rev.DataDir, scenarioPath, rev.RevID, baseURL, token, projectSlug, scenarioPrompt(projectRoot, cfg.StoragePath, scenarioPath)); err != nil {
+				if err := syncOne(schemaDir, rev.DataDir, scenarioPath, rev.RevID, baseURL, token, projectSlug, scenarioPrompt(projectRoot, cfg.StoragePath, scenarioPath), remoteScenarioID); err != nil {
 					return fmt.Errorf("push %s: %w", scenarioPath, err)
 				}
 				pushed++
@@ -124,7 +126,7 @@ func PushCommand() *cli.Command {
 			}
 			schemaDir := scenario.SchemaStoreDir(projectRoot, cfg.StoragePath, utils.FingerprintShort(rev.Manifest.SchemaFingerprint))
 			ui.Step("%s @ %s  (schema %s)", scenarioPath, rev.RevID, utils.FingerprintShort(rev.Manifest.SchemaFingerprint))
-			return syncOne(schemaDir, rev.DataDir, scenarioPath, rev.RevID, baseURL, token, projectSlug, scenarioPrompt(projectRoot, cfg.StoragePath, scenarioPath))
+			return syncOne(schemaDir, rev.DataDir, scenarioPath, rev.RevID, baseURL, token, projectSlug, scenarioPrompt(projectRoot, cfg.StoragePath, scenarioPath), rev.ScenarioManifest.RemoteScenarioID)
 		},
 	}
 }
@@ -153,7 +155,9 @@ func scenarioPrompt(projectRoot, storagePath, scenarioPath string) string {
 // syncOne uploads schema sidecars + revision CSVs for a single scenario.
 // revisionID is sent as `revision=rNNN` so the cloud stores under that label.
 // prompt, when non-empty, is synced to the cloud scenario after the upload.
-func syncOne(schemaDir, dataDir, datasetName, revisionID, baseURL, token, projectSlug, prompt string) error {
+// remoteScenarioID, when non-empty, is sent so the cloud resolves by stable id
+// (making a prior web rename transparent).
+func syncOne(schemaDir, dataDir, datasetName, revisionID, baseURL, token, projectSlug, prompt, remoteScenarioID string) error {
 	start := time.Now()
 	schemaFiles, err := utils.SchemaFiles(schemaDir)
 	if err != nil {
@@ -189,7 +193,7 @@ func syncOne(schemaDir, dataDir, datasetName, revisionID, baseURL, token, projec
 
 	sp = ui.StartSpinner("Uploading...")
 	ui.Debug("POST %s/v1.0/datasets/sync/upload-url?name=%s", baseURL, datasetName)
-	uploadURLResp, err := requestUploadURL(ctx, token, baseURL, datasetName, revisionID, projectSlug)
+	uploadURLResp, err := requestUploadURL(ctx, token, baseURL, datasetName, revisionID, remoteScenarioID, projectSlug)
 	if err != nil {
 		sp.Stop(false, "Upload failed")
 		return err
@@ -201,7 +205,7 @@ func syncOne(schemaDir, dataDir, datasetName, revisionID, baseURL, token, projec
 	sp.Stop(true, "Uploaded")
 
 	sp = ui.StartSpinner("Processing...")
-	result, err := confirmUpload(ctx, token, baseURL, datasetName, uploadURLResp.Path, revisionID, projectSlug)
+	result, err := confirmUpload(ctx, token, baseURL, datasetName, uploadURLResp.Path, revisionID, remoteScenarioID, projectSlug)
 	if err != nil {
 		sp.Stop(false, "Processing failed")
 		return err
@@ -216,9 +220,43 @@ func syncOne(schemaDir, dataDir, datasetName, revisionID, baseURL, token, projec
 		}
 	}
 
+	// Stamp RemoteScenarioID on the scenario manifest so future pushes can
+	// resolve by stable id (making web renames transparent). Best-effort.
+	canonicalName := result.Name
+	if canonicalName == "" {
+		canonicalName = datasetName
+	}
+	if result.ScenarioID != "" {
+		scenarioDir := filepath.Dir(revDir)
+		if sm, smErr := scenario.ReadManifest(scenarioDir); smErr == nil {
+			sm.RemoteScenarioID = result.ScenarioID
+			sm.UpdatedAt = time.Now().UTC()
+			_ = scenario.WriteManifest(scenarioDir, sm)
+		}
+
+		// If the cloud returned a different canonical name (post-rename), rename
+		// the local scenario folder to match. Skip if target already exists.
+		if canonicalName != datasetName {
+			oldScenarioDir := scenarioDir
+			newScenarioDir := filepath.Join(filepath.Dir(scenarioDir), filepath.FromSlash(canonicalName))
+			if _, statErr := os.Stat(newScenarioDir); os.IsNotExist(statErr) {
+				if mvErr := os.MkdirAll(filepath.Dir(newScenarioDir), 0755); mvErr == nil {
+					if mvErr = os.Rename(oldScenarioDir, newScenarioDir); mvErr == nil {
+						ui.Info("  Renamed local scenario folder %q → %q", datasetName, canonicalName)
+						revDir = filepath.Join(newScenarioDir, "revisions", filepath.Base(revDir))
+					} else {
+						ui.Warn("could not rename local folder to %q: %v", canonicalName, mvErr)
+					}
+				}
+			} else {
+				ui.Warn("local folder %q already exists — skipping rename from %q", canonicalName, datasetName)
+			}
+		}
+	}
+
 	// Stamp the local revision with the cloud revision it now mirrors so a
 	// subsequent `seedmancer pull` can skip the download. Best-effort.
-	stampRemoteRevision(revDir, baseURL, token, datasetName, result.FingerprintShort)
+	stampRemoteRevision(revDir, baseURL, token, canonicalName, result.FingerprintShort)
 
 	verb := "Uploaded"
 	if result.Updated {
@@ -230,8 +268,19 @@ func syncOne(schemaDir, dataDir, datasetName, revisionID, baseURL, token, projec
 	ui.KeyValue("  ID:     ", result.ID)
 	ui.KeyValue("  Files:  ", fmt.Sprintf("%d", result.FileCount))
 	fmt.Println()
-	ui.Info("View it at https://seedmancer.dev/dashboard/schemas")
+	ui.Info("View it at %s", scenarioDashboardURL(datasetName))
 	return nil
+}
+
+// scenarioDashboardURL builds the web URL for a scenario's detail page,
+// url-encoding each path segment. Uses resolveDashboardURL so local-dev
+// hosts resolve correctly.
+func scenarioDashboardURL(scenarioPath string) string {
+	segs := strings.Split(scenarioPath, "/")
+	for i, s := range segs {
+		segs[i] = url.PathEscape(s)
+	}
+	return resolveDashboardURL("") + "/dashboard/scenarios/" + strings.Join(segs, "/")
 }
 
 // stampRemoteRevision records the cloud's latest revision id/updatedAt on a
@@ -254,11 +303,14 @@ func stampRemoteRevision(revDir, baseURL, token, datasetName, schemaPrefix strin
 
 // requestUploadURL calls POST /v1.0/datasets/sync/upload-url and returns
 // the presigned storage URL and staging path.
-func requestUploadURL(ctx context.Context, token, baseURL, datasetName, revisionID, projectSlug string) (uploadURLResponse, error) {
+func requestUploadURL(ctx context.Context, token, baseURL, datasetName, revisionID, remoteScenarioID, projectSlug string) (uploadURLResponse, error) {
 	q := url.Values{}
 	q.Set("name", datasetName)
 	if strings.TrimSpace(revisionID) != "" {
 		q.Set("revision", strings.TrimSpace(revisionID))
+	}
+	if strings.TrimSpace(remoteScenarioID) != "" {
+		q.Set("scenarioId", strings.TrimSpace(remoteScenarioID))
 	}
 	endpoint := fmt.Sprintf("%s/v1.0/datasets/sync/upload-url?%s", baseURL, q.Encode())
 
@@ -314,12 +366,15 @@ func putToStorage(ctx context.Context, signedURL string, zipData *bytes.Buffer) 
 }
 
 // confirmUpload calls POST /v1.0/datasets/sync/confirm and returns the result.
-func confirmUpload(ctx context.Context, token, baseURL, datasetName, stagingPath, revisionID, projectSlug string) (syncUploadResult, error) {
+func confirmUpload(ctx context.Context, token, baseURL, datasetName, stagingPath, revisionID, remoteScenarioID, projectSlug string) (syncUploadResult, error) {
 	q := url.Values{}
 	q.Set("name", datasetName)
 	q.Set("path", stagingPath)
 	if strings.TrimSpace(revisionID) != "" {
 		q.Set("revision", strings.TrimSpace(revisionID))
+	}
+	if strings.TrimSpace(remoteScenarioID) != "" {
+		q.Set("scenarioId", strings.TrimSpace(remoteScenarioID))
 	}
 	endpoint := fmt.Sprintf("%s/v1.0/datasets/sync/confirm?%s", baseURL, q.Encode())
 

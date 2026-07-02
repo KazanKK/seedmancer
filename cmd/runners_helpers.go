@@ -21,6 +21,7 @@ import (
 
 type syncUploadResult struct {
 	ID               string `json:"id"`
+	ScenarioID       string `json:"scenarioId"`
 	Name             string `json:"name"`
 	SchemaID         string `json:"schemaId"`
 	Fingerprint      string `json:"fingerprint"`

@@ -22,14 +22,15 @@ import (
 // datasetAPI mirrors the /v1.0/datasets response shape. Only the fields we
 // actually consume are decoded; everything else is ignored by encoding/json.
 type datasetAPI struct {
-	ID        string          `json:"id"`
-	Name      string          `json:"name"`
-	Prompt    string          `json:"prompt"`
-	FileCount int             `json:"fileCount"`
-	TotalSize int64           `json:"totalSize"`
-	CreatedAt string          `json:"createdAt"`
-	UpdatedAt string          `json:"updatedAt"`
-	Schema    *schemaRefShort `json:"schema"`
+	ID         string          `json:"id"`
+	ScenarioID string          `json:"scenarioId"`
+	Name       string          `json:"name"`
+	Prompt     string          `json:"prompt"`
+	FileCount  int             `json:"fileCount"`
+	TotalSize  int64           `json:"totalSize"`
+	CreatedAt  string          `json:"createdAt"`
+	UpdatedAt  string          `json:"updatedAt"`
+	Schema     *schemaRefShort `json:"schema"`
 }
 
 type schemaRefShort struct {
@@ -51,19 +52,14 @@ func PullCommand() *cli.Command {
 	return &cli.Command{
 		Name:      "pull",
 		Aliases:   []string{"fetch"},
-		Usage:     "Download a scenario from the cloud as a new local revision",
+		Usage:     "Download scenarios from the cloud as new local revisions",
 		ArgsUsage: "[scenario]",
-		Description: "Looks up the cloud dataset whose name matches <scenario>, downloads\n" +
-			"it, and writes the result as a new revision under the local\n" +
-			"scenario. Pointers.latest advances to the new revision so\n" +
-			"`seedmancer seed <scenario>` picks it up immediately.\n\n" +
-			"With --all, every locally-known scenario is pulled. Scenarios whose\n" +
-			"local latest already matches the cloud are skipped (diff-only).",
+		Description: "When called with a scenario name, downloads that scenario from the\n" +
+			"cloud and writes it as a new local revision. Pointers.latest advances\n" +
+			"so `seedmancer seed <scenario>` picks it up immediately.\n\n" +
+			"When called without arguments, every locally-known scenario is pulled.\n" +
+			"Scenarios whose local latest already matches the cloud are skipped.",
 		Flags: []cli.Flag{
-			&cli.BoolFlag{
-				Name:  "all",
-				Usage: "Pull every locally-known scenario, skipping those already up to date",
-			},
 			&cli.StringFlag{
 				Name:  "token",
 				Usage: "API token (falls back to SEEDMANCER_API_TOKEN env var, then ~/.seedmancer/credentials)",
@@ -75,21 +71,14 @@ func PullCommand() *cli.Command {
 		},
 		Action: func(c *cli.Context) error {
 			scenarioArg := strings.TrimSpace(c.Args().First())
-			useAll := c.Bool("all")
-
-			if useAll && scenarioArg != "" {
-				return fmt.Errorf("cannot combine --all with a scenario name")
-			}
-			if !useAll && scenarioArg == "" {
-				return usageError(c, "missing required argument: <scenario> (or use --all)")
-			}
 
 			token, err := utils.ResolveAPIToken(c.String("token"))
 			if err != nil {
 				return err
 			}
 
-			if useAll {
+			if scenarioArg == "" {
+				// Pull all locally-known scenarios.
 				configPath, cfgErr := utils.FindConfigFile()
 				if cfgErr != nil {
 					return cfgErr
@@ -132,6 +121,7 @@ func PullCommand() *cli.Command {
 				return nil
 			}
 
+			// Pull a single named scenario.
 			start := time.Now()
 			out, err := RunFetch(c.Context, FetchInput{
 				Scenario: scenarioArg,
@@ -229,6 +219,75 @@ func findRemoteDataset(baseURL, token, datasetName, schemaPrefix string) (datase
 	}
 }
 
+// findRemoteDatasetByIDOrName looks up a dataset by stable scenario id first
+// (when remoteScenarioID is non-empty) and falls back to name-based lookup.
+// This makes a web rename transparent to the CLI.
+func findRemoteDatasetByIDOrName(baseURL, token, datasetName, remoteScenarioID string) (datasetAPI, error) {
+	reqURL := fmt.Sprintf("%s/v1.0/datasets", baseURL)
+	req, err := http.NewRequest("GET", reqURL, nil)
+	if err != nil {
+		return datasetAPI{}, fmt.Errorf("creating request: %v", err)
+	}
+	req.Header.Set("Authorization", utils.BearerAPIToken(token))
+	utils.ApplyProjectHeader(req, "")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return datasetAPI{}, fmt.Errorf("making request: %v", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return datasetAPI{}, fmt.Errorf("reading response body: %v", err)
+	}
+	if resp.StatusCode == http.StatusUnauthorized {
+		return datasetAPI{}, utils.ErrInvalidAPIToken
+	}
+	if resp.StatusCode != http.StatusOK {
+		return datasetAPI{}, fmt.Errorf("API request failed: %s - %s", resp.Status, string(body))
+	}
+	var dsResp datasetListResponse
+	if err := json.Unmarshal(body, &dsResp); err != nil {
+		return datasetAPI{}, fmt.Errorf("parsing response JSON: %v", err)
+	}
+
+	// Try stable id match first.
+	if remoteScenarioID != "" {
+		for _, d := range dsResp.Datasets {
+			if d.ScenarioID == remoteScenarioID {
+				return d, nil
+			}
+		}
+	}
+	// Fall back to name match (first push or id not yet stamped).
+	var hits []datasetAPI
+	for _, d := range dsResp.Datasets {
+		if d.Name == datasetName {
+			hits = append(hits, d)
+		}
+	}
+	switch len(hits) {
+	case 0:
+		return datasetAPI{}, fmt.Errorf(
+			"no remote scenario named %q\n  Run `seedmancer push %s` first or check the spelling",
+			datasetName, datasetName,
+		)
+	case 1:
+		return hits[0], nil
+	default:
+		var fps []string
+		for _, h := range hits {
+			if h.Schema != nil {
+				fps = append(fps, h.Schema.FingerprintShort)
+			}
+		}
+		return datasetAPI{}, fmt.Errorf(
+			"scenario %q exists under multiple schemas (%s) — rename the duplicates in the dashboard so ids are unique",
+			datasetName, strings.Join(fps, ", "),
+		)
+	}
+}
+
 // listRemoteDatasets fetches every scenario on the connected cloud API and
 // indexes them by scenario path (dataset name). Used by push --all to decide
 // which local scenarios still need uploading.
@@ -265,6 +324,8 @@ func listRemoteDatasets(baseURL, token string) (map[string]datasetAPI, error) {
 		return nil, fmt.Errorf("parsing response JSON: %v", err)
 	}
 
+	// Index by Name for backward-compat. ScenarioID-based matching is done
+	// inline in push --all by iterating the map when name lookup misses.
 	out := make(map[string]datasetAPI, len(dsResp.Datasets))
 	for _, d := range dsResp.Datasets {
 		out[d.Name] = d

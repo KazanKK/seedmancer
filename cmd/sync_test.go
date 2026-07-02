@@ -79,38 +79,14 @@ func TestPushCommand_allPushesEachScenarioLatest(t *testing.T) {
 		ErrWriter: io.Discard,
 		Commands: []*cli.Command{PushCommand()},
 	}
-	if err := app.Run([]string{"seedmancer", "push", "--all", "--token", "tok_test"}); err != nil {
-		t.Fatalf("push --all: %v", err)
+	if err := app.Run([]string{"seedmancer", "push", "--token", "tok_test"}); err != nil {
+		t.Fatalf("push: %v", err)
 	}
 	if len(uploadNames) != 2 {
 		t.Fatalf("expected 2 upload-url calls, got %v", uploadNames)
 	}
 	if uploadNames[0] != "alpha" || uploadNames[1] != "beta" {
 		t.Fatalf("unexpected push order: %v", uploadNames)
-	}
-}
-
-func TestPushCommand_allRejectsExtraArg(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "seedmancer.yaml"), []byte("storage_path: .seedmancer\n"), 0600); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-	prev, _ := os.Getwd()
-	t.Cleanup(func() { _ = os.Chdir(prev) })
-	if err := os.Chdir(dir); err != nil {
-		t.Fatalf("chdir: %v", err)
-	}
-	t.Setenv("HOME", dir)
-
-	app := &cli.App{
-		Name:      "seedmancer",
-		Writer:    io.Discard,
-		ErrWriter: io.Discard,
-		Commands:  []*cli.Command{PushCommand()},
-	}
-	err := app.Run([]string{"seedmancer", "push", "--all", "nope", "--token", "tok_test"})
-	if err == nil {
-		t.Fatal("expected error when combining --all with scenario name")
 	}
 }
 
@@ -219,8 +195,8 @@ func TestPushCommand_allSkipsOnlyWhenCloudMatches(t *testing.T) {
 		ErrWriter: io.Discard,
 		Commands:  []*cli.Command{PushCommand()},
 	}
-	if err := app.Run([]string{"seedmancer", "push", "--all", "--token", "tok_test"}); err != nil {
-		t.Fatalf("push --all: %v", err)
+	if err := app.Run([]string{"seedmancer", "push", "--token", "tok_test"}); err != nil {
+		t.Fatalf("push: %v", err)
 	}
 	if len(uploadNames) != 1 || uploadNames[0] != "beta" {
 		t.Fatalf("expected only beta to push, got %v", uploadNames)
@@ -302,8 +278,8 @@ func TestPushCommand_allPushesWhenStaleRemoteID(t *testing.T) {
 		ErrWriter: io.Discard,
 		Commands:  []*cli.Command{PushCommand()},
 	}
-	if err := app.Run([]string{"seedmancer", "push", "--all", "--token", "tok_test"}); err != nil {
-		t.Fatalf("push --all: %v", err)
+	if err := app.Run([]string{"seedmancer", "push", "--token", "tok_test"}); err != nil {
+		t.Fatalf("push: %v", err)
 	}
 	if len(uploadNames) != 1 || uploadNames[0] != "alpha" {
 		t.Fatalf("expected alpha to push despite stale remoteId, got %v", uploadNames)

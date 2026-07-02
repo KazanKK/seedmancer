@@ -20,6 +20,11 @@ type Manifest struct {
 	// by generate (when no prompt is passed) and refresh (as AI context), and
 	// syncs with the cloud scenarios.prompt column on push/pull.
 	Prompt string `json:"prompt,omitempty"`
+	// RemoteScenarioID is the cloud scenarios.id UUID for this scenario.
+	// Stamped on the first successful push/pull. Used to resolve the scenario
+	// by stable id on subsequent pushes so a web rename is transparent to the
+	// CLI (the cloud's current name is authoritative once an id is known).
+	RemoteScenarioID string `json:"remoteScenarioId,omitempty"`
 }
 
 // RevisionManifest is the per-revision metadata stored at

@@ -233,7 +233,6 @@ func annotateEntriesWithDBStatus(entries []listEntry, env, dbURL string) ([]list
 	}
 
 	tryUpdateSchemaHistory(projectRoot, cfg.StoragePath, liveFP)
-	reportLiveSchema(liveFP)
 
 	liveShort := utils.FingerprintShort(liveFP)
 

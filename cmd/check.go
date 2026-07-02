@@ -172,7 +172,6 @@ func RunCheck(_ context.Context, in CheckInput) (CheckOutput, error) {
 	}
 
 	tryUpdateSchemaHistory(projectRoot, cfg.StoragePath, currentFP)
-	reportLiveSchema(currentFP)
 
 	out := CheckOutput{
 		Scenario:      scenarioPath,

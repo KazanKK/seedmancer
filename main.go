@@ -168,16 +168,11 @@ func main() {
 			ui.PrintLoginHint()
 		case errors.Is(err, utils.ErrInvalidAPIToken):
 			if src := utils.LastTokenSource(); src != "" {
-				ui.Error("%v (token came from %s).", err, src)
-				if src == utils.TokenSourceEnv {
-					ui.Info("Update SEEDMANCER_API_TOKEN or unset it and run `seedmancer login`.")
-				} else if src == utils.TokenSourceCredentials {
-					ui.Info("Your saved token may be expired. Run `seedmancer login` to refresh it.")
-				}
+				ui.PrintInvalidTokenHint(src)
 			} else {
 				ui.Error("%v — sign in again.", err)
+				ui.PrintLoginHint()
 			}
-			ui.PrintLoginHint()
 		default:
 			ui.Error("%v", err)
 		}

@@ -18,9 +18,13 @@
   "bin": {
     "seedmancer": "./bin/seedmancer.js"
   },
+  "scripts": {
+    "postinstall": "node scripts/postinstall.js"
+  },
   "files": [
     "bin",
     "dist",
+    "scripts",
     "README.md"
   ],
   "engines": {

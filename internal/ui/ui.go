@@ -103,6 +103,38 @@ func PrintUpdateNotice(current, latest, url string) {
 	fmt.Fprintf(os.Stderr, "  %s %s\n", color(dim, "Update:"), url)
 }
 
+// PrintInvalidTokenHint renders a targeted, source-aware error when a token
+// exists but was rejected by the API (HTTP 401). It deliberately avoids
+// "not signed in" copy because the user IS supplying a token — the token
+// itself is the problem, and the fix depends on where it came from.
+//
+// source is the human-readable label returned by utils.LastTokenSource.
+func PrintInvalidTokenHint(source string) {
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintf(os.Stderr, "%s %s\n", color(red, "✗"), color(bold, "API token invalid or expired."))
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintf(os.Stderr, "  %s %s\n", color(dim, "Token source:"), source)
+	fmt.Fprintln(os.Stderr)
+
+	switch {
+	case strings.Contains(source, "SEEDMANCER_API_TOKEN"):
+		fmt.Fprintf(os.Stderr, "  %s\n", color(dim, "To fix:"))
+		fmt.Fprintf(os.Stderr, "    %s\n", color(cyan, "export SEEDMANCER_API_TOKEN=<valid-token>"))
+		fmt.Fprintln(os.Stderr)
+		fmt.Fprintf(os.Stderr, "  %s\n", color(dim, "Or unset it to fall back to your saved login:"))
+		fmt.Fprintf(os.Stderr, "    %s\n", color(cyan, "unset SEEDMANCER_API_TOKEN"))
+	case strings.Contains(source, "credentials"):
+		fmt.Fprintf(os.Stderr, "  %s\n", color(dim, "Your saved token may be expired. Refresh it:"))
+		fmt.Fprintf(os.Stderr, "    %s\n", color(green, "seedmancer login"))
+	default:
+		fmt.Fprintf(os.Stderr, "  %s\n", color(dim, "The --token value was rejected — double-check it."))
+	}
+
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintf(os.Stderr, "  %s %s\n", color(dim, "Manage tokens:"), "https://seedmancer.dev/dashboard/settings")
+	fmt.Fprintln(os.Stderr)
+}
+
 // PrintLoginHint renders the "how to sign in" guide shown whenever a command
 // cannot resolve an API token. Keeping this in one place guarantees every
 // command (generate, push, pull, list, schemas) shows the exact same copy
